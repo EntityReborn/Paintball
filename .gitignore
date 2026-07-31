@@ -1,0 +1,10 @@
+node_modules/
+
+# screenshots the test driver writes on every run
+tests/shots/
+
+# scratch
+*.tmp.js
+*.log
+.DS_Store
+Thumbs.db

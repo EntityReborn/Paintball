@@ -1,0 +1,99 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0b0e13; }
+body { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: #e6edf3; }
+canvas { display: block; position: fixed; inset: 0; }
+
+#hud { position: fixed; inset: 0; pointer-events: none; z-index: 5; }
+
+#crosshair {
+  position: absolute; left: 50%; top: 50%;
+  width: 22px; height: 22px; transform: translate(-50%, -50%);
+}
+#crosshair div {
+  position: absolute; background: rgba(255,255,255,.85);
+  box-shadow: 0 0 3px rgba(0,0,0,.9);
+}
+.ch-v { width: 2px; height: 7px; left: 10px; }
+.ch-h { height: 2px; width: 7px; top: 10px; }
+#ch-t { top: 0 }  #ch-b { bottom: 0 }
+#ch-l { left: 0 } #ch-r { right: 0 }
+#ch-dot { width: 2px; height: 2px; left: 10px; top: 10px; opacity: .6; }
+
+/* sighted down the barrel: pull the arms in to a fine mark */
+#crosshair { transition: transform .12s ease-out; }
+#crosshair.sighted { transform: translate(-50%, -50%) scale(.45); }
+#crosshair.sighted .ch-v, #crosshair.sighted .ch-h { opacity: .35; }
+#crosshair.sighted #ch-dot { opacity: 1; }
+
+#hitmarker {
+  position: absolute; left: 50%; top: 50%; width: 26px; height: 26px;
+  transform: translate(-50%,-50%) rotate(45deg); opacity: 0;
+}
+#hitmarker div { position: absolute; background: #ff4d4d; }
+#hitmarker .a { width: 2px; height: 9px; left: 12px; top: 0 }
+#hitmarker .b { width: 2px; height: 9px; left: 12px; bottom: 0 }
+#hitmarker .c { height: 2px; width: 9px; top: 12px; left: 0 }
+#hitmarker .d { height: 2px; width: 9px; top: 12px; right: 0 }
+
+#stats {
+  position: absolute; top: 18px; left: 20px;
+  font-size: 13px; line-height: 1.7; letter-spacing: .06em;
+  text-shadow: 0 2px 6px rgba(0,0,0,.8); white-space: pre;
+}
+#stats .k { color: #7d8da3; }
+#stats .v { color: #fff; font-weight: 700; }
+#stats .score-line { margin-bottom: 4px; }
+#stats .v.big { font-size: 26px; letter-spacing: .04em; vertical-align: -3px; }
+#stats .v.up { color: #8ef2a0; text-shadow: 0 0 14px rgba(126,231,135,.7); }
+#stats .v.down { color: #ff7676; text-shadow: 0 0 14px rgba(255,107,107,.7); }
+#stats .v { transition: color .18s, text-shadow .18s; }
+
+#ammo {
+  position: absolute; right: 26px; bottom: 22px; text-align: right;
+  text-shadow: 0 2px 6px rgba(0,0,0,.8);
+}
+#ammo .big { font-size: 40px; font-weight: 800; letter-spacing: .02em; line-height: 1; }
+#ammo .dim { color: #7d8da3; }
+#ammo .sub { font-size: 12px; color: #7d8da3; margin-top: 4px; letter-spacing: .12em; }
+#ammo.empty .big { color: #ff5555; }
+#reloading { color: #ffcc44; font-size: 12px; letter-spacing: .18em; height: 14px; }
+
+#toast {
+  position: absolute; left: 50%; top: 22%; transform: translateX(-50%);
+  font-size: 26px; font-weight: 800; letter-spacing: .1em;
+  color: #7ee787; text-shadow: 0 3px 12px rgba(0,0,0,.9);
+  opacity: 0; transition: opacity .3s;
+}
+
+#menu {
+  position: fixed; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 22px;
+  background: radial-gradient(ellipse at center, rgba(14,20,30,.86), rgba(5,7,11,.96));
+  backdrop-filter: blur(3px); cursor: pointer; z-index: 10;
+}
+#menu h1 {
+  font-size: 46px; letter-spacing: .22em; font-weight: 800;
+  background: linear-gradient(180deg, #fff, #6ea8fe);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+#menu .tag { color: #7d8da3; font-size: 13px; letter-spacing: .2em; margin-top: -14px; }
+#menu .play {
+  padding: 13px 34px; border: 1px solid #2f4d7a; border-radius: 3px;
+  background: rgba(60,110,190,.18); color: #cfe2ff;
+  font-size: 15px; letter-spacing: .18em; font-weight: 700;
+}
+#menu:hover .play { background: rgba(60,110,190,.32); border-color: #4d78b8; }
+#keys { display: grid; grid-template-columns: auto auto; gap: 7px 18px; font-size: 12.5px; color: #9db0c8; }
+#keys b { color: #fff; font-weight: 700; }
+#menu .score { color: #7ee787; font-size: 14px; letter-spacing: .12em; height: 18px; }
+.hidden { display: none !important; }
+
+/* [hidden] must win over the display rule below, or the banner covers the game */
+#fatal[hidden] { display: none; }
+#fatal {
+  position: fixed; inset: 0; z-index: 20; display: flex;
+  flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  background: #0b0e13; text-align: center; padding: 30px;
+}
+#fatal h2 { color: #ff6b6b; letter-spacing: .1em; }
+#fatal p { color: #9db0c8; max-width: 560px; line-height: 1.6; font-size: 14px; }

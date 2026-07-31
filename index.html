@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paintball — FPS Range</title>
+<link rel="stylesheet" href="src/style.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+
+<div id="hud">
+  <div id="crosshair">
+    <div class="ch-v" id="ch-t"></div>
+    <div class="ch-v" id="ch-b"></div>
+    <div class="ch-h" id="ch-l"></div>
+    <div class="ch-h" id="ch-r"></div>
+    <div id="ch-dot"></div>
+  </div>
+  <div id="hitmarker"><div class="a"></div><div class="b"></div><div class="c"></div><div class="d"></div></div>
+
+  <div id="stats">
+    <div class="score-line"><span class="k">SCORE </span><span class="v big" id="s-score">0</span></div>
+    <div><span class="k">LEVEL </span><span class="v" id="s-level">1</span></div>
+    <div><span class="k">NPCS  </span><span class="v" id="s-npcs">0</span></div>
+    <div><span class="k">TARGETS </span><span class="v" id="s-left">0</span></div>
+  </div>
+
+  <div id="ammo">
+    <div id="reloading"></div>
+    <div class="big"><span id="s-mag">12</span> <span class="dim">/ 12</span></div>
+    <div class="sub">R TO RELOAD</div>
+  </div>
+
+  <div id="toast"></div>
+</div>
+
+<div id="menu">
+  <h1>PAINTBALL</h1>
+  <div class="tag">FIRST PERSON SHOOTING RANGE</div>
+  <div class="score" id="m-score"></div>
+  <div class="play">CLICK TO PLAY</div>
+  <div id="keys">
+    <b>W A S D</b><span>move</span>
+    <b>MOUSE</b><span>look</span>
+    <b>LEFT CLICK</b><span>fire</span>
+    <b>RIGHT CLICK</b><span>zoom</span>
+    <b>SHIFT</b><span>sprint</span>
+    <b>SPACE</b><span>jump</span>
+    <b>R</b><span>reload</span>
+    <b>ESC</b><span>pause</span>
+  </div>
+</div>
+
+<div id="fatal" hidden>
+  <h2>Could not start</h2>
+  <p id="fatal-msg"></p>
+</div>
+
+<script src="vendor/three.min.js"></script>
+<script src="src/figure.js"></script>
+<script src="src/audio.js"></script>
+<script src="src/world.js"></script>
+<script src="src/effects.js"></script>
+<script src="src/targets.js"></script>
+<script src="src/weapon.js"></script>
+<script src="src/npcs.js"></script>
+<script src="src/game.js"></script>
+<script src="src/net.js"></script>
+<script src="src/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "name": "paintball",
+  "version": "1.0.0",
+  "description": "Browser first-person shooting range built on three.js",
+  "private": true,
+  "scripts": {
+    "start": "node server/index.js",
+    "serve": "python -m http.server 8123",
+    "test": "node --test tests/server.test.js && node tests/verify.js && node tests/multiplayer.js",
+    "test:server": "node --test tests/server.test.js",
+    "test:browser": "node tests/verify.js",
+    "test:mp": "node tests/multiplayer.js",
+    "test:headful": "node tests/verify.js --headful"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^25.4.0"
+  },
+  "dependencies": {
+    "ws": "^8.21.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

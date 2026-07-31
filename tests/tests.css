@@ -1,0 +1,24 @@
+* { box-sizing: border-box; }
+  body {
+    margin: 0; background: #0b0e13; color: #e6edf3;
+    font: 13px/1.6 ui-monospace, Menlo, Consolas, monospace;
+    display: grid; grid-template-columns: minmax(420px, 1fr) 520px; height: 100vh;
+  }
+  #left { overflow-y: auto; padding: 18px 22px; }
+  #right { border-left: 1px solid #222a35; padding: 18px; display: flex; flex-direction: column; gap: 12px; }
+  h1 { font-size: 15px; letter-spacing: .18em; margin: 0 0 4px; }
+  #summary { font-size: 15px; font-weight: 700; letter-spacing: .1em; margin-bottom: 14px; color: #7d8da3; }
+  #summary.good { color: #7ee787; }
+  #summary.bad { color: #ff6b6b; }
+  .suite { margin: 16px 0 6px; color: #6ea8fe; letter-spacing: .14em; font-weight: 700; font-size: 12px; }
+  .test { position: relative; padding: 2px 60px 2px 22px; color: #9db0c8; }
+  .test .mark { position: absolute; left: 2px; }
+  .test.pass { color: #b8c7d9; } .test.pass .mark { color: #7ee787; }
+  .test.fail { color: #ffb3b3; } .test.fail .mark { color: #ff6b6b; }
+  .test.skip { color: #7d8da3; } .test.skip .mark { color: #7d8da3; }
+  .test .ms { position: absolute; right: 4px; top: 2px; color: #4d5866; font-size: 11px; }
+  .why { color: #ff8a8a; font-size: 12px; padding: 2px 0 4px 0; white-space: pre-wrap; }
+  #stage { width: 100%; aspect-ratio: 16 / 10; background: #000; position: relative; overflow: hidden; }
+  #stage canvas { width: 100% !important; height: 100% !important; display: block; }
+  .label { color: #7d8da3; font-size: 11px; letter-spacing: .14em; }
+  #boot-frame { width: 100%; aspect-ratio: 16 / 10; border: 1px solid #222a35; background: #000; }
