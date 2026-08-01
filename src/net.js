@@ -224,11 +224,15 @@ PB.createNet = function (opts) {
   function remoteFor(id) {
     var r = remotes.get(id);
     if (r) return r;
-    var hue = (id * 0.37 + 0.55) % 1;
+    // players sit in a cool, high-contrast band; the NPCs get everything else
+    var hue = 0.5 + ((id * 0.13) % 0.22);
+    var accent = new THREE.Color().setHSL(hue, 0.9, 0.6);
     var fig = PB.buildFigure({
       geo: figureGeo, shadows: !!game.cfg.shadows, name: 'remote',
-      color: new THREE.Color().setHSL(hue, 0.6, 0.55),
-      trim: new THREE.Color().setHSL(hue, 0.7, 0.36),
+      variant: 'player',
+      color: new THREE.Color().setHSL(hue, 0.75, 0.62),
+      trim: new THREE.Color().setHSL(hue, 0.85, 0.4),
+      accent: accent,
     });
     game.scene.add(fig.root);
     r = { fig: fig, phase: 0, last: null };

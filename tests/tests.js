@@ -1840,6 +1840,81 @@ describe('Score indicators', function () {
   });
 });
 
+describe('Telling players from NPCs', function () {
+  function build(variant) {
+    return PB.buildFigure({
+      geo: PB.figureGeometry(), shadows: false, variant: variant,
+      color: new THREE.Color(0.5, 0.5, 0.5), trim: new THREE.Color(0.3, 0.3, 0.3),
+      accent: new THREE.Color(0, 0.8, 1),
+    });
+  }
+
+  it('gives a player gear an NPC does not have', function () {
+    var player = build('player');
+    var npc = build('npc');
+    assert.ok(player.isPlayer, 'the player variant did not take');
+    assert.ok(!npc.isPlayer, 'the NPC came out as a player');
+    assert.greater(player.extras.length, 3, 'a player has no distinguishing parts');
+    assert.equal(npc.extras.length, 0, 'an NPC picked up player gear');
+  });
+
+  it('marks a player with something visible over their head', function () {
+    var player = build('player');
+    assert.ok(player.marker, 'no overhead marker');
+    assert.greater(player.marker.position.y, 2, 'the marker is not above the head');
+    assert.ok(!build('npc').marker, 'an NPC has an overhead marker');
+  });
+
+  it('makes the two silhouettes different', function () {
+    var player = build('player');
+    var npc = build('npc');
+    player.root.updateMatrixWorld(true);
+    npc.root.updateMatrixWorld(true);
+    // only what you can actually see: the hitbox is invisible but 0.55 deep,
+    // and it would swamp the comparison
+    function visibleBox(root) {
+      var box = new THREE.Box3();
+      root.traverse(function (o) {
+        if (o.isMesh && o.visible) box.expandByObject(o);
+      });
+      return box;
+    }
+    var pBox = visibleBox(player.root);
+    var nBox = visibleBox(npc.root);
+    assert.greater(pBox.max.y - nBox.max.y, 0.2,
+                   'a player is no taller than an NPC, marker included');
+    assert.greater(pBox.max.z - nBox.max.z, 0.05, 'a player has no pack on their back');
+  });
+
+  it('animates the marker so it catches the eye', function () {
+    var player = build('player');
+    PB.poseFigure(player, { phase: 0, grounded: true, moving: true });
+    var y0 = player.marker.position.y;
+    var r0 = player.marker.rotation.y;
+    PB.poseFigure(player, { phase: 2, grounded: true, moving: true });
+    assert.ok(Math.abs(player.marker.position.y - y0) > 0.001, 'the marker does not bob');
+    assert.ok(Math.abs(player.marker.rotation.y - r0) > 0.001, 'the marker does not turn');
+  });
+
+  it('keeps NPC colours out of the band players use', function () {
+    freshLevel();
+    var hsl = {};
+    g.npcs.forEach(function (n, i) {
+      n.torso.material.color.getHSL(hsl);
+      assert.ok(hsl.h < 0.45 || hsl.h > 0.8,
+                'npc ' + i + ' is hue ' + hsl.h.toFixed(2) + ', inside the player band');
+    });
+  });
+
+  it('poses a player figure the same way it poses an NPC', function () {
+    var player = build('player');
+    PB.poseFigure(player, { phase: 1.2, grounded: true, moving: true });
+    assert.ok(Math.abs(player.legL.rotation.x) > 0.1, 'the legs did not swing');
+    PB.poseFigure(player, { phase: 1.2, grounded: false, vy: 5 });
+    assert.less(player.legL.rotation.x, 0, 'the legs did not tuck in the air');
+  });
+});
+
 describe('Statistics', function () {
   it('starts a fresh count', function () {
     freshLevel();

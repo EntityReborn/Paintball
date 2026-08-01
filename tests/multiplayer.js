@@ -196,6 +196,28 @@ async function advance(page, seconds, timeout = 60000) {
           Math.hypot(boSees.x - boSawBefore.x, boSees.z - boSawBefore.z) > 1.5,
           boSees ? `now at ${boSees.x.toFixed(1)}, ${boSees.z.toFixed(1)}` : 'no remote body');
 
+    const looks = await bo.evaluate(() => {
+      const r = [...net.remotes.values()][0];
+      const npc = game.npcs[0];
+      const hsl = {};
+      const npcHsl = {};
+      r.fig.torso.material.color.getHSL(hsl);
+      npc.torso.material.color.getHSL(npcHsl);
+      return {
+        playerIsMarked: !!r.fig.marker,
+        playerGear: r.fig.extras ? r.fig.extras.length : 0,
+        npcMarked: !!(npc.fig && npc.fig.marker),
+        playerHue: +hsl.h.toFixed(2),
+        npcHue: +npcHsl.h.toFixed(2),
+      };
+    });
+    check('a remote player looks like a player, not an NPC',
+          looks.playerIsMarked && looks.playerGear > 3 && !looks.npcMarked,
+          `player has ${looks.playerGear} distinguishing parts, NPC has none`);
+    check('players and NPCs use separate colour bands',
+          Math.abs(looks.playerHue - looks.npcHue) > 0.15,
+          `player hue ${looks.playerHue}, NPC hue ${looks.npcHue}`);
+
     const drift = Math.hypot(boSees.x - anaAfter.x, boSees.z - anaAfter.z);
     check("bo's copy of ana is in the right place", drift < 1.5,
           `${drift.toFixed(2)}u from where ana really is`);

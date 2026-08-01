@@ -292,8 +292,11 @@ async function shot(page, name) {
   check('reload refills the magazine', reloaded === 12, `magazine ${reloaded}`);
 
   /* --------------------------------------------------- 7. mouse looking */
-  const yaw0 = await page.evaluate('game.yawObj.rotation.y');
+  // settle the pointer first, then measure: taking yaw before both moves means
+  // the trip out and back cancel whenever the cursor did not start at centre
   await page.mouse.move(640, 400);
+  await sleep(80);
+  const yaw0 = await page.evaluate('game.yawObj.rotation.y');
   await page.mouse.move(900, 400);          // real movement events
   await sleep(120);
   const yaw1 = await page.evaluate('game.yawObj.rotation.y');
@@ -305,14 +308,21 @@ async function shot(page, name) {
   const drift = await page.evaluate(async () => {
     const t = game.targets.find(t => t.wander && t.alive);
     if (!t) return null;
-    const from = t.mesh.position.clone();
+    // path length, not displacement: a drifter that bounces off cover can come
+    // back to roughly where it started
+    let travelled = 0;
+    let last = t.mesh.position.clone();
     const start = game.state.elapsed;
-    while (game.state.elapsed - start < 2.5) await new Promise(r => setTimeout(r, 50));
-    return { moved: +t.mesh.position.distanceTo(from).toFixed(2),
+    while (game.state.elapsed - start < 2.5) {
+      await new Promise(r => setTimeout(r, 50));
+      travelled += Math.hypot(t.mesh.position.x - last.x, t.mesh.position.z - last.z);
+      last.copy(t.mesh.position);
+    }
+    return { moved: +travelled.toFixed(2),
              drifters: game.targets.filter(t => t.wander).length };
   });
   check('some targets drift around the level', !!drift && drift.moved > 0.8,
-        drift ? `${drift.drifters} drifters, one moved ${drift.moved}u` : 'no drifting targets');
+        drift ? `${drift.drifters} drifters, one travelled ${drift.moved}u` : 'no drifting targets');
 
   const miss = await page.evaluate(async () => {
     game.state.score = 500;

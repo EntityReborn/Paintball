@@ -419,6 +419,57 @@ test('the rewind cannot reach through cover', () => {
   }
 });
 
+test('the level turns over when a shot breaks the last target', () => {
+  // the NPC path checks the level for itself; the target path did not, so an
+  // arena cleared by breaking the last target just sat there empty
+  const room = new Room({ seed: 55 });
+  const g = room.game;
+  const p = room.join('ana');
+  const level0 = g.state.level;
+  const THREE = globalThis.THREE;
+
+  g.npcs.slice().forEach(n => { if (n.alive) g.knockDownNPC(n); });
+  assert.equal(g.npcsAlive(), 0, 'NPCs still up');
+  assert.equal(g.state.level, level0, 'ended before the targets were cleared');
+
+  // break all but one by hand, then shoot the last one through the server
+  const last = g.targets.filter(t => t.alive).pop();
+  g.targets.forEach(t => {
+    if (t.alive && t !== last) g.breakTarget(t, new THREE.Vector3(0, 1, 0));
+  });
+  assert.equal(g.aliveCount(), 1, 'expected one target left');
+
+  assert.ok(standClear(room, p, last.mesh.position), 'no clear line to the last target');
+  const res = room.applyShot(p.id, aimedAt(room, p, last.mesh.position));
+  assert.ok(res.ok, res.reason);
+  assert.equal(res.event.kind, 'target', `hit a ${res.event.kind}`);
+  assert.equal(g.state.level, level0 + 1, 'the last target did not finish the level');
+  assert.equal(g.npcsAlive(), g.npcs.length, 'the new level has bodies in it');
+  assert.equal(g.aliveCount(), g.cfg.targetsPerLevel, 'the new level has no targets');
+});
+
+test('clearing the arena tells every client about the new level', () => {
+  const sent = [];
+  const room = new Room({ seed: 55, onBroadcast: m => sent.push(m) });
+  const g = room.game;
+  const p = room.join('ana');
+  const THREE = globalThis.THREE;
+
+  g.npcs.slice().forEach(n => { if (n.alive) g.knockDownNPC(n); });
+  const last = g.targets.filter(t => t.alive).pop();
+  g.targets.forEach(t => {
+    if (t.alive && t !== last) g.breakTarget(t, new THREE.Vector3(0, 1, 0));
+  });
+  assert.ok(standClear(room, p, last.mesh.position));
+  room.applyShot(p.id, aimedAt(room, p, last.mesh.position));
+
+  const levelMsgs = sent.filter(m => m.t === 'levelStart');
+  assert.equal(levelMsgs.length, 1, `expected one levelStart, got ${levelMsgs.length}`);
+  assert.equal(levelMsgs[0].level, 2, 'wrong level number');
+  assert.equal(levelMsgs[0].targets.length, g.cfg.targetsPerLevel, 'no targets in the message');
+  assert.equal(levelMsgs[0].npcs, g.npcs.length, 'wrong NPC count in the message');
+});
+
 /* --------------------------------------------------------------- server */
 test('the http server serves the client and a health check', async () => {
   process.env.PORT = '0';

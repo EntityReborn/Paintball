@@ -14,6 +14,7 @@ PB.buildFigure = function (opts) {
   var THREE = global.THREE;
   var shadows = opts.shadows !== false;
   var geo = opts.geo || PB.figureGeometry();
+  var isPlayer = opts.variant === 'player';
 
   var body = new THREE.MeshStandardMaterial({
     color: opts.color, roughness: 0.75, flatShading: true,
@@ -57,10 +58,61 @@ PB.buildFigure = function (opts) {
   hitbox.visible = false;
   root.add(hitbox);
 
+  var materials = [body, trim];
+  var extras = [];
+
+  /* A player has to be readable as a player at a glance — the same box body in
+   * a different colour is not enough when NPCs come in every hue. Players get
+   * a visor, a pack on the back, a weapon in hand and a marker overhead. */
+  if (isPlayer) {
+    var visorMat = new THREE.MeshStandardMaterial({
+      color: 0x101820, roughness: 0.25, metalness: 0.6,
+      emissive: opts.accent || 0x39d0ff, emissiveIntensity: 0.45,
+    });
+    var gearMat = new THREE.MeshStandardMaterial({
+      color: 0x1c222c, roughness: 0.8, flatShading: true,
+    });
+    materials.push(visorMat, gearMat);
+
+    var visor = new THREE.Mesh(geo.visor, visorMat);
+    visor.position.set(0, 1.63, -0.15);
+    root.add(visor);
+    extras.push(visor);
+
+    var pack = new THREE.Mesh(geo.pack, gearMat);
+    pack.position.set(0, 1.22, 0.2);
+    pack.castShadow = shadows;
+    root.add(pack);
+    extras.push(pack);
+
+    // carried weapon, held out in front in the right hand
+    var held = new THREE.Mesh(geo.weapon, gearMat);
+    held.position.set(0, -0.32, -0.26);
+    armR.add(held);
+    extras.push(held);
+
+    // a floating marker so a player reads as one across the arena
+    var markMat = new THREE.MeshBasicMaterial({
+      color: opts.accent || 0x39d0ff, transparent: true, opacity: 0.85,
+      depthTest: false,
+    });
+    materials.push(markMat);
+    var mark = new THREE.Mesh(geo.marker, markMat);
+    mark.position.y = 2.25;
+    mark.renderOrder = 4;
+    root.add(mark);
+    extras.push(mark);
+
+    root.userData.marker = mark;
+  }
+
   return {
     root: root, torso: torso, head: head,
     armL: armL, armR: armR, legL: legL, legR: legR, hitbox: hitbox,
-    materials: [body, trim],
+    marker: root.userData.marker || null,
+    isPlayer: isPlayer,
+    extras: extras,
+    materials: materials,
   };
 };
 
@@ -72,6 +124,10 @@ PB.figureGeometry = function () {
     limbUpper: new THREE.BoxGeometry(0.13, 0.50, 0.15),
     leg: new THREE.BoxGeometry(0.17, 0.70, 0.19),
     hit: new THREE.BoxGeometry(0.72, PB.FIGURE_HEIGHT, 0.55),
+    visor: new THREE.BoxGeometry(0.30, 0.10, 0.04),
+    pack: new THREE.BoxGeometry(0.34, 0.38, 0.16),
+    weapon: new THREE.BoxGeometry(0.09, 0.09, 0.46),
+    marker: new THREE.OctahedronGeometry(0.13, 0),
   };
 };
 
@@ -79,6 +135,11 @@ PB.figureGeometry = function () {
  * step with the ground whether the figure is an NPC deciding its own path or a
  * remote player being interpolated between snapshots. */
 PB.poseFigure = function (fig, o) {
+  // the overhead marker bobs and spins so it catches the eye
+  if (fig.marker) {
+    fig.marker.rotation.y = (o.phase || 0) * 0.5;
+    fig.marker.position.y = 2.25 + Math.sin((o.phase || 0) * 0.8) * 0.06;
+  }
   if (o.grounded) {
     var swing = Math.sin(o.phase);
     var amp = o.moving === undefined ? 1 : (o.moving ? 1 : 0);

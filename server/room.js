@@ -237,6 +237,10 @@ class Room {
       player.stats.shotsHit++;
       player.stats.targetsBroken++;
       this.award(player, cfg.scoreTarget);
+      // The last target can be what finishes the level. knockDownNPC checks
+      // this for itself; breaking a target here does not, and without this the
+      // arena empties and nothing happens.
+      g.checkLevel();
     } else if (hit.npc && hit.npc.alive) {
       event.kind = 'npc';
       event.index = g.npcs.indexOf(hit.npc);

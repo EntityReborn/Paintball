@@ -29,7 +29,9 @@ PB.createNPCs = function (ctx) {
   var NPC_HEIGHT = PB.FIGURE_HEIGHT;
 
   function makeNPC(i) {
-    var hue = (i * 0.27 + 0.08) % 1;
+    // NPCs stay in the warm half of the wheel; the cool band is reserved for
+    // players, so the two can never end up the same colour
+    var hue = ((i * 0.19 + 0.03) % 1) * 0.34;
     var fig = PB.buildFigure({
       geo: npcGeo, shadows: cfg.shadows, name: 'npc',
       color: new THREE.Color().setHSL(hue, 0.45, 0.52),

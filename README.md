@@ -44,6 +44,10 @@ Online play is opt-in — `index.html?mp` joins the server the page came from, a
 plain `index.html` still boots offline with its own random map and no server at
 all.
 
+Other players are easy to pick out: they carry a visor, a pack and a weapon,
+wear a floating marker overhead, and are coloured from the cool half of the
+wheel. NPCs get the warm half and none of the gear.
+
 ```bash
 npm start                       # server + client on :8080
 ```
@@ -128,10 +132,11 @@ a web server.
 
 Two layers, both driving the real engine in a real WebGL context.
 
-**Browser suite** (`tests/tests.html`) — 145 tests over bootstrap, world
+**Browser suite** (`tests/tests.html`) — 151 tests over bootstrap, world
 generation, targets, rendering, movement, collision, shooting, breaking, levels,
 input, the reload animation, NPCs, view angles, zoom, drifting targets, scoring,
-score indicators, player statistics, performance, and HUD wiring. Rendering is
+score indicators, player statistics, telling players from NPCs, performance,
+and HUD wiring. Rendering is
 checked by reading pixels back off the canvas; input by dispatching real
 `KeyboardEvent` / `MouseEvent` objects. Open it in a browser to watch it run, or
 let the driver do it.
@@ -140,7 +145,7 @@ let the driver do it.
 plays the game through Chrome's own input pipeline (trusted keyboard and mouse
 events, real pointer lock) and writes screenshots to `tests/shots/`.
 
-**Server tests** (`tests/server.test.js`) — 25 node tests over the headless
+**Server tests** (`tests/server.test.js`) — 27 node tests over the headless
 engine, seed determinism, the room's plausibility rules, server-side shot
 validation and lag compensation, snapshot cadence and size, and the static file
 server's path handling.
@@ -206,6 +211,10 @@ re-entering the window rather than a real flick.
   requested with `unadjustedMovement`. Every write to the angles goes through one
   clamped path, and samples beyond `lookSpikePx` (500 by default) are discarded
   rather than clamped — clamping still turns the view, just less far.
+- **An arena cleared in multiplayer just sat there.** The server broke the
+  target but never asked whether that finished the level — only the client's
+  local hit path did that, and it is skipped in networked play. NPC kills
+  checked, target breaks did not, and targets are usually what goes last.
 - **The server built a different arena from the same seed.** The floor texture
   drew 900 speckles from the world RNG — 1800 numbers the headless server never
   drew, because it has no canvas. Every obstacle after that landed somewhere
