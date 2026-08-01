@@ -15,20 +15,29 @@ var SEND_HZ = 30;
 var INTERP_MS = 110;          // render remote motion this far behind arrival
 var BUFFER_MS = 1200;
 
+/* Radians of run cycle per unit travelled. An NPC deciding its own path uses
+ * `dt * speed * 2.4`, and speed * dt is exactly the distance it covered, so
+ * matching that here keeps a figure's stride identical whether it is being
+ * simulated locally or followed over the wire. */
+var PHASE_PER_UNIT = 2.4;
+
 PB.createNet = function (opts) {
   var THREE = global.THREE;
   var url = opts.url;
   var name = opts.name || 'player';
 
   var socket = null;
-  var self = { id: null, seed: null, connected: false, error: null };
+  var self = { id: null, seed: null, connected: false, error: null, arenaMatch: null };
   var listeners = {};
   var snapshots = [];           // {at, players, npcs, targets}
   var remotes = new Map();      // id -> {fig, phase, name, last}
+  var departed = new Set();     // ids that have left, so a stale snapshot cannot revive them
   var game = null;
   var sendTimer = null;
+  var statsTimer = null;
+  var lastUpdateAt = 0;
   var figureGeo = null;
-  var stats = { sent: 0, received: 0, corrections: 0, lastLatency: 0 };
+  var stats = { sent: 0, received: 0, corrections: 0, lastLatency: 0, hits: 0, shots: 0, rejected: 0, lastRejection: null };
 
   function on(evt, cb) { (listeners[evt] || (listeners[evt] = [])).push(cb); return api; }
   function emit(evt, data) {
@@ -78,6 +87,12 @@ PB.createNet = function (opts) {
       emit('hello', msg);
       return;
     }
+    if (msg.t === 'levelStart') {
+      snapshots.length = 0;              // the old indices mean nothing now
+      if (game) game.applyLevel(msg);
+      emit('levelStart', msg);
+      return;
+    }
     if (msg.t === 'snapshot') {
       stats.received++;
       snapshots.push({ at: now(), players: msg.players, npcs: msg.npcs, targets: msg.targets });
@@ -85,8 +100,13 @@ PB.createNet = function (opts) {
       while (snapshots.length > 2 && snapshots[0].at < cutoff) snapshots.shift();
       return;
     }
-    if (msg.t === 'joined') { emit('joined', msg.player); return; }
+    if (msg.t === 'joined') {
+      departed.delete(msg.player.id);
+      emit('joined', msg.player);
+      return;
+    }
     if (msg.t === 'left') {
+      departed.add(msg.id);
       dropRemote(msg.id);
       emit('left', msg);
       return;
@@ -95,6 +115,23 @@ PB.createNet = function (opts) {
       stats.corrections++;
       if (game) game.teleport(msg.x, msg.y, msg.z);
       emit('correction', msg);
+      return;
+    }
+    if (msg.t === 'hit') {
+      stats.hits++;
+      if (msg.by === self.id) stats.lastHit = msg.kind;
+      if (game) {
+        // the server decides outcomes; only our own shots move our score
+        if (msg.by === self.id) game.setScore(msg.score);
+        game.applyServerHit(msg);
+      }
+      emit('hit', msg);
+      return;
+    }
+    if (msg.t === 'shotRejected') {
+      stats.rejected++;
+      stats.lastRejection = msg.reason;
+      emit('shotRejected', msg);
       return;
     }
     if (msg.t === 'pong') {
@@ -111,6 +148,24 @@ PB.createNet = function (opts) {
   function startSending(g) {
     game = g;
     figureGeo = PB.figureGeometry();
+
+    /* Every shot goes to the server for adjudication, carrying how far behind
+     * the server our view was when we aimed: the interpolation window plus
+     * however long ago the last frame drew. The server rewinds by that much,
+     * so a slow client is judged against the world it actually saw. */
+    game.on('shotFired', function (d) {
+      stats.shots++;
+      var behind = INTERP_MS + Math.min(400, now() - lastUpdateAt);
+      stats.lastLag = Math.round(behind);
+      send({ t: 'shot', origin: d.origin, dir: d.dir, lag: Math.round(behind) });
+    });
+
+    // the client's own accounting, for the leaderboard work to come
+    if (!statsTimer) {
+      statsTimer = setInterval(function () {
+        if (game && self.id) send({ t: 'stats', stats: game.stats() });
+      }, 5000);
+    }
     if (sendTimer) return;
     sendTimer = setInterval(function () {
       if (!game || !self.id) return;
@@ -131,7 +186,9 @@ PB.createNet = function (opts) {
 
   function stopSending() {
     if (sendTimer) clearInterval(sendTimer);
+    if (statsTimer) clearInterval(statsTimer);
     sendTimer = null;
+    statsTimer = null;
   }
 
   function round(n) { return Math.round(n * 1000) / 1000; }
@@ -192,6 +249,7 @@ PB.createNet = function (opts) {
    * the camera). */
   function update(dt) {
     if (!game || snapshots.length === 0) return;
+    lastUpdateAt = now();
     var pair = bracket(now() - INTERP_MS);
     if (!pair) return;
 
@@ -199,7 +257,7 @@ PB.createNet = function (opts) {
     for (var i = 0; i < pair.b.players.length; i++) {
       var pb = pair.b.players[i];
       var id = pb[0];
-      if (id === self.id) continue;
+      if (id === self.id || departed.has(id)) continue;
       seen.add(id);
 
       var pa = findPlayer(pair.a.players, id) || pb;
@@ -210,7 +268,7 @@ PB.createNet = function (opts) {
 
       if (r.last) {
         var moved = Math.hypot(x - r.last.x, z - r.last.z);
-        r.phase += moved * 2.4;              // legs keep step with the ground
+        r.phase += moved * PHASE_PER_UNIT;   // legs keep step with the ground
       }
       r.last = { x: x, y: y, z: z };
 
@@ -242,22 +300,28 @@ PB.createNet = function (opts) {
       var na = pair.a.npcs[i] || pair.b.npcs[i];
       var nb = pair.b.npcs[i];
       var n = npcs[i];
-      n.root.position.set(
-        lerp(na[0], nb[0], pair.f),
-        lerp(na[1], nb[1], pair.f),
-        lerp(na[2], nb[2], pair.f)
-      );
+      var nx = lerp(na[0], nb[0], pair.f);
+      var ny = lerp(na[1], nb[1], pair.f);
+      var nz = lerp(na[2], nb[2], pair.f);
+      n.root.position.set(nx, ny, nz);
       n.root.rotation.y = lerpAngle(na[3], nb[3], pair.f);
       n.alive = !!nb[4];
       n.grounded = !!nb[5];
       n.vy = nb[6];
       if (n.fig) {
-        var stepped = Math.hypot(nb[0] - na[0], nb[2] - na[2]);
-        n.netPhase = (n.netPhase || 0) + stepped * 2.4;
+        // Step the run cycle by what actually moved this frame. Using the gap
+        // between the two snapshots instead advanced a whole snapshot's worth
+        // of stride every frame, which ran the legs at about three times speed.
+        var stepped = n.netLast
+          ? Math.hypot(nx - n.netLast.x, nz - n.netLast.z)
+          : 0;
+        n.netLast = { x: nx, z: nz };
+        n.netPhase = (n.netPhase || 0) + stepped * PHASE_PER_UNIT;
         PB.poseFigure(n.fig, {
-          phase: n.netPhase, grounded: n.grounded, moving: stepped > 0.0005, vy: n.vy,
+          phase: n.netPhase, grounded: n.grounded, moving: stepped > 0.0008, vy: n.vy,
         });
       }
+      if (nb.length > 7) n.root.rotation.x = nb[7];      // toppled when downed
       n.root.updateMatrixWorld(true);
     }
 
@@ -271,7 +335,10 @@ PB.createNet = function (opts) {
         lerp(ta[1], tb[1], pair.f),
         lerp(ta[2], tb[2], pair.f)
       );
-      if (!tb[3] && t.alive) { t.alive = false; t.mesh.visible = false; }
+      if (!tb[3] && t.alive) {
+        // somebody else shot it: play the break rather than blinking it out
+        game.breakTarget(t, new THREE.Vector3(0, 1, 0));
+      }
       t.mesh.updateMatrixWorld(true);
     }
   }

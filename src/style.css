@@ -97,3 +97,23 @@ canvas { display: block; position: fixed; inset: 0; }
 }
 #fatal h2 { color: #ff6b6b; letter-spacing: .1em; }
 #fatal p { color: #9db0c8; max-width: 560px; line-height: 1.6; font-size: 14px; }
+
+/* career summary on the pause screen */
+#summary {
+  display: none;
+  grid-template-columns: repeat(2, auto);
+  gap: 5px 30px;
+  font-size: 12.5px;
+  color: #9db0c8;
+  border: 1px solid #1e2836;
+  border-radius: 3px;
+  padding: 14px 20px;
+  background: rgba(12,18,28,.55);
+  max-width: 460px;
+}
+#summary.on { display: grid; }
+#summary .row { display: contents; }
+#summary .lbl { color: #6f8098; letter-spacing: .1em; }
+#summary .val { color: #e6edf3; font-weight: 700; text-align: right; }
+#summary .val.good { color: #8ef2a0; }
+#summary .val.poor { color: #ff9f9f; }

@@ -8,7 +8,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
 const { createHeadlessGame } = require('../server/engine.js');
-const { Room } = require('../server/room.js');
+const { Room, REWIND_MS, MAX_REWIND_MS } = require('../server/room.js');
 
 /* ------------------------------------------------------------- headless */
 test('the browser engine runs in node with no renderer or DOM', () => {
@@ -158,6 +158,265 @@ test('snapshots stay small enough to send 20 times a second', () => {
   for (let i = 0; i < 8; i++) room.join('p' + i);
   const bytes = Buffer.byteLength(JSON.stringify(room.snapshot()));
   assert.ok(bytes < 4000, `snapshot is ${bytes} bytes with 8 players`);
+});
+
+/* -------------------------------------------------------------- shooting */
+function aimedAt(room, player, point) {
+  const THREE = globalThis.THREE;
+  const origin = new THREE.Vector3(player.x, player.y, player.z);
+  const dir = point.clone().sub(origin).normalize();
+  return { t: 'shot', origin: { x: origin.x, y: origin.y, z: origin.z },
+           dir: { x: dir.x, y: dir.y, z: dir.z } };
+}
+
+// stand somewhere with a clear line to a point
+function standClear(room, player, point) {
+  const THREE = globalThis.THREE;
+  const g = room.game;
+  for (let a = 0; a < Math.PI * 2; a += Math.PI / 12) {
+    const eye = new THREE.Vector3(point.x + Math.sin(a) * 4, g.cfg.eye, point.z + Math.cos(a) * 4);
+    if (Math.abs(eye.x) > 26 || Math.abs(eye.z) > 26) continue;
+    if (!g.hasLineOfSight(eye, point)) continue;
+    player.x = eye.x; player.y = g.cfg.eye; player.z = eye.z;
+    return true;
+  }
+  return false;
+}
+
+test('server raycasts hit the real arena, not geometry stuck at the origin', () => {
+  // three.js only refreshes world matrices while rendering, and the server
+  // never renders: without an explicit update every wall and crate sits
+  // unrotated at 0,0,0 and every shot hits a phantom.
+  const room = new Room({ seed: 31 });
+  const p = room.join('ana');
+  p.x = 0; p.y = room.game.cfg.eye; p.z = 0;
+
+  const down = room.applyShot(p.id, {
+    t: 'shot', origin: { x: 0, y: 1.7, z: 0 }, dir: { x: 0, y: -1, z: 0 },
+  });
+  assert.ok(down.ok, down.reason);
+  assert.equal(down.event.kind, 'miss');
+  assert.ok(Math.abs(down.event.point.y) < 0.05,
+            `a shot at the floor landed at y=${down.event.point.y}`);
+
+  // the symptom this caused: an invisible barrier across the middle of the
+  // arena that stopped bullets while the player walked through it, because
+  // every obstacle sat unrotated at the origin and the floor stood on its edge
+  p.x = 0; p.z = 6;                                  // stand where we shoot from
+  const level = room.applyShot(p.id, {
+    t: 'shot', origin: { x: 0, y: 1.7, z: 6 }, dir: { x: 0, y: 0, z: -1 },
+  }, Date.now() + 5000);
+  assert.ok(level.ok, level.reason);
+  const stoppedAt = Math.hypot(level.event.point.x - 0, level.event.point.z - 6);
+  assert.ok(stoppedAt > 8,
+            `a level shot stopped after ${stoppedAt.toFixed(1)}u — invisible wall at the origin`);
+
+  const THREE = globalThis.THREE;
+  const g = room.game;
+  // and a piece of cover really is where the client thinks it is
+  const box = g.obstacleBoxes[0];
+  const centre = box.getCenter(new THREE.Vector3());
+  assert.ok(centre.length() > 3, 'the first obstacle is sitting at the origin');
+  const mesh = g.obstacleMeshes[0];
+  const meshPos = new THREE.Vector3().setFromMatrixPosition(mesh.matrixWorld);
+  assert.ok(meshPos.distanceTo(mesh.position) < 0.001,
+            'the obstacle mesh has no world matrix');
+});
+
+test('a shot at an NPC puts it down and scores the shooter', () => {
+  const room = new Room({ seed: 31 });
+  const p = room.join('ana');
+  const npc = room.game.npcs.find(n => n.alive && n.grounded);
+  const chest = npc.root.position.clone().setY(1.0);
+  assert.ok(standClear(room, p, chest), 'no clear line to an NPC');
+
+  const res = room.applyShot(p.id, aimedAt(room, p, chest));
+  assert.ok(res.ok, res.reason);
+  assert.equal(res.event.kind, 'npc', `hit a ${res.event.kind} instead`);
+  assert.ok(!npc.alive, 'the NPC survived a server-side hit');
+  assert.equal(p.score, room.game.cfg.scoreNpc, 'the shooter was not paid');
+  assert.equal(p.stats.npcsDown, 1);
+  assert.equal(res.event.by, p.id, 'the event does not name the shooter');
+});
+
+test('a downed NPC stays down across ticks and snapshots', () => {
+  const room = new Room({ seed: 31 });
+  const p = room.join('ana');
+  const npc = room.game.npcs.find(n => n.alive && n.grounded);
+  const chest = npc.root.position.clone().setY(1.0);
+  assert.ok(standClear(room, p, chest));
+  room.applyShot(p.id, aimedAt(room, p, chest));
+
+  const index = room.game.npcs.indexOf(npc);
+  for (let i = 0; i < 120; i++) room.step(1000 / 30);      // four seconds
+  assert.ok(!npc.alive, 'the NPC got back up');
+  assert.equal(room.snapshot().npcs[index][4], 0, 'the snapshot still says it is alive');
+});
+
+test('a shot at a target breaks it and scores the shooter', () => {
+  const room = new Room({ seed: 31 });
+  const p = room.join('ana');
+  const target = room.game.targets.find(t => t.alive);
+  assert.ok(standClear(room, p, target.mesh.position), 'no clear line to a target');
+
+  const res = room.applyShot(p.id, aimedAt(room, p, target.mesh.position));
+  assert.ok(res.ok, res.reason);
+  assert.equal(res.event.kind, 'target');
+  assert.ok(!target.alive, 'the target survived');
+  assert.equal(p.score, room.game.cfg.scoreTarget);
+});
+
+test('a shot that hits nothing costs the shooter points, floored at zero', () => {
+  const room = new Room({ seed: 31 });
+  const p = room.join('ana');
+  p.score = 40;
+  const down = { t: 'shot', origin: { x: p.x, y: p.y, z: p.z }, dir: { x: 0, y: -1, z: 0 } };
+  const res = room.applyShot(p.id, down);
+  assert.ok(res.ok, res.reason);
+  assert.equal(res.event.kind, 'miss');
+  assert.equal(p.score, 40 + room.game.cfg.scoreMiss, 'the miss did not cost anything');
+
+  p.score = 5;
+  p.lastShotAt = 0;
+  room.applyShot(p.id, down, Date.now() + 1000);
+  assert.equal(p.score, 0, 'the score went below zero');
+});
+
+test('firing faster than the weapon allows is rejected', () => {
+  const room = new Room({ seed: 31 });
+  const p = room.join('ana');
+  const down = { t: 'shot', origin: { x: p.x, y: p.y, z: p.z }, dir: { x: 0, y: -1, z: 0 } };
+  const t0 = Date.now();
+  assert.ok(room.applyShot(p.id, down, t0).ok, 'the first shot was blocked');
+  const second = room.applyShot(p.id, down, t0 + 20);
+  assert.ok(!second.ok, 'a shot 20ms later was allowed');
+  assert.ok(/rate of fire/.test(second.reason), second.reason);
+  assert.ok(room.applyShot(p.id, down, t0 + 200).ok, 'a shot after the cooldown was blocked');
+});
+
+test('shooting from somewhere the player is not is rejected', () => {
+  const room = new Room({ seed: 31 });
+  const p = room.join('ana');
+  const npc = room.game.npcs.find(n => n.alive);
+  const chest = npc.root.position.clone().setY(1.0);
+  // the player never moved from the origin, but claims to shoot point blank
+  const res = room.applyShot(p.id, {
+    t: 'shot',
+    origin: { x: chest.x + 1, y: 1.7, z: chest.z },
+    dir: { x: -1, y: 0, z: 0 },
+  });
+  assert.ok(!res.ok, 'a shot from across the map was accepted');
+  assert.ok(/away from the player/.test(res.reason), res.reason);
+  assert.ok(npc.alive, 'the NPC went down anyway');
+});
+
+test('malformed shots are rejected', () => {
+  const room = new Room({ seed: 31 });
+  const p = room.join('ana');
+  for (const bad of [
+    {},
+    { origin: { x: 0, y: 1.7, z: 0 } },
+    { origin: { x: 0, y: 1.7, z: 0 }, dir: { x: NaN, y: 0, z: 1 } },
+    { origin: { x: 0, y: 1.7, z: 0 }, dir: { x: 0, y: 0, z: 0 } },
+  ]) {
+    const res = room.applyShot(p.id, Object.assign({ t: 'shot' }, bad), Date.now() + 99999);
+    assert.ok(!res.ok, `accepted ${JSON.stringify(bad)}`);
+  }
+});
+
+test('the level needs both the NPCs and the targets cleared', () => {
+  const room = new Room({ seed: 31 });
+  const g = room.game;
+  const level0 = g.state.level;
+
+  g.npcs.slice().forEach(n => { if (n.alive) g.knockDownNPC(n); });
+  assert.equal(g.npcsAlive(), 0, 'NPCs still standing');
+  assert.equal(g.state.level, level0, 'the level ended with targets still up');
+
+  g.targets.slice().forEach(t => {
+    if (t.alive) { g.breakTarget(t, new globalThis.THREE.Vector3(0, 1, 0)); }
+  });
+  g.checkLevel();
+  assert.equal(g.state.level, level0 + 1, 'clearing both did not finish the level');
+});
+
+test('a shot judged against where the NPC was still counts', () => {
+  // the client aims at where it sees an NPC, one interpolation window behind
+  const room = new Room({ seed: 77 });
+  const p = room.join('ana');
+  const THREE = globalThis.THREE;
+  const npc = room.game.npcs.find(n => n.alive && n.grounded);
+
+  const seen = npc.root.position.clone().setY(1.0);
+  assert.ok(standClear(room, p, seen), 'no clear line');
+  room.recordHistory(Date.now());
+
+  // let it run on while the shot is "in flight"
+  for (let i = 0; i < 6; i++) room.step(1000 / 30);
+  const moved = npc.root.position.distanceTo(seen.clone().setY(npc.root.position.y));
+  assert.ok(moved > 0.15, `the NPC barely moved (${moved.toFixed(2)}u), test proves nothing`);
+
+  const res = room.applyShot(p.id, aimedAt(room, p, seen));
+  assert.ok(res.ok, res.reason);
+  assert.equal(res.event.kind, 'npc', 'the rewind did not credit the hit');
+  assert.ok(!npc.alive, 'the NPC survived');
+});
+
+test('the rewind does not reach back further than its window', () => {
+  const room = new Room({ seed: 77 });
+  const p = room.join('ana');
+  const npc = room.game.npcs.find(n => n.alive && n.grounded);
+  const seen = npc.root.position.clone().setY(1.0);
+  assert.ok(standClear(room, p, seen));
+  const t0 = Date.now();
+  room.recordHistory(t0);
+
+  // ask about that position long after the window has closed
+  const origin = new globalThis.THREE.Vector3(p.x, p.y, p.z);
+  const dir = seen.clone().sub(origin).normalize();
+  const stale = room.rewoundHit(origin, dir, 300, t0 + REWIND_MS + 500);
+  assert.equal(stale, null, 'a shot from a second ago was still credited');
+});
+
+test('a client cannot ask for unlimited rewind', () => {
+  const room = new Room({ seed: 77 });
+  const p = room.join('ana');
+  const npc = room.game.npcs.find(n => n.alive && n.grounded);
+  const seen = npc.root.position.clone().setY(1.0);
+  assert.ok(standClear(room, p, seen));
+  room.recordHistory(Date.now() - MAX_REWIND_MS - 400);   // a very old sighting
+
+  const shot = aimedAt(room, p, seen);
+  shot.lag = 60000;                                        // "I saw it a minute ago"
+  const res = room.applyShot(p.id, shot);
+  assert.ok(res.ok, res.reason);
+  // it may legitimately hit where the NPC stands now, but it must not be
+  // credited from a sighting older than the ceiling
+  if (res.event.kind === 'npc') {
+    const moved = npc.root.position.distanceTo(seen.clone().setY(npc.root.position.y));
+    assert.ok(moved < 1, 'a minute-old sighting was credited');
+  }
+});
+
+test('the rewind cannot reach through cover', () => {
+  const room = new Room({ seed: 77 });
+  const p = room.join('ana');
+  const g = room.game;
+  const THREE = globalThis.THREE;
+
+  // stand on the far side of a wall from the middle of the arena
+  p.x = 0; p.y = g.cfg.eye; p.z = 0;
+  room.recordHistory(Date.now());
+  const origin = new THREE.Vector3(p.x, p.y, p.z);
+
+  // fire at a wall: whatever is behind it must not be credited
+  const dir = new THREE.Vector3(0, 0, -1);
+  const wallHit = g.traceShot(origin, dir);
+  const beyond = room.rewoundHit(origin, dir, wallHit.distance, Date.now());
+  if (beyond) {
+    assert.ok(beyond.distance <= wallHit.distance + 0.01,
+              'the rewind credited something behind cover');
+  }
 });
 
 /* --------------------------------------------------------------- server */

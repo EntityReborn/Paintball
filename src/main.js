@@ -49,7 +49,43 @@ var el = {
   menu: document.getElementById('menu'),
   menuScore: document.getElementById('m-score'),
   crosshair: document.getElementById('crosshair'),
+  summary: document.getElementById('summary'),
 };
+
+/* The career summary shown while paused. Distance is reported in feet because
+ * that is what people ask for; everything internal stays in metres. */
+function renderSummary() {
+  if (!game) return;
+  var s = game.stats();
+  var pct = function (n) { return (n * 100).toFixed(1) + '%'; };
+  var clock = function (sec) {
+    var m = Math.floor(sec / 60), r = Math.round(sec % 60);
+    return m + 'm ' + (r < 10 ? '0' : '') + r + 's';
+  };
+  var rows = [
+    ['SCORE', s.score, ''],
+    ['BEST SCORE', s.bestScore, ''],
+    ['LEVELS CLEARED', s.levelsCleared, ''],
+    ['ACCURACY', pct(s.accuracy), s.accuracy >= 0.5 ? 'good' : (s.shotsFired > 5 ? 'poor' : '')],
+    ['SHOTS FIRED', s.shotsFired, ''],
+    ['HITS / MISSES', s.shotsHit + ' / ' + s.misses, ''],
+    ['TARGETS BROKEN', s.targetsBroken, ''],
+    ['NPCS DOWN', s.npcsDown, ''],
+    ['BEST STREAK', s.bestStreak, s.bestStreak >= 5 ? 'good' : ''],
+    ['LONGEST SHOT', s.longestShotFeet.toFixed(0) + ' ft', ''],
+    ['DISTANCE WALKED', s.distanceFeet.toFixed(0) + ' ft', ''],
+    ['JUMPS', s.jumps, ''],
+    ['RELOADS', s.reloads, ''],
+    ['TIME PLAYED', clock(s.timePlayed), ''],
+    ['TIME SIGHTED', pct(s.sightedShare), ''],
+    ['POINTS PER SHOT', s.pointsPerShot.toFixed(1), ''],
+  ];
+  el.summary.innerHTML = rows.map(function (r) {
+    return '<div class="row"><span class="lbl">' + r[0] + '</span>' +
+           '<span class="val ' + r[2] + '">' + r[1] + '</span></div>';
+  }).join('');
+  el.summary.classList.add('on');
+}
 
 function refresh() {
   if (!game) return;
@@ -134,9 +170,12 @@ document.addEventListener('pointerlockchange', function () {
   el.menu.classList.toggle('hidden', locked);
   if (!locked) {
     el.crosshair.classList.remove('sighted');
-    if (game.state.score > 0) {
+    if (game.state.score > 0 || game.stats().shotsFired > 0) {
       el.menuScore.textContent = 'SCORE ' + game.state.score + '  ·  LEVEL ' + game.state.level;
+      renderSummary();
     }
+  } else {
+    el.summary.classList.remove('on');
   }
 });
 
@@ -160,6 +199,21 @@ if (!wantsNet) {
     if (!game) return;
     window.game = game;
     game.setNetworked(true);
+    if (msg.level) game.applyLevel(msg.level);   // join into the level in progress
+
+    /* The arena is generated from the seed on both sides. If the two ever
+     * disagree, every shot lands somewhere different for the server than it
+     * looks here — invisible cover, bullets stopping in mid-air. Better to
+     * say so than to let it look like a physics bug. */
+    if (msg.arena) {
+      net.self.arenaMatch = (game.arenaFingerprint() === msg.arena);
+      if (!net.self.arenaMatch) {
+        console.error('[paintball] arena mismatch: server ' + msg.arena +
+                      ', client ' + game.arenaFingerprint() +
+                      ' — shots will not line up with what you see');
+        toast('ARENA MISMATCH');
+      }
+    }
     wire();
     net.attach(game);
     game.on('frame', function (dt) { net.update(dt); });

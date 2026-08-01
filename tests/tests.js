@@ -170,6 +170,27 @@ function findClearTarget(fromY) {
   return null;
 }
 
+// Stand somewhere with a clear shot at a grounded NPC's chest.
+function lineUpOnNPC() {
+  for (var i = 0; i < g.npcs.length; i++) {
+    var n = g.npcs[i];
+    if (!n.alive || !n.grounded) continue;
+    var chest = n.root.position.clone().setY(1.0);
+    for (var a = 0; a < Math.PI * 2; a += Math.PI / 8) {
+      var eye = new THREE.Vector3(
+        chest.x + Math.sin(a) * 4, g.cfg.eye, chest.z + Math.cos(a) * 4);
+      var box = g.playerBox(eye, new THREE.Box3());
+      var blocked = g.colliders.some(function (c) { return c.intersectsBox(box); });
+      if (blocked || !g.hasLineOfSight(eye, chest)) continue;
+      reset();
+      g.teleport(eye.x, g.cfg.eye, eye.z);
+      g.aimAt(chest);
+      return n;
+    }
+  }
+  return null;
+}
+
 /* ================================================================= TESTS */
 
 describe('Bootstrap', function () {
@@ -778,7 +799,26 @@ describe('Levels', function () {
     return downed;
   }
 
-  it('is complete when the last NPC goes down, not when targets run out', function () {
+  // Down every NPC and break every target: the whole win condition.
+  function clearArena() {
+    var level0 = g.state.level;
+    clearNPCs();
+    for (var pass = 0; pass < 4 && g.state.level === level0; pass++) {
+      for (var i = 0; i < g.targets.length; i++) {
+        var t = g.targets[i];
+        if (!t.alive) continue;
+        if (!standClearOf(t.mesh.position, 3)) continue;
+        g.state.mag = g.cfg.magSize;
+        g.state.lastShot = -1e9;
+        g.shoot();
+        step(0.4);
+        if (g.state.level !== level0) break;
+      }
+    }
+    return g.state.level !== level0;
+  }
+
+  it('needs both the NPCs down and the targets broken', function () {
     freshLevel();
     var level0 = g.state.level;
     var completed = 0;
@@ -797,28 +837,75 @@ describe('Levels', function () {
       }
     }
     assert.equal(g.aliveCount(), 0, 'targets were not all broken');
-    assert.equal(g.state.level, level0, 'clearing the targets ended the level');
+    assert.equal(g.state.level, level0, 'clearing the targets alone ended the level');
     assert.equal(completed, 0, 'levelComplete fired on targets alone');
 
     clearNPCs();
-    assert.equal(completed, 1, 'downing every NPC did not complete the level');
+    assert.equal(completed, 1, 'clearing both did not complete the level');
     assert.equal(g.state.level, level0 + 1, 'level did not advance');
   });
 
-  it('awards the level bonus', function () {
+  it('does not end the level on the NPCs alone', function () {
+    freshLevel();
+    var level0 = g.state.level;
+    var completed = 0;
+    g.on('levelComplete', function () { completed++; });
+    clearNPCs();
+    assert.equal(g.npcsAlive(), 0, 'NPCs were not all downed');
+    assert.greater(g.aliveCount(), 0, 'the targets went too');
+    assert.equal(completed, 0, 'levelComplete fired with targets still standing');
+    assert.equal(g.state.level, level0, 'the level advanced on NPCs alone');
+  });
+
+  it('the last target finishes a level whose NPCs are already down', function () {
+    freshLevel();
+    var level0 = g.state.level;
+    clearNPCs();
+    assert.equal(g.state.level, level0, 'ended early');
+    // now break every target; the last one should tip it over
+    for (var pass = 0; pass < 3 && g.state.level === level0; pass++) {
+      for (var i = 0; i < g.targets.length; i++) {
+        var t = g.targets[i];
+        if (!t.alive) continue;
+        if (!standClearOf(t.mesh.position, 3)) continue;
+        g.state.mag = g.cfg.magSize;
+        g.state.lastShot = -1e9;
+        g.shoot();
+        step(0.4);
+        if (g.state.level !== level0) break;
+      }
+    }
+    assert.equal(g.state.level, level0 + 1, 'breaking the last target did not finish the level');
+  });
+
+  it('awards the level bonus once the arena is clear', function () {
     freshLevel();
     var score0 = g.state.score;
     var npcs = g.npcsAlive();
     var downed = clearNPCs();
     assert.equal(downed, npcs, 'did not down every NPC exactly once');
-    assert.equal(g.state.score, score0 + npcs * g.cfg.scoreNpc + g.cfg.scoreLevelBonus,
-                 'expected ' + npcs + ' NPC kills plus the level bonus');
+    assert.equal(g.state.score, score0 + npcs * g.cfg.scoreNpc,
+                 'NPC kills did not score, or the bonus landed early');
+
+    // clear the targets to actually finish it
+    for (var pass = 0; pass < 3 && g.aliveCount() > 0; pass++) {
+      for (var i = 0; i < g.targets.length; i++) {
+        var t = g.targets[i];
+        if (!t.alive) continue;
+        if (!standClearOf(t.mesh.position, 3)) continue;
+        g.state.mag = g.cfg.magSize;
+        g.state.lastShot = -1e9;
+        g.shoot();
+        step(0.4);
+      }
+    }
+    assert.greater(g.state.score, score0 + npcs * g.cfg.scoreNpc, 'the bonus never arrived');
   });
 
   it('stocks the next level with more NPCs and a fresh set of targets', function () {
     freshLevel();
     var before = g.npcs.length;
-    clearNPCs();
+    clearArena();
     assert.equal(g.npcs.length, before + 1, 'next level did not add an NPC');
     assert.equal(g.npcsAlive(), g.npcs.length, 'next level started with bodies');
     assert.equal(g.aliveCount(), g.cfg.targetsPerLevel, 'next level has no targets');
@@ -827,7 +914,7 @@ describe('Levels', function () {
   it('clears the old level out of the scene', function () {
     freshLevel();
     var before = g.scene.children.length;
-    clearNPCs();
+    clearArena();
     step(0.5);
     // same shape of level, so the object count must come back to where it was
     assert.less(Math.abs(g.scene.children.length - before), 12,
@@ -841,7 +928,7 @@ describe('Levels', function () {
     g.aimAt(t.mesh.position);
     g.shoot();
     assert.equal(g.bullets.length, 1, 'no bullet in flight');
-    clearNPCs();                      // ends the level while the round is flying
+    clearArena();                     // ends the level while the round is flying
     assert.equal(g.bullets.length, 0, 'stray bullet survived the level change');
     step(0.5);                        // must not throw
   });
@@ -1144,27 +1231,6 @@ describe('NPCs', function () {
       }
     }
   });
-
-  // Stand somewhere with a clear shot at a grounded NPC's chest.
-  function lineUpOnNPC() {
-    for (var i = 0; i < g.npcs.length; i++) {
-      var n = g.npcs[i];
-      if (!n.alive || !n.grounded) continue;
-      var chest = n.root.position.clone().setY(1.0);
-      for (var a = 0; a < Math.PI * 2; a += Math.PI / 8) {
-        var eye = new THREE.Vector3(
-          chest.x + Math.sin(a) * 4, g.cfg.eye, chest.z + Math.cos(a) * 4);
-        var box = g.playerBox(eye, new THREE.Box3());
-        var blocked = g.colliders.some(function (c) { return c.intersectsBox(box); });
-        if (blocked || !g.hasLineOfSight(eye, chest)) continue;
-        reset();
-        g.teleport(eye.x, g.cfg.eye, eye.z);
-        g.aimAt(chest);
-        return n;
-      }
-    }
-    return null;
-  }
 
   it('can be shot, scores 250, and drops', function () {
     reset();
@@ -1771,6 +1837,181 @@ describe('Score indicators', function () {
     }
     assert.less(g.scene.children.length, before + 1, 'indicators grew the scene');
     assert.less(g.indicators.length, g.indicatorPool.length + 1, 'more live labels than the pool');
+  });
+});
+
+describe('Statistics', function () {
+  it('starts a fresh count', function () {
+    freshLevel();
+    g.resetStats();
+    var s = g.stats();
+    assert.equal(s.shotsFired, 0, 'shots');
+    assert.equal(s.accuracy, 0, 'accuracy with no shots should be zero, not NaN');
+    assert.equal(s.distance, 0, 'distance');
+  });
+
+  it('counts shots, hits and misses, and works out accuracy', function () {
+    freshLevel();
+    g.resetStats();
+
+    var t = findClearTarget();
+    assert.ok(t, 'no clear target');
+    g.aimAt(t.mesh.position);
+    g.shoot();
+    step(0.6);
+
+    g.teleport(0, g.cfg.eye, 0);
+    g.aimAt(new THREE.Vector3(0, -2, 0));            // straight into the floor
+    g.state.lastShot = -1e9;
+    g.shoot();
+    step(0.6);
+
+    var s = g.stats();
+    assert.equal(s.shotsFired, 2, 'shots fired');
+    assert.equal(s.shotsHit, 1, 'hits');
+    assert.equal(s.misses, 1, 'misses');
+    assert.equal(s.targetsBroken, 1, 'targets broken');
+    assert.close(s.accuracy, 0.5, 0.001, 'accuracy');
+  });
+
+  it('measures how far the player walked, in units and in feet', function () {
+    freshLevel();
+    g.resetStats();
+    g.setActive(true);
+    var from = g.state.pos.clone();
+    g.setKey('KeyW', true);
+    step(1.5);
+    g.setKey('KeyW', false);
+    step(0.5);
+
+    var s = g.stats();
+    var straightLine = Math.hypot(g.state.pos.x - from.x, g.state.pos.z - from.z);
+    assert.greater(s.distance, 1, 'no distance recorded');
+    // path length is at least the straight line, and within reason of it
+    assert.greater(s.distance, straightLine - 0.5, 'distance is shorter than the displacement');
+    assert.close(s.distanceFeet, s.distance * 3.28084, 0.01, 'feet conversion');
+  });
+
+  it('does not count distance while standing still', function () {
+    freshLevel();
+    g.resetStats();
+    g.setActive(true);
+    step(2);
+    assert.close(g.stats().distance, 0, 0.001, 'standing still logged distance');
+  });
+
+  it('counts jumps and reloads', function () {
+    freshLevel();
+    g.resetStats();
+    g.setActive(true);
+    g.state.grounded = true;
+    g.setKey('Space', true);
+    step(0.1);
+    g.setKey('Space', false);
+    step(1.5);
+    assert.equal(g.stats().jumps, 1, 'jumps');
+
+    g.state.mag = 3;
+    g.reload();
+    step(g.cfg.reloadMs / 1000 + 0.05);
+    assert.equal(g.stats().reloads, 1, 'reloads');
+  });
+
+  it('tracks the best streak and resets it on a miss', function () {
+    freshLevel();
+    g.resetStats();
+    var hits = 0;
+    for (var i = 0; i < g.targets.length && hits < 3; i++) {
+      var t = g.targets[i];
+      if (!t.alive) continue;
+      if (!standClearOf(t.mesh.position, 3)) continue;
+      g.state.mag = g.cfg.magSize;
+      g.state.lastShot = -1e9;
+      g.shoot();
+      step(0.5);
+      if (!t.alive) hits++;
+    }
+    assert.equal(hits, 3, 'could not land three shots');
+    assert.equal(g.stats().streak, 3, 'streak did not build');
+    assert.equal(g.stats().bestStreak, 3, 'best streak');
+
+    g.teleport(0, g.cfg.eye, 0);
+    g.aimAt(new THREE.Vector3(0, -2, 0));
+    g.state.lastShot = -1e9;
+    g.shoot();
+    step(0.6);
+    assert.equal(g.stats().streak, 0, 'a miss did not break the streak');
+    assert.equal(g.stats().bestStreak, 3, 'the best streak was forgotten');
+  });
+
+  it('remembers the longest shot that landed', function () {
+    freshLevel();
+    g.resetStats();
+    var far = null, farDist = 0;
+    var eye = new THREE.Vector3(g.state.pos.x, g.cfg.eye, g.state.pos.z);
+    for (var i = 0; i < g.targets.length; i++) {
+      var t = g.targets[i];
+      if (!t.alive || !g.hasLineOfSight(eye, t.mesh.position)) continue;
+      var d = eye.distanceTo(t.mesh.position);
+      if (d > farDist) { farDist = d; far = t; }
+    }
+    assert.ok(far, 'no target in the open');
+    g.aimAt(far.mesh.position);
+    g.shoot();
+    step(0.8);
+    var s = g.stats();
+    assert.close(s.longestShot, farDist, 1.5, 'longest shot distance');
+    assert.close(s.longestShotFeet, s.longestShot * 3.28084, 0.01, 'feet conversion');
+  });
+
+  it('counts time played only while the game is running', function () {
+    freshLevel();
+    g.resetStats();
+    g.setActive(false);
+    step(1);
+    assert.close(g.stats().timePlayed, 0, 0.001, 'paused time counted as played');
+    g.setActive(true);
+    step(1);
+    assert.close(g.stats().timePlayed, 1, 0.05, 'time played');
+  });
+
+  it('counts time spent sighted', function () {
+    freshLevel();
+    g.resetStats();
+    g.setActive(true);
+    step(0.5);
+    g.setZooming(true);
+    step(1);
+    g.setZooming(false);
+    step(0.5);
+    var s = g.stats();
+    assert.greater(s.timeSighted, 0.5, 'sighted time');
+    assert.less(s.timeSighted, s.timePlayed, 'sighted longer than played');
+    assert.between(s.sightedShare, 0.2, 0.8, 'sighted share');
+  });
+
+  it('counts NPCs put down', function () {
+    freshLevel();
+    g.resetStats();
+    var n = lineUpOnNPC();
+    assert.ok(n, 'no clear shot on an NPC');
+    g.shoot();
+    step(0.6);
+    assert.equal(g.stats().npcsDown, 1, 'NPC kills');
+    assert.equal(g.stats().shotsHit, 1, 'the NPC hit did not count as a hit');
+  });
+
+  it('reports a rate of fire and points per shot', function () {
+    freshLevel();
+    g.resetStats();
+    g.setActive(true);
+    g.setFiring(true);
+    step(2);
+    g.setFiring(false);
+    var s = g.stats();
+    assert.greater(s.shotsFired, 3, 'nothing was fired');
+    assert.between(s.shotsPerMinute, 200, 500, 'shots per minute');
+    assert.ok(isFinite(s.pointsPerShot), 'points per shot is not a number');
   });
 });
 

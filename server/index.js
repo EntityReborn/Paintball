@@ -37,8 +37,15 @@ function safePath(urlPath) {
   return path.join(ROOT, rel);
 }
 
+// level size can be overridden for tuning and for tests that need a level
+// small enough to clear quickly
+const gameOverrides = {};
+if (process.env.NPCS_PER_LEVEL) gameOverrides.npcsPerLevel = Number(process.env.NPCS_PER_LEVEL);
+if (process.env.TARGETS_PER_LEVEL) gameOverrides.targetsPerLevel = Number(process.env.TARGETS_PER_LEVEL);
+
 const room = new Room({
   seed: process.env.MAP_SEED ? Number(process.env.MAP_SEED) : undefined,
+  game: gameOverrides,
   onBroadcast: msg => broadcast(msg),
 });
 
@@ -111,6 +118,19 @@ wss.on('connection', socket => {
     if (msg.t === 'state') {
       const res = room.applyState(player.id, msg);
       if (!res.ok && res.correction) send(socket, res.correction);
+      return;
+    }
+
+    if (msg.t === 'shot') {
+      const res = room.applyShot(player.id, msg);
+      if (res.ok) broadcast(res.event);          // everyone needs the effects
+      else send(socket, { t: 'shotRejected', reason: res.reason });
+      return;
+    }
+
+    if (msg.t === 'stats') {
+      // the client's own accounting, kept for the leaderboard work to come
+      player.clientStats = msg.stats;
       return;
     }
 

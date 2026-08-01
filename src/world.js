@@ -28,7 +28,12 @@ PB.createWorld = function (ctx) {
     var g = c.getContext('2d');
     g.fillStyle = '#2a2f38'; g.fillRect(0, 0, 256, 256);
     g.fillStyle = '#323844';
-    for (var i = 0; i < 900; i++) g.fillRect(rand() * 256, rand() * 256, 2, 2);
+    // Deliberately NOT the world RNG. These 900 speckles are pure decoration,
+    // but drawing them from the shared stream advanced it by 1800 numbers on
+    // the client and not on the headless server, so the two sides generated
+    // completely different arenas from the same seed — cover the server could
+    // see and the client could not.
+    for (var i = 0; i < 900; i++) g.fillRect(Math.random() * 256, Math.random() * 256, 2, 2);
     g.strokeStyle = '#3d4552'; g.lineWidth = 3;
     g.strokeRect(0, 0, 256, 256);
     var t = new THREE.CanvasTexture(c);
@@ -122,7 +127,23 @@ PB.createWorld = function (ctx) {
     }
   })();
 
+  /* A cheap signature of the arena layout. Both sides compute it from the
+   * same code, so a mismatch means the two worlds were generated differently
+   * and every shot will disagree about what it hit. */
+  function fingerprint() {
+    var acc = 0;
+    for (var i = 0; i < obstacleBoxes.length; i++) {
+      var b = obstacleBoxes[i];
+      var vals = [b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z];
+      for (var v = 0; v < vals.length; v++) {
+        acc = (acc * 31 + Math.round(vals[v] * 100)) | 0;
+      }
+    }
+    return (acc >>> 0).toString(16) + ':' + obstacleBoxes.length;
+  }
+
   return {
+    fingerprint: fingerprint,
     colliders: colliders,
     solidMeshes: solidMeshes,
     obstacleBoxes: obstacleBoxes,

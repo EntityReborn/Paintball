@@ -57,11 +57,15 @@ async function advance(page, seconds, timeout = 60000) {
   log('\n== MULTIPLAYER: TWO BROWSERS, ONE WORLD ==');
 
   const server = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
-    env: { ...process.env, PORT: String(PORT), MAP_SEED: '4242' },
+    env: { ...process.env, PORT: String(PORT), MAP_SEED: '4242', SHOT_DEBUG: process.env.SHOT_DEBUG || '' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const serverLog = [];
-  server.stdout.on('data', d => serverLog.push(d.toString().trim()));
+  server.stdout.on('data', d => {
+    const line = d.toString().trim();
+    serverLog.push(line);
+    if (process.env.SHOT_DEBUG && /shot-debug/.test(line)) log('  ' + line);
+  });
   server.stderr.on('data', d => serverLog.push('ERR ' + d.toString().trim()));
 
   /* One browser per client, not one browser with two tabs: a hidden tab stops
@@ -120,6 +124,14 @@ async function advance(page, seconds, timeout = 60000) {
       first: game.obstacleBoxes[0].min.toArray().map(n => +n.toFixed(3)),
       npcs: game.npcs.length,
     }))));
+    const fingerprints = await Promise.all([
+      ana.evaluate('net.self.arenaMatch'),
+      bo.evaluate('net.self.arenaMatch'),
+    ]);
+    check('both clients generated the same arena as the server',
+          fingerprints[0] === true && fingerprints[1] === true,
+          `ana ${fingerprints[0]}, bo ${fingerprints[1]}`);
+
     check('both clients built an identical arena',
           JSON.stringify(worlds[0]) === JSON.stringify(worlds[1]),
           `${worlds[0].obstacles} obstacles, first cover at ${worlds[0].first.join(',')}`);
@@ -202,6 +214,208 @@ async function advance(page, seconds, timeout = 60000) {
     check('both clients see the NPCs in the same places', worstNpc < 1.5,
           `worst disagreement ${worstNpc.toFixed(2)}u`);
 
+    /* ------------------------------- shooting is decided by the server */
+    // find an NPC ana can see, shoot it, and check it stays down on BOTH
+    // clients — the bug was that the shooter scored but the NPC kept walking
+    const npcShot = await ana.evaluate(async () => {
+      const before = game.state.score;
+      let chosen = null;
+      for (let attempt = 0; attempt < 24 && !chosen; attempt++) {
+        for (const n of game.npcs) {
+          if (!n.alive || !n.grounded) continue;
+          const chest = n.root.position.clone().setY(1.0);
+          const eye = new THREE.Vector3(game.state.pos.x, game.cfg.eye, game.state.pos.z);
+          if (!game.hasLineOfSight(eye, chest)) continue;
+          game.aimAt(chest);
+          chosen = game.npcs.indexOf(n);
+          break;
+        }
+        if (!chosen && chosen !== 0) await new Promise(r => setTimeout(r, 120));
+      }
+      if (chosen === null) return null;
+      // A running NPC can duck behind cover between aiming and firing, which
+      // is a fair miss. Take a few shots at whatever is currently in the open.
+      for (let tries = 0; tries < 5; tries++) {
+        const n = game.npcs[chosen];
+        if (!n.alive) break;
+        const chest = n.root.position.clone().setY(1.0);
+        const eye = new THREE.Vector3(game.state.pos.x, game.cfg.eye, game.state.pos.z);
+        if (game.hasLineOfSight(eye, chest)) {
+          game.aimAt(chest);
+          game.state.mag = 12;
+          game.state.lastShot = -1e9;
+          game.shoot();
+        }
+        await new Promise(r => setTimeout(r, 450));
+      }
+      return {
+        index: chosen,
+        scoreBefore: before,
+        scoreAfter: game.state.score,
+        aliveHere: game.npcs[chosen].alive,
+        sent: net.stats.shots,
+        lastHit: net.stats.lastHit || null,
+        rejected: net.stats.rejected,
+        reason: net.stats.lastRejection,
+      };
+    });
+
+    check('ana could line up on an NPC', !!npcShot,
+          npcShot ? `npc ${npcShot.index}` : 'never got a clear line');
+
+    if (npcShot) {
+      check('the shot scored, once per kill', npcShot.scoreAfter === npcShot.scoreBefore + 250,
+            `score ${npcShot.scoreBefore} -> ${npcShot.scoreAfter}; ` +
+            `${npcShot.sent} shots sent, server said "${npcShot.lastHit}"` +
+            (npcShot.rejected ? `, ${npcShot.rejected} rejected: ${npcShot.reason}` : ''));
+      check('the NPC is down on the shooting client', npcShot.aliveHere === false);
+
+      const boSaw = await bo.evaluate(i => ({
+        alive: game.npcs[i].alive,
+        toppled: game.npcs[i].root.rotation.x,
+      }), npcShot.index);
+      check('the NPC is down on the other client too', boSaw.alive === false,
+            `bo sees alive=${boSaw.alive}`);
+      check('the body toppled over rather than walking on', boSaw.toppled > 0.5,
+            `rotation.x ${boSaw.toppled.toFixed(2)}`);
+
+      // and it must not come back when the next snapshots land
+      await sleep(1500);
+      const later = await Promise.all([
+        ana.evaluate(i => game.npcs[i].alive, npcShot.index),
+        bo.evaluate(i => game.npcs[i].alive, npcShot.index),
+      ]);
+      check('the NPC stays down as snapshots keep arriving',
+            later[0] === false && later[1] === false,
+            `ana ${later[0]}, bo ${later[1]}`);
+    }
+
+    // a target broken by one client breaks on the other as well
+    const targetShot = await ana.evaluate(async () => {
+      const eye = new THREE.Vector3(game.state.pos.x, game.cfg.eye, game.state.pos.z);
+      const t = game.targets.find(t => t.alive && game.hasLineOfSight(eye, t.mesh.position));
+      if (!t) return null;
+      const index = game.targets.indexOf(t);
+      game.aimAt(t.mesh.position);
+      game.state.mag = 12;
+      game.state.lastShot = -1e9;
+      game.shoot();
+      await new Promise(r => setTimeout(r, 900));
+      return { index, alive: game.targets[index].alive };
+    });
+    if (targetShot) {
+      const boTarget = await bo.evaluate(i => game.targets[i].alive, targetShot.index);
+      check('a target broken by one player is broken for everyone',
+            targetShot.alive === false && boTarget === false,
+            `ana ${targetShot.alive}, bo ${boTarget}`);
+    }
+
+    // remote figures must not sprint their legs
+    const legSpeed = await bo.evaluate(async () => {
+      const n = game.npcs.find(n => n.alive);
+      if (!n || !n.fig) return null;
+      const start = n.netPhase || 0;
+      const t0 = performance.now();
+      await new Promise(r => setTimeout(r, 1200));
+      const elapsed = (performance.now() - t0) / 1000;
+      return { perSecond: ((n.netPhase || 0) - start) / elapsed, speed: n.speed };
+    });
+    // an NPC runs at ~3.4-5.2 u/s and the cycle is 2.4 rad per unit
+    check('remote figures animate at running speed, not triple speed',
+          legSpeed === null || legSpeed.perSecond < 16,
+          legSpeed ? `${legSpeed.perSecond.toFixed(1)} rad/s of run cycle` : 'no NPC to sample');
+
+    /* ------------------------- a late joiner gets the level in progress */
+    // The seed alone is not enough once anything has been shot: a client that
+    // builds its own level ends up applying the server's entity indices to a
+    // different set of objects, which is how new targets went missing and an
+    // extra NPC turned into an invisible thing that ate bullets.
+    const late = await browsers[0].newPage();
+    late.on('pageerror', e => errors.push('late: ' + e.message));
+    await late.goto(`${BASE}/index.html?mp&name=late`, { waitUntil: 'load' });
+    await late.waitForFunction('window.game && window.net && net.self.id', { timeout: 30000 });
+    await late.evaluate(() => {
+      game.setActive(true);
+      document.getElementById('menu').classList.add('hidden');
+    });
+    await sleep(1200);
+
+    const worldState = await Promise.all([ana, late].map(p => p.evaluate(() => ({
+      level: game.state.level,
+      targets: game.targets.length,
+      alive: game.targets.map(t => (t.alive ? 1 : 0)).join(''),
+      npcs: game.npcs.length,
+      wander: game.targets.map(t => (t.wander ? 1 : 0)).join(''),
+    }))));
+    check('a late joiner lands in the level already in progress',
+          worldState[0].level === worldState[1].level &&
+          worldState[0].targets === worldState[1].targets &&
+          worldState[0].npcs === worldState[1].npcs,
+          `level ${worldState[1].level}, ${worldState[1].targets} targets, ${worldState[1].npcs} NPCs`);
+    check('the late joiner agrees on which targets are already broken',
+          worldState[0].alive === worldState[1].alive,
+          `ana ${worldState[0].alive} vs late ${worldState[1].alive}`);
+    check('and on which of them drift',
+          worldState[0].wander === worldState[1].wander,
+          `ana ${worldState[0].wander} vs late ${worldState[1].wander}`);
+
+    const lateTargets = await late.evaluate(() => ({
+      visible: game.targets.filter(t => t.mesh.visible && t.alive).length,
+      inScene: game.targets.filter(t => t.alive && t.mesh.parent).length,
+    }));
+    check('the late joiner can actually see the live targets',
+          lateTargets.visible > 0 && lateTargets.visible === lateTargets.inScene,
+          `${lateTargets.visible} visible of ${lateTargets.inScene} in the scene`);
+
+    /* Nothing invisible may stop a bullet. Fire at static cover — down a line
+     * with no NPC or target near it, so nothing is moving and the client's
+     * interpolation window cannot explain a difference — and check the server
+     * stops the round in the same place. This is the regression test for the
+     * arena collapsing to the origin server-side. */
+    const geometry = await late.evaluate(async () => {
+      const eye = new THREE.Vector3(game.state.pos.x, game.cfg.eye, game.state.pos.z);
+      let pick = null;
+      for (let a = 0; a < Math.PI * 2 && !pick; a += Math.PI / 24) {
+        const dir = new THREE.Vector3(Math.sin(a), 0, Math.cos(a));
+        const hit = game.traceShot(eye, dir);
+        if (!hit.normal || hit.distance > 25) continue;    // want static cover
+        const ray = new THREE.Ray(eye, dir);
+        const movers = []
+          .concat(game.targets.filter(t => t.alive).map(t => t.mesh.position))
+          .concat(game.npcs.filter(n => n.alive).map(n => n.root.position.clone().setY(1)));
+        const nearRay = movers.some(p =>
+          ray.distanceToPoint(p) < 2 && eye.distanceTo(p) < hit.distance + 3);
+        if (nearRay) continue;                             // something might drift into it
+        pick = { dir, distance: hit.distance, object: hit.object ? hit.object.name : '?' };
+      }
+      if (!pick) return null;
+
+      let serverSaid = null;
+      net.on('hit', m => { if (m.by === net.self.id) serverSaid = m; });
+      game.aimAt(eye.clone().addScaledVector(pick.dir, 50));
+      game.state.mag = 12; game.state.lastShot = -1e9;
+      game.shoot();
+      await new Promise(r => setTimeout(r, 1000));
+      if (!serverSaid) return { pick: pick.distance, object: pick.object, server: null };
+      return {
+        pick: +pick.distance.toFixed(1),
+        object: pick.object,
+        kind: serverSaid.kind,
+        server: +Math.hypot(serverSaid.point.x - eye.x, serverSaid.point.z - eye.z).toFixed(1),
+      };
+    });
+
+    check('found static cover to test against', !!geometry && geometry.server !== null,
+          geometry ? `${geometry.object} at ${geometry.pick}u` : 'no clear line to cover');
+    if (geometry && geometry.server !== null) {
+      check('client and server stop a bullet at the same place',
+            Math.abs(geometry.pick - geometry.server) < 1.5,
+            `client ${geometry.pick}u on the ${geometry.object}, server ${geometry.server}u`);
+    }
+
+    await late.close();
+    await sleep(400);
+
     /* ------------------------------------------------ cheating is caught */
     const cheat = await ana.evaluate(async () => {
       const before = net.stats.corrections;
@@ -238,13 +452,23 @@ async function advance(page, seconds, timeout = 60000) {
 
     /* ------------------------------------------------------ leaving */
     await bo.close();
-    await sleep(900);
-    const afterLeave = await ana.evaluate('net.remoteCount()');
-    check('a player who leaves is removed from the world', afterLeave === 0,
-          `${afterLeave} remote bodies left`);
+    // poll rather than guessing at a delay
+    for (let i = 0; i < 30; i++) {
+      if (await ana.evaluate('net.remoteCount()') === 0) break;
+      await sleep(100);
+    }
+    const afterLeave = await ana.evaluate(() => ({
+      count: net.remoteCount(),
+      ids: [...net.remotes.keys()],
+      self: net.self.id,
+    }));
+    check('a player who leaves is removed from the world', afterLeave.count === 0,
+          `${afterLeave.count} left: ids ${JSON.stringify(afterLeave.ids)}, ana is ${afterLeave.self}`);
 
     check('no console errors on either client', errors.length === 0,
           errors.slice(0, 3).join(' | '));
+
+    if (failures) log('  server log: ' + serverLog.slice(-6).join(' | '));
   } finally {
     for (const b of browsers) await b.close();
     server.kill();

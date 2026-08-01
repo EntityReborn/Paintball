@@ -20,9 +20,9 @@ vendored in `vendor/`.
 | `R` | reload |
 | `Esc` | pause |
 
-**A level ends when every NPC is down.** They do not respawn, so the level is a
-hunt; the fresh set that appears belongs to the next level, which has one more
-NPC than the last.
+**A level ends when the arena is clear** — every NPC down *and* every target
+broken. NPCs do not respawn, so the level is a hunt; the fresh set that appears
+belongs to the next level, which has one more NPC than the last.
 
 | Event | Score |
 | --- | --- |
@@ -33,6 +33,10 @@ NPC than the last.
 
 The score never goes below zero. Every hit and every miss floats a `+100` / `−25`
 label at the spot, and the score readout flashes green or red to match.
+
+Pausing shows a career summary: accuracy, shots fired, hits and misses, targets
+broken, NPCs down, best streak, longest shot and distance walked (both in feet),
+jumps, reloads, time played, share of time sighted, and points per shot.
 
 ## Multiplayer
 
@@ -51,6 +55,14 @@ else and checks every position it is told about against the movement rules —
 speed, arena bounds, height, pitch. A client that claims to have moved further
 than a sprinting player could is rejected and snapped back. This is the part
 that keeps a public leaderboard honest without a full authoritative rewrite.
+
+**Shots are adjudicated by the server.** The client fires, spends the round and
+draws the tracer, but what it hit is decided server-side by re-running the same
+raycast, with the rate of fire and the shot's origin checked against where the
+player actually is. Because clients render everyone else an interpolation window
+behind, the server rewinds up to 350ms — more if a slow client asks, capped at
+700ms — and sweeps between position samples so a running figure cannot slip
+through the gaps. The rewind can never reach through cover.
 
 The server hands out the map seed on join, so every client generates a
 byte-identical arena from the same code. The NPCs and targets are simulated
@@ -116,10 +128,10 @@ a web server.
 
 Two layers, both driving the real engine in a real WebGL context.
 
-**Browser suite** (`tests/tests.html`) — 132 tests over bootstrap, world
+**Browser suite** (`tests/tests.html`) — 145 tests over bootstrap, world
 generation, targets, rendering, movement, collision, shooting, breaking, levels,
 input, the reload animation, NPCs, view angles, zoom, drifting targets, scoring,
-score indicators, performance, and HUD wiring. Rendering is
+score indicators, player statistics, performance, and HUD wiring. Rendering is
 checked by reading pixels back off the canvas; input by dispatching real
 `KeyboardEvent` / `MouseEvent` objects. Open it in a browser to watch it run, or
 let the driver do it.
@@ -128,9 +140,10 @@ let the driver do it.
 plays the game through Chrome's own input pipeline (trusted keyboard and mouse
 events, real pointer lock) and writes screenshots to `tests/shots/`.
 
-**Server tests** (`tests/server.test.js`) — 12 node tests over the headless
-engine, seed determinism, the room's plausibility rules, snapshot cadence and
-size, and the static file server's path handling.
+**Server tests** (`tests/server.test.js`) — 25 node tests over the headless
+engine, seed determinism, the room's plausibility rules, server-side shot
+validation and lag compensation, snapshot cadence and size, and the static file
+server's path handling.
 
 **Multiplayer** (`tests/multiplayer.js`) — starts the server, opens two real
 Chrome windows against it, walks one player with genuine key presses and checks
@@ -193,6 +206,21 @@ re-entering the window rather than a real flick.
   requested with `unadjustedMovement`. Every write to the angles goes through one
   clamped path, and samples beyond `lookSpikePx` (500 by default) are discarded
   rather than clamped — clamping still turns the view, just less far.
+- **The server built a different arena from the same seed.** The floor texture
+  drew 900 speckles from the world RNG — 1800 numbers the headless server never
+  drew, because it has no canvas. Every obstacle after that landed somewhere
+  else on the server than on the client: invisible cover that stopped bullets
+  while players walked through it. Decoration now uses its own randomness, and
+  the server sends an arena fingerprint on join that the client checks.
+- **Server-side raycasts hit geometry stacked at the origin.** three.js only
+  refreshes world matrices while rendering, and the server never renders, so
+  the floor stood on its edge and every crate sat unrotated at 0,0,0.
+  `scene.updateMatrixWorld(true)` once at build time fixes it.
+- **Clients never heard about level changes.** The seed is enough to build the
+  first level and nothing after it, so a client kept playing level 1 while the
+  server moved on — new targets applied to already-broken ones and never
+  appeared, and the extra NPC each level adds existed only server-side. The
+  server now sends the level contents on join and on every change.
 - **Breaking a target stalled for ~300ms.** Debris shards were only drawn after
   the first break, so three.js compiled their shader mid-frame. All shaders are
   now warmed up at load, the shards are pooled, opaque, and kept out of the shadow

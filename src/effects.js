@@ -117,6 +117,7 @@ PB.createEffects = function (ctx) {
     flashPool.push({ light: fl, life: 0 });
   }
   var nextFlash = 0;
+  var NO_FLASH = { light: { position: { copy: function () {} }, intensity: 0 }, life: 0 };
 
   function takeShard() {
     for (var i = 0; i < shardPool.length; i++) {
@@ -130,6 +131,8 @@ PB.createEffects = function (ctx) {
     spawnIndicator: spawnIndicator, addScore: addScore,
     shardPool: shardPool, debris: debris, takeShard: takeShard,
     flashPool: flashPool, nextFlash: function () {
+      // headless has no lights to flash, so hand back something inert
+      if (!flashPool.length) return NO_FLASH;
       var f = flashPool[nextFlash];
       nextFlash = (nextFlash + 1) % flashPool.length;
       return f;

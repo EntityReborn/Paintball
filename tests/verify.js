@@ -362,7 +362,7 @@ async function shot(page, name) {
     }
     return { level: game.state.level, targets: game.aliveCount() };
   });
-  check('clearing every target does not end the level',
+  check('clearing every target is not enough on its own',
         afterTargets.targets === 0 && afterTargets.level === levelBefore,
         `${afterTargets.targets} targets left, still level ${afterTargets.level}`);
 
@@ -379,7 +379,7 @@ async function shot(page, name) {
     return { completed, level: game.state.level, npcs: game.npcsAlive(),
              targets: game.aliveCount(), bodies: game.npcs.filter(n => !n.alive).length };
   });
-  check('downing every NPC completes the level', levelAfter.completed === 1,
+  check('downing the NPCs with the targets already gone completes it', levelAfter.completed === 1,
         `${levelAfter.completed} completions, level ${levelBefore} -> ${levelAfter.level}`);
   check('the next level is stocked with new NPCs and targets',
         levelAfter.npcs === npcCount + 1 && levelAfter.targets === 10,

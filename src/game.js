@@ -143,6 +143,17 @@ function createGame(options) {
     vy: 0, grounded: true, bob: 0, bobX: 0, bobY: 0, recoil: 0, kick: 0,
     kickBack: 0, reloadT: 0, active: false, shotsFired: 0, elapsed: 0,
     lookSpikes: 0, maxLookDelta: 0, zoom: 0, networked: false,
+
+    /* Everything worth bragging about. Distance is kept in world units and
+     * converted on the way out — the arena is metric, a unit is a metre. */
+    stats: {
+      shotsFired: 0, shotsHit: 0, misses: 0,
+      targetsBroken: 0, npcsDown: 0,
+      distance: 0, jumps: 0, reloads: 0,
+      levelsCleared: 0, timePlayed: 0, timeSighted: 0,
+      bestStreak: 0, streak: 0,
+      longestShot: 0, bestScore: 0,
+    },
   };
   var zooming = false;
 
@@ -174,6 +185,7 @@ function createGame(options) {
   var obstacleMeshes = world.obstacleMeshes;
   var wallMeshes = world.wallMeshes;
   var floor = ctx.floor = world.floor;
+  var arenaFingerprint = world.fingerprint;
 
   var fx = ctx.fx = PB.createEffects(ctx);
   var indicators = fx.indicators;
@@ -211,6 +223,14 @@ function createGame(options) {
   var updateNPCs = N.updateNPCs;
 
   var sfx = PB.createAudio(ctx);
+
+  /* Put the static geometry into world space once, up front.
+   *
+   * three.js only refreshes world matrices while rendering. Headless never
+   * renders, so without this the floor and every piece of cover keep an
+   * identity matrix — unrotated and stacked at the origin — and every
+   * server-side raycast hits phantom geometry instead of the real arena. */
+  scene.updateMatrixWorld(true);
 
   /* ------------------------------------------------------------ bullets */
   var bullets = [];
@@ -426,6 +446,7 @@ function createGame(options) {
     if (state.reloading || state.mag === cfg.magSize) return false;
     state.reloading = true;
     state.reloadT = 0;
+    state.stats.reloads++;
     emit('reloadStart', {});
     sfx.reload();
     return true;
@@ -492,6 +513,7 @@ function createGame(options) {
     state.lastShot = now;
     state.mag--;
     state.shotsFired++;
+    state.stats.shotsFired++;
     sfx.shoot();
     emit('ammo', { mag: state.mag, size: cfg.magSize });
     emit('shoot', { mag: state.mag });
@@ -503,6 +525,12 @@ function createGame(options) {
 
     var hit = traceShot(_eye, _fwd);
     var mesh = fireBullet(_origin, hit);
+    if (state.networked) {
+      emit('shotFired', {
+        origin: { x: _eye.x, y: _eye.y, z: _eye.z },
+        dir: { x: _fwd.x, y: _fwd.y, z: _fwd.z },
+      });
+    }
 
     state.recoil = 1;
     state.kick = 1;
@@ -556,8 +584,33 @@ function createGame(options) {
     return { npcs: npcsAlive(), targets: aliveCount() };
   }
 
+  // The level is over when the arena is clear: every NPC down and every
+  // target broken. Either one alone leaves work to do.
+  /* Rebuild the level from a description rather than from our own RNG.
+   *
+   * A networked client cannot generate the next level itself: its random
+   * stream has long since diverged from the server's. Without this the client
+   * keeps playing the level it built at boot while the server has moved on —
+   * new targets land on already-broken ones and never appear, and any NPC the
+   * server added exists only as an invisible thing that stops bullets. */
+  function applyLevel(desc) {
+    clearLevel();
+    state.level = desc.level;
+    for (var i = 0; i < desc.targets.length; i++) {
+      var t = desc.targets[i];
+      spawnTarget(t[0], t[1], t[2], !!t[3]);
+    }
+    for (var n = 0; n < desc.npcs; n++) npcs.push(makeNPC(n));
+    scene.updateMatrixWorld(true);
+    emit('level', {
+      level: state.level, npcs: npcsAlive(), targets: aliveCount(), complete: false,
+    });
+    return { targets: aliveCount(), npcs: npcsAlive() };
+  }
+
   function checkLevel() {
-    if (npcsAlive() > 0) return false;
+    if (npcsAlive() > 0 || aliveCount() > 0) return false;
+    state.stats.levelsCleared++;
     addScore(cfg.scoreLevelBonus, null);
     emit('levelComplete', { level: state.level, score: state.score });
     sfx.wave();
@@ -637,6 +690,7 @@ function createGame(options) {
     if (keys['Space'] && state.grounded) {
       state.vy = cfg.jump;
       state.grounded = false;
+      state.stats.jumps++;
     }
     state.vy -= cfg.gravity * dt;
 
@@ -655,6 +709,7 @@ function createGame(options) {
     p.z = Math.max(-lim, Math.min(lim, p.z));
 
     var speed = Math.hypot(v.x, v.z);
+    state.stats.distance += speed * dt;
     state.bob += dt * speed * 1.35;
     var amp = Math.min(1, speed / cfg.speed);
     var bobY = state.grounded ? Math.sin(state.bob * 2) * 0.035 * amp : 0;
@@ -701,19 +756,33 @@ function createGame(options) {
       }
 
       var h = b.hit;
+      if (state.networked) {
+        // the server decides what this hit; see applyServerHit
+        scene.remove(b.mesh);
+        var netAt = bullets.indexOf(b);
+        if (netAt !== -1) bullets.splice(netAt, 1);
+        continue;
+      }
       if (h.target && h.target.alive) {
         var where = h.target.mesh.position.clone();
         breakTarget(h.target, b.dir);
+        recordHit(where);
+        state.stats.targetsBroken++;
         addScore(cfg.scoreTarget, where);
         emit('hit', { target: h.target, score: state.score, left: aliveCount() });
         sfx.hit();
+        checkLevel();                 // the last target can finish the level too
       } else if (h.npc && h.npc.alive) {
+        recordHit(h.point);
+        state.stats.npcsDown++;
         knockDownNPC(h.npc);
         emit('hit', { npc: h.npc, score: state.score, left: aliveCount() });
         sfx.hit();
       } else {
         // hit nothing worth hitting: a wall, the floor, a body, or thin air
         if (h.normal) addImpact(h.point, h.normal);
+        state.stats.misses++;
+        state.stats.streak = 0;
         addScore(cfg.scoreMiss, h.point);
         emit('miss', { point: h.point, score: state.score });
         sfx.miss();
@@ -796,6 +865,10 @@ function createGame(options) {
 
   function update(dt) {
     state.elapsed += dt;
+    if (state.active) {
+      state.stats.timePlayed += dt;
+      if (state.zoom > 0.5) state.stats.timeSighted += dt;
+    }
     updateZoom(dt);
     if (state.active) {
       movePlayer(dt);
@@ -845,6 +918,103 @@ function createGame(options) {
     running = false;
     if (rafId !== null) cancelAnimationFrame(rafId);
     rafId = null;
+  }
+
+  /* Apply an outcome the server decided: break the target it says was hit,
+   * mark the score it says we now have, and play the same effects a local
+   * hit would have. */
+  function applyServerHit(msg) {
+    var point = msg.point
+      ? new THREE.Vector3(msg.point.x, msg.point.y, msg.point.z)
+      : null;
+    var dir = msg.dir
+      ? new THREE.Vector3(msg.dir.x, msg.dir.y, msg.dir.z)
+      : new THREE.Vector3(0, 1, 0);
+
+    if (msg.kind === 'target') {
+      var t = targets[msg.index];
+      if (t && t.alive) {
+        breakTarget(t, dir);
+        state.stats.targetsBroken++;
+        recordHit(point);
+      }
+      spawnIndicator(cfg.scoreTarget, point);
+      sfx.hit();
+      emit('hit', { target: t, score: state.score, left: aliveCount() });
+    } else if (msg.kind === 'npc') {
+      state.stats.npcsDown++;
+      recordHit(point);
+      spawnIndicator(cfg.scoreNpc, point);
+      sfx.hit();
+      emit('hit', { npc: npcs[msg.index], score: state.score, left: aliveCount() });
+    } else {
+      state.stats.misses++;
+      state.stats.streak = 0;
+      if (point && msg.normal) {
+        addImpact(point, new THREE.Vector3(msg.normal.x, msg.normal.y, msg.normal.z));
+      }
+      spawnIndicator(cfg.scoreMiss, point);
+      sfx.miss();
+      emit('miss', { point: point, score: state.score });
+    }
+  }
+
+  function setScore(n) {
+    state.score = Math.max(0, n | 0);
+    if (state.score > state.stats.bestScore) state.stats.bestScore = state.score;
+    emit('score', { score: state.score, delta: 0, nominal: 0 });
+  }
+
+  /* -------------------------------------------------------------- stats */
+  var _shotFrom = new THREE.Vector3();
+
+  function recordHit(point) {
+    var st = state.stats;
+    st.shotsHit++;
+    st.streak++;
+    if (st.streak > st.bestStreak) st.bestStreak = st.streak;
+    if (point) {
+      camera.getWorldPosition(_shotFrom);
+      var range = _shotFrom.distanceTo(point);
+      if (range > st.longestShot) st.longestShot = range;
+    }
+  }
+
+  var FEET_PER_UNIT = 3.28084;      // the arena is metric: one unit, one metre
+
+  function stats() {
+    var st = state.stats;
+    var fired = st.shotsFired;
+    return {
+      score: state.score,
+      bestScore: st.bestScore,
+      level: state.level,
+      levelsCleared: st.levelsCleared,
+      shotsFired: fired,
+      shotsHit: st.shotsHit,
+      misses: st.misses,
+      accuracy: fired ? st.shotsHit / fired : 0,
+      targetsBroken: st.targetsBroken,
+      npcsDown: st.npcsDown,
+      bestStreak: st.bestStreak,
+      streak: st.streak,
+      longestShot: st.longestShot,
+      longestShotFeet: st.longestShot * FEET_PER_UNIT,
+      distance: st.distance,
+      distanceFeet: st.distance * FEET_PER_UNIT,
+      jumps: st.jumps,
+      reloads: st.reloads,
+      timePlayed: st.timePlayed,
+      timeSighted: st.timeSighted,
+      sightedShare: st.timePlayed ? st.timeSighted / st.timePlayed : 0,
+      shotsPerMinute: st.timePlayed ? (fired / st.timePlayed) * 60 : 0,
+      pointsPerShot: fired ? state.score / fired : 0,
+    };
+  }
+
+  function resetStats() {
+    var st = state.stats;
+    for (var k in st) if (Object.prototype.hasOwnProperty.call(st, k)) st[k] = 0;
   }
 
   /* --------------------------------------------------------- test hooks */
@@ -898,10 +1068,14 @@ function createGame(options) {
     on: on, emit: emit, start: start, stop: stop, update: update, render: render,
     shoot: shoot, reload: reload, spawnTargets: spawnTargets, spawnTarget: spawnTarget,
     startLevel: startLevel, checkLevel: checkLevel, clearLevel: clearLevel,
+    applyLevel: applyLevel,
     npcsAlive: npcsAlive, addScore: addScore, spawnIndicator: spawnIndicator,
     moveTarget: moveTarget, makeNPC: makeNPC,
     traceShot: traceShot, aliveCount: aliveCount, movePlayer: movePlayer,
     updateNPCs: updateNPCs, knockDownNPC: knockDownNPC, placeNPC: placeNPC, poseGun: poseGun,
+    arenaFingerprint: arenaFingerprint,
+    stats: stats, resetStats: resetStats, recordHit: recordHit, FEET_PER_UNIT: FEET_PER_UNIT,
+    applyServerHit: applyServerHit, setScore: setScore, breakTarget: breakTarget,
     applyLook: applyLook, setPitch: setPitch,
     setLookDebug: function (on) { lookDebug = !!on; if (!on) lookLog.length = 0; },
     lookLog: function () { return lookLog.slice(); },
