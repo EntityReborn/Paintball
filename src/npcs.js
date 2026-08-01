@@ -178,7 +178,9 @@ PB.createNPCs = function (ctx) {
         if (n.y <= 0) { n.y = 0; n.vy = 0; n.grounded = true; }
       }
       p.y = n.y;
-      n.root.rotation.y = n.heading;
+      // travel is (sin h, cos h), which is local +Z, while a figure faces its
+      // local -Z — without the half turn they run backwards
+      n.root.rotation.y = n.heading + Math.PI;
 
       // keep the world matrix current: bullets raycast against the hitbox, and
       // three.js would otherwise only refresh it at render time, so shots would

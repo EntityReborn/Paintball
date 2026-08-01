@@ -470,6 +470,145 @@ test('clearing the arena tells every client about the new level', () => {
   assert.equal(levelMsgs[0].npcs, g.npcs.length, 'wrong NPC count in the message');
 });
 
+/* ---------------------------------------------------------------- perks */
+test('the server owns the perks and hands them out', () => {
+  const room = new Room({ seed: 88 });
+  const g = room.game;
+  const p = room.join('ana');
+
+  g.perkSystem.clear();
+  const perk = g.perkSystem.spawn({ kind: 'speed', x: 5, y: 1.1, z: 5 });
+  assert.ok(perk, 'nothing spawned');
+
+  p.x = 5; p.y = g.cfg.eye; p.z = 5;
+  const picked = room.collectPerks();
+  assert.equal(picked.length, 1, 'standing on it collected nothing');
+  assert.equal(picked[0].kind, 'speed');
+  assert.equal(picked[0].by, p.id, 'credited to the wrong player');
+  assert.ok(g.perkSystem.held(p, 'speed'), 'the player did not get the effect');
+  assert.equal(g.perkSystem.perks.length, 0, 'it was left on the ground');
+});
+
+test('a perk belongs to the player who reached it', () => {
+  const room = new Room({ seed: 88 });
+  const g = room.game;
+  const near = room.join('near');
+  const far = room.join('far');
+  g.perkSystem.clear();
+  g.perkSystem.spawn({ kind: 'clip', x: -8, y: 1.1, z: -8 });
+
+  near.x = -8; near.z = -8; near.y = g.cfg.eye;
+  far.x = 12; far.z = 12; far.y = g.cfg.eye;
+
+  const picked = room.collectPerks();
+  assert.equal(picked.length, 1, 'wrong number of pickups');
+  assert.equal(picked[0].by, near.id, 'the wrong player got it');
+  assert.ok(g.perkSystem.held(near, 'clip'), 'the collector has no perk');
+  assert.ok(!g.perkSystem.held(far, 'clip'), 'the other player got it too');
+});
+
+test('a perk runs out on the server as well', () => {
+  const room = new Room({ seed: 88 });
+  const g = room.game;
+  const p = room.join('ana');
+  g.perkSystem.grant(p, 'fireRate');
+  assert.ok(g.perkSystem.held(p, 'fireRate'));
+  for (let i = 0; i < 30 * (g.cfg.perkDuration + 1); i++) room.step(1000 / 30);
+  assert.ok(!g.perkSystem.held(p, 'fireRate'), 'it never expired');
+});
+
+test('rapid fire lets that player shoot faster, and only that player', () => {
+  const room = new Room({ seed: 88 });
+  const g = room.game;
+  const quick = room.join('quick');
+  const plain = room.join('plain');
+  g.perkSystem.grant(quick, 'fireRate');
+
+  const down = who => ({
+    t: 'shot', origin: { x: who.x, y: who.y, z: who.z }, dir: { x: 0, y: -1, z: 0 },
+  });
+  const t0 = Date.now();
+  assert.ok(room.applyShot(quick.id, down(quick), t0).ok, 'first shot blocked');
+  assert.ok(room.applyShot(plain.id, down(plain), t0).ok, 'first shot blocked');
+
+  // half the normal interval: allowed with the perk, refused without it
+  const soon = t0 + Math.round(g.cfg.fireMs * 0.55);
+  assert.ok(room.applyShot(quick.id, down(quick), soon).ok,
+            'rapid fire was still rate limited');
+  assert.ok(!room.applyShot(plain.id, down(plain), soon).ok,
+            'a player without the perk fired too fast');
+});
+
+test('the speed perk widens the movement budget for that player', () => {
+  const room = new Room({ seed: 88 });
+  const g = room.game;
+  const fast = room.join('fast');
+  const slow = room.join('slow');
+  g.perkSystem.grant(fast, 'speed');
+
+  const t0 = Date.now();
+  fast.lastStateAt = t0;
+  slow.lastStateAt = t0;
+  // a step past what the plain budget allows in 200ms, but inside the boosted one
+  const dt = 0.2;
+  const plainBudget = g.cfg.sprint * dt * 1.35 + 0.35;
+  const reach = plainBudget + 0.3;
+  const move = who => ({
+    x: who.x + reach, y: g.cfg.eye, z: who.z, yaw: 0, pitch: 0,
+    moving: true, grounded: true, vy: 0,
+  });
+  assert.ok(room.applyState(fast.id, move(fast), t0 + 200).ok,
+            'the boosted player was snapped back');
+  assert.ok(!room.applyState(slow.id, move(slow), t0 + 200).ok,
+            'an unboosted player got away with it');
+});
+
+test('snapshots carry the world clock and whatever perks are out', () => {
+  const room = new Room({ seed: 88 });
+  room.join('ana');
+  room.game.perkSystem.clear();
+  room.game.perkSystem.spawn({ kind: 'doubleJump', x: 3, y: 1.1, z: -3 });
+  for (let i = 0; i < 10; i++) room.step(1000 / 30);
+
+  const snap = room.snapshot();
+  assert.ok(typeof snap.wt === 'number', 'no world clock in the snapshot');
+  assert.ok(snap.wt > 0, 'the world clock is not running');
+  assert.equal(snap.perks.length, 1, 'the perk is not in the snapshot');
+  assert.equal(snap.perks[0][1], 'doubleJump', 'wrong perk kind');
+});
+
+test('the sliders are in the same place on the server as on a client', () => {
+  const a = new Room({ seed: 4242 });
+  const b = new Room({ seed: 4242 });
+  a.game.setWorldTime(12.75);
+  b.game.setWorldTime(12.75);
+  assert.equal(a.game.movers.length, b.game.movers.length, 'slider counts differ');
+  for (let i = 0; i < a.game.movers.length; i++) {
+    const pa = a.game.movers[i].mesh.position;
+    const pb = b.game.movers[i].mesh.position;
+    assert.ok(pa.distanceTo(pb) < 1e-9, `slider ${i} is somewhere else`);
+  }
+});
+
+test('the balcony exists server-side and stops bullets', () => {
+  const room = new Room({ seed: 4242 });
+  const g = room.game;
+  assert.ok(g.balcony, 'no balcony on the server');
+  const deck = g.balcony.parts.find(p => p.mesh.name === 'balconyDeck');
+  assert.ok(deck, 'no deck');
+
+  // fire up into the underside of the deck
+  const p = room.join('ana');
+  const c = deck.box.getCenter(new globalThis.THREE.Vector3());
+  p.x = c.x; p.y = g.cfg.eye; p.z = c.z;
+  const res = room.applyShot(p.id, {
+    t: 'shot', origin: { x: c.x, y: g.cfg.eye, z: c.z }, dir: { x: 0, y: 1, z: 0 },
+  });
+  assert.ok(res.ok, res.reason);
+  assert.ok(res.event.point.y < deck.box.max.y + 0.1,
+            'the shot went through the balcony');
+});
+
 /* --------------------------------------------------------------- server */
 test('the http server serves the client and a health check', async () => {
   process.env.PORT = '0';

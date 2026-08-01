@@ -23,7 +23,7 @@ var DEFAULTS = {
   accel: 60,
   friction: 10,
   gravity: 26,
-  jump: 8.2,
+  jump: 10.4,               // enough to land on the low cover, roughly 2.1u up
   magSize: 12,
   reloadMs: 950,
   fireMs: 130,
@@ -46,6 +46,19 @@ var DEFAULTS = {
   fov: 75,
   zoomFov: 42,                // right mouse button sights down the barrel
   zoomTime: 0.13,             // seconds to go all the way in or out
+
+  balconyHeight: 3.4,
+  balconyWidth: 26,
+  balconyDepth: 7,
+  stepHeight: 0.45,           // how high a ledge can be and still be walked up
+  movingObstacles: 4,
+
+  perks: true,
+  perkEvery: 12,              // seconds between spawn attempts
+  perkMax: 3,                 // how many may be out at once
+  perkLife: 26,               // how long one waits to be collected
+  perkDuration: 15,           // how long its effect lasts
+  perkRadius: 1.3,
 };
 
 var VIEW_LAYER = 1;         // the gun renders here, in a second depth-cleared pass
@@ -143,6 +156,7 @@ function createGame(options) {
     vy: 0, grounded: true, bob: 0, bobX: 0, bobY: 0, recoil: 0, kick: 0,
     kickBack: 0, reloadT: 0, active: false, shotsFired: 0, elapsed: 0,
     lookSpikes: 0, maxLookDelta: 0, zoom: 0, networked: false,
+    worldTime: 0, airJumps: 0,
 
     /* Everything worth bragging about. Distance is kept in world units and
      * converted on the way out — the arena is metric, a unit is a metre. */
@@ -186,6 +200,8 @@ function createGame(options) {
   var wallMeshes = world.wallMeshes;
   var floor = ctx.floor = world.floor;
   var arenaFingerprint = world.fingerprint;
+  var movers = ctx.movers = world.movers;
+  var balcony = ctx.balcony = world.balcony;
 
   var fx = ctx.fx = PB.createEffects(ctx);
   var indicators = fx.indicators;
@@ -222,7 +238,16 @@ function createGame(options) {
   var knockDownNPC = N.knockDownNPC;
   var updateNPCs = N.updateNPCs;
 
+  var perkSystem = PB.createPerks(ctx);
   var sfx = PB.createAudio(ctx);
+
+  /* Perks change the rules while they last, so anything they touch has to ask
+   * rather than read the config directly. */
+  function fireInterval() { return cfg.fireMs * perkSystem.factor(state, 'fireRate'); }
+  function walkSpeed() { return cfg.speed * perkSystem.factor(state, 'speed'); }
+  function runSpeed() { return cfg.sprint * perkSystem.factor(state, 'speed'); }
+  function magSize() { return Math.round(cfg.magSize * perkSystem.factor(state, 'clip')); }
+  function airJumpsAllowed() { return perkSystem.bonus(state, 'airJumps'); }
 
   /* Put the static geometry into world space once, up front.
    *
@@ -443,7 +468,7 @@ function createGame(options) {
   // Reloading runs on game time rather than a timer, so it stays in step with
   // the animation and behaves the same when the simulation is stepped by hand.
   function reload() {
-    if (state.reloading || state.mag === cfg.magSize) return false;
+    if (state.reloading || state.mag >= magSize()) return false;
     state.reloading = true;
     state.reloadT = 0;
     state.stats.reloads++;
@@ -459,11 +484,11 @@ function createGame(options) {
     }
     state.reloadT = Math.min(1, state.reloadT + dt / (cfg.reloadMs / 1000));
     if (state.reloadT >= 1) {
-      state.mag = cfg.magSize;
+      state.mag = magSize();
       state.reloading = false;
       state.reloadT = 0;
       emit('reloadEnd', {});
-      emit('ammo', { mag: state.mag, size: cfg.magSize });
+      emit('ammo', { mag: state.mag, size: magSize() });
     }
   }
 
@@ -500,7 +525,7 @@ function createGame(options) {
 
   function shoot() {
     var now = state.elapsed * 1000;
-    if (state.reloading || now - state.lastShot < cfg.fireMs) return null;
+    if (state.reloading || now - state.lastShot < fireInterval()) return null;
     if (state.mag <= 0) {
       if (now - state.lastShot > 300) {
         sfx.empty();
@@ -515,7 +540,7 @@ function createGame(options) {
     state.shotsFired++;
     state.stats.shotsFired++;
     sfx.shoot();
-    emit('ammo', { mag: state.mag, size: cfg.magSize });
+    emit('ammo', { mag: state.mag, size: magSize() });
     emit('shoot', { mag: state.mag });
 
     yawObj.updateMatrixWorld(true);
@@ -644,6 +669,37 @@ function createGame(options) {
       _tmpBox.getCenter(_c1);
       box.getCenter(_c2);
 
+      /* Step up rather than being stopped dead.
+       *
+       * Without this, box-against-box resolution pushes the player back
+       * horizontally off anything at all, so a staircase is a wall and the
+       * balcony can only be reached by jumping. If the ledge is low enough
+       * and there is headroom above it, stand on it instead. */
+      var feet = pos.y - cfg.eye;
+      var rise = box.max.y - feet;
+      // allowed while rising too: a player jumping at a crate should get up
+      // onto it rather than being shoved off the side on the way up
+      if (rise > 0.01 && rise <= cfg.stepHeight) {
+        var headroom = true;
+        for (var j = 0; j < colliders.length; j++) {
+          if (j === i) continue;
+          var other = colliders[j];
+          if (other.max.y <= box.max.y + 0.05) continue;
+          if (other.min.y > box.max.y + cfg.playerHeight) continue;
+          if (pos.x + cfg.radius <= other.min.x || pos.x - cfg.radius >= other.max.x) continue;
+          if (pos.z + cfg.radius <= other.min.z || pos.z - cfg.radius >= other.max.z) continue;
+          headroom = false;
+          break;
+        }
+        if (headroom) {
+          pos.y = box.max.y + cfg.eye;
+          if (state.vy < 0) state.vy = 0;      // never cut a jump short
+          state.grounded = true;
+          playerBox(pos, _tmpBox);
+          continue;
+        }
+      }
+
       if (oy <= ox && oy <= oz) {
         if (_c1.y > _c2.y) {
           pos.y += oy;
@@ -674,7 +730,7 @@ function createGame(options) {
     var moving = _wish.lengthSq() > 0;
     if (moving) _wish.normalize().applyAxisAngle(UP, yawObj.rotation.y);
 
-    var maxSpeed = (keys['ShiftLeft'] || keys['ShiftRight']) ? cfg.sprint : cfg.speed;
+    var maxSpeed = (keys['ShiftLeft'] || keys['ShiftRight']) ? runSpeed() : walkSpeed();
     var v = state.vel;
 
     if (moving) {
@@ -687,10 +743,24 @@ function createGame(options) {
       if (Math.hypot(v.x, v.z) < 0.02) { v.x = 0; v.z = 0; }
     }
 
-    if (keys['Space'] && state.grounded) {
-      state.vy = cfg.jump;
-      state.grounded = false;
-      state.stats.jumps++;
+    /* Jumping, with the double-jump perk folded in. `jumpHeld` stops one long
+     * press from spending both jumps in consecutive frames. */
+    if (keys['Space']) {
+      if (state.grounded) {
+        state.vy = cfg.jump;
+        state.grounded = false;
+        state.airJumps = 0;
+        state.stats.jumps++;
+        state.jumpHeld = true;
+      } else if (!state.jumpHeld && state.airJumps < airJumpsAllowed()) {
+        state.vy = cfg.jump;
+        state.airJumps++;
+        state.stats.jumps++;
+        state.jumpHeld = true;
+        emit('doubleJump', { at: state.pos.clone() });
+      }
+    } else {
+      state.jumpHeld = false;
     }
     state.vy -= cfg.gravity * dt;
 
@@ -700,7 +770,12 @@ function createGame(options) {
     p.y += state.vy * dt;
 
     state.grounded = false;
-    if (p.y < cfg.eye) { p.y = cfg.eye; state.vy = 0; state.grounded = true; }
+    if (p.y < cfg.eye) {
+      p.y = cfg.eye;
+      state.vy = 0;
+      state.grounded = true;
+      state.airJumps = 0;
+    }
 
     resolveCollisions(p);
 
@@ -711,7 +786,7 @@ function createGame(options) {
     var speed = Math.hypot(v.x, v.z);
     state.stats.distance += speed * dt;
     state.bob += dt * speed * 1.35;
-    var amp = Math.min(1, speed / cfg.speed);
+    var amp = Math.min(1, speed / walkSpeed());
     var bobY = state.grounded ? Math.sin(state.bob * 2) * 0.035 * amp : 0;
     var bobX = state.grounded ? Math.cos(state.bob) * 0.028 * amp : 0;
 
@@ -865,6 +940,13 @@ function createGame(options) {
 
   function update(dt) {
     state.elapsed += dt;
+    /* The sliders run off this clock. Online it comes from the server and
+     * nowhere else — advancing it locally as well let each client run its own
+     * clock between snapshots, and they drifted apart by a couple of metres. */
+    if (!state.networked) {
+      state.worldTime += dt;
+      world.updateMovers(state.worldTime);
+    }
     if (state.active) {
       state.stats.timePlayed += dt;
       if (state.zoom > 0.5) state.stats.timeSighted += dt;
@@ -875,6 +957,8 @@ function createGame(options) {
       if (firing) shoot();
     }
     updateReload(dt);
+    perkSystem.tickHolder(state, dt);
+    perkSystem.update(dt, state.pos);
     if (!state.networked) updateNPCs(dt);
     updateBullets(dt);
     updateFx(dt);
@@ -920,10 +1004,15 @@ function createGame(options) {
     rafId = null;
   }
 
-  /* Apply an outcome the server decided: break the target it says was hit,
-   * mark the score it says we now have, and play the same effects a local
-   * hit would have. */
-  function applyServerHit(msg) {
+  /* Apply an outcome the server decided.
+   *
+   * Everyone in the room is told about every shot, because the world has to
+   * change for all of them — the target breaks, the body drops, the wall gets
+   * a mark. But only the player who actually fired may have it counted: this
+   * used to run the accounting for every hit anyone landed, so one player's
+   * shooting quietly inflated everybody else's accuracy and streaks.
+   */
+  function applyServerHit(msg, mine) {
     var point = msg.point
       ? new THREE.Vector3(msg.point.x, msg.point.y, msg.point.z)
       : null;
@@ -935,28 +1024,36 @@ function createGame(options) {
       var t = targets[msg.index];
       if (t && t.alive) {
         breakTarget(t, dir);
-        state.stats.targetsBroken++;
-        recordHit(point);
+        if (mine) { state.stats.targetsBroken++; recordHit(point); }
       }
       spawnIndicator(cfg.scoreTarget, point);
-      sfx.hit();
-      emit('hit', { target: t, score: state.score, left: aliveCount() });
+      if (mine) sfx.hit();
+      emit('hit', { target: t, score: state.score, left: aliveCount(), mine: !!mine });
     } else if (msg.kind === 'npc') {
-      state.stats.npcsDown++;
-      recordHit(point);
+      if (mine) { state.stats.npcsDown++; recordHit(point); }
       spawnIndicator(cfg.scoreNpc, point);
-      sfx.hit();
-      emit('hit', { npc: npcs[msg.index], score: state.score, left: aliveCount() });
+      if (mine) sfx.hit();
+      emit('hit', { npc: npcs[msg.index], score: state.score, left: aliveCount(), mine: !!mine });
     } else {
-      state.stats.misses++;
-      state.stats.streak = 0;
+      if (mine) { state.stats.misses++; state.stats.streak = 0; }
       if (point && msg.normal) {
         addImpact(point, new THREE.Vector3(msg.normal.x, msg.normal.y, msg.normal.z));
       }
-      spawnIndicator(cfg.scoreMiss, point);
-      sfx.miss();
-      emit('miss', { point: point, score: state.score });
+      if (mine) spawnIndicator(cfg.scoreMiss, point);
+      emit('miss', { point: point, score: state.score, mine: !!mine });
     }
+  }
+
+  /* Someone else's round: draw the tracer travelling from their muzzle and
+   * let it be heard from where they are standing. */
+  function showRemoteShot(msg) {
+    if (!msg.origin || !msg.point) return null;
+    var from = new THREE.Vector3(msg.origin.x, msg.origin.y, msg.origin.z);
+    var to = new THREE.Vector3(msg.point.x, msg.point.y, msg.point.z);
+    var mesh = fireBullet(from, { point: to });
+    camera.getWorldPosition(_shotFrom);
+    sfx.shootAt(_shotFrom.distanceTo(from));
+    return mesh;
   }
 
   function setScore(n) {
@@ -1075,7 +1172,8 @@ function createGame(options) {
     updateNPCs: updateNPCs, knockDownNPC: knockDownNPC, placeNPC: placeNPC, poseGun: poseGun,
     arenaFingerprint: arenaFingerprint,
     stats: stats, resetStats: resetStats, recordHit: recordHit, FEET_PER_UNIT: FEET_PER_UNIT,
-    applyServerHit: applyServerHit, setScore: setScore, breakTarget: breakTarget,
+    applyServerHit: applyServerHit, showRemoteShot: showRemoteShot,
+    setScore: setScore, breakTarget: breakTarget,
     applyLook: applyLook, setPitch: setPitch,
     setLookDebug: function (on) { lookDebug = !!on; if (!on) lookLog.length = 0; },
     lookLog: function () { return lookLog.slice(); },
@@ -1110,6 +1208,22 @@ function createGame(options) {
     setFiring: function (v) { firing = !!v; },
     isFiring: function () { return firing; },
     setNetworked: function (v) { state.networked = !!v; },
+    setWorldTime: function (t) {
+      state.worldTime = t;
+      world.updateMovers(state.worldTime);
+    },
+    movers: movers, balcony: balcony, updateMovers: world.updateMovers,
+    perkSystem: perkSystem, perks: perkSystem.perks,
+    fireInterval: fireInterval, walkSpeed: walkSpeed, runSpeed: runSpeed,
+    magSize: magSize, airJumpsAllowed: airJumpsAllowed,
+    grantPerk: function (kind) {
+      var ok = perkSystem.grant(state, kind);
+      if (ok) {
+        var def = perkSystem.kindByName(kind);
+        emit('perk', { kind: kind, label: def.label, mine: true });
+      }
+      return ok;
+    },
     isNetworked: function () { return state.networked; },
     setZooming: function (v) { zooming = !!v; },
     isZooming: function () { return zooming; },

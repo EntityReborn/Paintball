@@ -47,6 +47,18 @@ PB.createAudio = function (ctx) {
   }
   var sfx = {
     shoot: function () { blip(340, 'square', 0.09, 0.10, 0.15); noiseBurst(0.07, 0.16); },
+
+    /* Somebody else firing, heard from `dist` metres away. Distant shots lose
+     * volume and the crack goes dull, which is enough to tell roughly where
+     * they came from without a full spatial audio graph. */
+    shootAt: function (dist) {
+      var d = Math.max(0, dist || 0);
+      var fall = Math.max(0, 1 - d / 55);
+      var vol = fall * fall;
+      if (vol < 0.02) return;
+      blip(340 - Math.min(120, d * 2.2), 'square', 0.09, 0.10 * vol, 0.15);
+      noiseBurst(0.07 + Math.min(0.06, d / 400), 0.16 * vol);
+    },
     hit: function () { blip(880, 'triangle', 0.22, 0.13, 0.25); noiseBurst(0.18, 0.12); },
     empty: function () { blip(130, 'square', 0.05, 0.07, 0.8); },
     miss: function () { blip(150, 'sine', 0.11, 0.05, 0.6); },

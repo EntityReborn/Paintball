@@ -117,3 +117,16 @@ canvas { display: block; position: fixed; inset: 0; }
 #summary .val { color: #e6edf3; font-weight: 700; text-align: right; }
 #summary .val.good { color: #8ef2a0; }
 #summary .val.poor { color: #ff9f9f; }
+
+/* active perks, stacked above the ammo readout */
+#perks {
+  position: absolute; right: 26px; bottom: 96px;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 5px;
+}
+#perks .perk {
+  font-size: 12px; font-weight: 700; letter-spacing: .14em;
+  padding: 4px 10px; border-radius: 2px;
+  background: rgba(10,16,24,.75); border-left: 3px solid currentColor;
+  text-shadow: 0 2px 6px rgba(0,0,0,.9);
+}
+#perks .perk .time { color: #9db0c8; font-weight: 400; margin-left: 8px; }

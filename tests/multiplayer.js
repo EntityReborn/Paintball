@@ -57,7 +57,12 @@ async function advance(page, seconds, timeout = 60000) {
   log('\n== MULTIPLAYER: TWO BROWSERS, ONE WORLD ==');
 
   const server = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
-    env: { ...process.env, PORT: String(PORT), MAP_SEED: '4242', SHOT_DEBUG: process.env.SHOT_DEBUG || '' },
+    env: {
+      ...process.env,
+      PORT: String(PORT), MAP_SEED: '4242',
+      PERK_EVERY: '3',                       // so a perk is out early in the run
+      SHOT_DEBUG: process.env.SHOT_DEBUG || '',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const serverLog = [];
@@ -346,6 +351,102 @@ async function advance(page, seconds, timeout = 60000) {
     check('remote figures animate at running speed, not triple speed',
           legSpeed === null || legSpeed.perSecond < 16,
           legSpeed ? `${legSpeed.perSecond.toFixed(1)} rad/s of run cycle` : 'no NPC to sample');
+
+    /* --------------------- one player shooting must not move another's stats */
+    const statsBefore = await bo.evaluate(() => game.stats());
+    const anaFired = await ana.evaluate(async () => {
+      const before = game.stats().shotsFired;
+      game.state.mag = 12; game.state.lastShot = -1e9;
+      game.aimAt(new THREE.Vector3(game.state.pos.x, -2, game.state.pos.z));  // into the floor
+      game.shoot();
+      await new Promise(r => setTimeout(r, 900));
+      return game.stats().shotsFired - before;
+    });
+    const statsAfter = await bo.evaluate(() => game.stats());
+    check('ana fired a round', anaFired === 1, `${anaFired} shots`);
+    check("one player's shooting leaves the other's statistics alone",
+          statsAfter.shotsFired === statsBefore.shotsFired &&
+          statsAfter.misses === statsBefore.misses &&
+          statsAfter.shotsHit === statsBefore.shotsHit,
+          `bo went from ${statsBefore.shotsFired}/${statsBefore.misses} ` +
+          `to ${statsAfter.shotsFired}/${statsAfter.misses} shots/misses`);
+
+    /* ------------------------- other players' fire is seen and heard */
+    const remoteFire = await bo.evaluate(async () => {
+      let tracers = 0;
+      const before = game.bullets.length;
+      const seen = [];
+      const t0 = performance.now();
+      const timer = setInterval(() => seen.push(game.bullets.length), 16);
+      await new Promise(r => setTimeout(r, 1400));
+      clearInterval(timer);
+      return { peak: Math.max(...seen), before };
+    });
+    const anaShoots = ana.evaluate(async () => {
+      for (let i = 0; i < 4; i++) {
+        game.state.mag = 12; game.state.lastShot = -1e9;
+        game.aimAt(new THREE.Vector3(game.state.pos.x, -2, game.state.pos.z));
+        game.shoot();
+        await new Promise(r => setTimeout(r, 200));
+      }
+    });
+    const boSeesFire = await bo.evaluate(async () => {
+      const seen = [];
+      const timer = setInterval(() => seen.push(game.bullets.length), 16);
+      await new Promise(r => setTimeout(r, 1500));
+      clearInterval(timer);
+      return Math.max.apply(null, seen);
+    });
+    await anaShoots;
+    check("another player's tracers show up in our world", boSeesFire > 0,
+          `bo saw ${boSeesFire} tracer(s) in flight`);
+
+    /* ------------------------------ the world moves the same for everyone */
+    const moverAgreement = await Promise.all([ana, bo].map(p => p.evaluate(() => ({
+      wt: +game.state.worldTime.toFixed(2),
+      movers: game.movers.map(m => [+m.mesh.position.x.toFixed(2),
+                                    +m.mesh.position.z.toFixed(2)]),
+    }))));
+    let worstMover = 0;
+    for (let i = 0; i < moverAgreement[0].movers.length; i++) {
+      worstMover = Math.max(worstMover, Math.hypot(
+        moverAgreement[0].movers[i][0] - moverAgreement[1].movers[i][0],
+        moverAgreement[0].movers[i][1] - moverAgreement[1].movers[i][1]));
+    }
+    check('both clients have the moving cover in the same place',
+          moverAgreement[0].movers.length > 0 && worstMover < 0.6,
+          `${moverAgreement[0].movers.length} sliders, worst gap ${worstMover.toFixed(2)}u`);
+    check('the world clock is running on both clients',
+          moverAgreement[0].wt > 0 && moverAgreement[1].wt > 0,
+          `ana ${moverAgreement[0].wt}s, bo ${moverAgreement[1].wt}s`);
+
+    /* ------------------------ perks are the same objects for everyone */
+    // Pickup itself is server-side and covered by the node tests; what has to
+    // be true here is that both clients see the same perks in the same places.
+    const perkViews = await Promise.all([ana, bo].map(p => p.evaluate(async () => {
+      for (let i = 0; i < 40 && game.perkSystem.perks.length === 0; i++) {
+        await new Promise(r => setTimeout(r, 250));
+      }
+      return game.perkSystem.perks
+        .map(p => [p.id, p.kind, +p.x.toFixed(2), +p.z.toFixed(2)])
+        .sort((a, b) => a[0] - b[0]);
+    })));
+
+    check('a perk turned up in the arena', perkViews[0].length > 0,
+          `${perkViews[0].length} on the ground`);
+    if (perkViews[0].length) {
+      check('both clients see the same perks in the same places',
+            JSON.stringify(perkViews[0]) === JSON.stringify(perkViews[1]),
+            `ana ${JSON.stringify(perkViews[0])} vs bo ${JSON.stringify(perkViews[1])}`);
+      const kinds = ['fireRate', 'speed', 'clip', 'doubleJump'];
+      check('and it is one of the real kinds',
+            perkViews[0].every(p => kinds.indexOf(p[1]) !== -1),
+            perkViews[0].map(p => p[1]).join(', '));
+      const rendered = await ana.evaluate(() =>
+        game.perkSystem.perks.filter(p => p.view && p.view.group.parent).length);
+      check('the perk is actually drawn in the world', rendered === perkViews[0].length,
+            `${rendered} of ${perkViews[0].length} in the scene`);
+    }
 
     /* ------------------------- a late joiner gets the level in progress */
     // The seed alone is not enough once anything has been shot: a client that

@@ -42,6 +42,7 @@ function safePath(urlPath) {
 const gameOverrides = {};
 if (process.env.NPCS_PER_LEVEL) gameOverrides.npcsPerLevel = Number(process.env.NPCS_PER_LEVEL);
 if (process.env.TARGETS_PER_LEVEL) gameOverrides.targetsPerLevel = Number(process.env.TARGETS_PER_LEVEL);
+if (process.env.PERK_EVERY) gameOverrides.perkEvery = Number(process.env.PERK_EVERY);
 
 const room = new Room({
   seed: process.env.MAP_SEED ? Number(process.env.MAP_SEED) : undefined,

@@ -110,6 +110,97 @@ PB.createWorld = function (ctx) {
     return m;
   }
 
+  /* ------------------------------------------------------------ balcony */
+  /* A raised deck along one wall with stairs up and a railing, so there is
+   * somewhere to shoot from and somewhere to be shot from. */
+  var balconyMat = new THREE.MeshStandardMaterial({ color: 0x4f5a68, roughness: 0.85 });
+  var balconyParts = [];
+  var keepClear = [];        // areas nothing else may be placed in
+
+  function isClearOfKeepOuts(x, z, pad) {
+    var margin = pad || 0;
+    for (var i = 0; i < keepClear.length; i++) {
+      var k = keepClear[i];
+      if (x > k.min.x - margin && x < k.max.x + margin &&
+          z > k.min.z - margin && z < k.max.z + margin) return false;
+    }
+    return true;
+  }
+
+  function addSolid(mat, x, y, z, w, h, d, name) {
+    var m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(x, y, z);
+    m.castShadow = m.receiveShadow = true;
+    m.name = name || 'structure';
+    scene.add(m);
+    m.updateMatrixWorld(true);
+    var box = new THREE.Box3().setFromObject(m);
+    colliders.push(box);
+    solidMeshes.push(m);
+    balconyParts.push({ mesh: m, box: box });
+    return m;
+  }
+
+  var balcony = (function buildBalcony() {
+    var deckY = cfg.balconyHeight;
+    var zBack = -half + 0.5;                 // flush against the far wall
+    var depth = cfg.balconyDepth;
+    var width = cfg.balconyWidth;
+    var zMid = zBack + depth / 2;
+
+    // the deck itself
+    addSolid(balconyMat, 0, deckY, zMid, width, 0.4, depth, 'balconyDeck');
+
+    // pillars holding it up
+    for (var i = -1; i <= 1; i++) {
+      addSolid(balconyMat, i * (width / 2 - 1.5), deckY / 2, zMid + depth / 2 - 0.8,
+               0.7, deckY, 0.7, 'balconyPillar');
+    }
+
+    // stairs up the left end: shallow enough to walk, no jumping needed
+    var steps = Math.max(2, Math.round(deckY / cfg.stepHeight));
+    var rise = deckY / steps;
+    var run = 0.85;
+    var stairX = -width / 2 + 1.2;
+
+    /* Railing along the open edge, built in segments with two ways through:
+     * a gap in the middle to drop from, and an opening where the stairs
+     * arrive — a solid rail there walls off the top step. */
+    var railY = deckY + 0.75;
+    var zFront = zMid + depth / 2 - 0.15;
+    var segW = 1.6;
+    var segments = Math.floor(width / segW);
+    for (var r = 0; r < segments; r++) {
+      var cx = -width / 2 + segW * (r + 0.5);
+      if (Math.abs(cx) < 2.2) continue;                  // the drop-through gap
+      if (Math.abs(cx - stairX) < 1.9) continue;         // the way in from the stairs
+      addSolid(balconyMat, cx, railY, zFront, segW * 0.94, 1.1, 0.3, 'balconyRail');
+    }
+    /* Each step is a solid block from the floor up to its own tread, so the
+     * rise from one tread to the next is exactly `rise`. Centring boxes of
+     * increasing height on their own middles instead leaves gaps of 1.5x the
+     * rise between treads, which is more than a player can step up. */
+    for (var s = 0; s < steps; s++) {
+      var top = rise * (s + 1);
+      addSolid(balconyMat, stairX, top / 2,
+               zMid + depth / 2 + run * (steps - s) - run / 2,
+               2.2, top, run, 'balconyStep');
+    }
+
+    /* Nothing may be placed on the stairs or in front of them. Random cover
+     * landing here makes the only way up impassable, which is how the balcony
+     * ended up unreachable. */
+    keepClear.push(new THREE.Box3(
+      new THREE.Vector3(stairX - 2.6, 0, zBack),
+      new THREE.Vector3(stairX + 2.6, deckY + 2, zMid + depth / 2 + run * steps + 4)
+    ));
+
+    return {
+      height: deckY, width: width, depth: depth, stairX: stairX,
+      z: zMid, parts: balconyParts, keepClear: keepClear,
+    };
+  })();
+
   (function buildObstacles() {
     var placed = [];
     var guard = 0;
@@ -117,6 +208,7 @@ PB.createWorld = function (ctx) {
       var x = (rand() - 0.5) * (cfg.arena - 8);
       var z = (rand() - 0.5) * (cfg.arena - 8);
       if (Math.hypot(x, z) < 7) continue;                    // keep the spawn clear
+      if (!isClearOfKeepOuts(x, z, 1.5)) continue;           // and the way onto the balcony
       var clash = placed.some(function (p) { return Math.hypot(p[0] - x, p[1] - z) < 6; });
       if (clash) continue;
       placed.push([x, z]);
@@ -127,23 +219,115 @@ PB.createWorld = function (ctx) {
     }
   })();
 
+  /* ---------------------------------------------------- moving obstacles */
+  /* Sliders that run back and forth. Their position is a pure function of the
+   * world clock, so the server and every client agree without anything having
+   * to be sent about them beyond the time itself. */
+  var movers = [];
+
+  function addMover(x, z, w, h, d, axis, amp, speed, phase) {
+    var m = new THREE.Mesh(
+      new THREE.BoxGeometry(w, h, d),
+      new THREE.MeshStandardMaterial({ color: 0x7a6a4e, roughness: 0.75, flatShading: true })
+    );
+    m.position.set(x, h / 2, z);
+    m.castShadow = m.receiveShadow = true;
+    m.name = 'mover';
+    scene.add(m);
+    m.updateMatrixWorld(true);
+    var box = new THREE.Box3().setFromObject(m);
+    colliders.push(box);
+    solidMeshes.push(m);
+    var mover = {
+      mesh: m, box: box,
+      base: new THREE.Vector3(x, h / 2, z),
+      axis: axis, amp: amp, speed: speed, phase: phase,
+      half: new THREE.Vector3(w / 2, h / 2, d / 2),
+    };
+    movers.push(mover);
+    return mover;
+  }
+
+  (function buildMovers() {
+    var placed = 0, guard = 0;
+    while (placed < cfg.movingObstacles && guard++ < 2000) {
+      var x = (rand() - 0.5) * (cfg.arena - 16);
+      var z = (rand() - 0.5) * (cfg.arena - 16);
+      if (Math.hypot(x, z) < 9) continue;                 // not through the spawn
+      if (z < -half + cfg.balconyDepth + 4) continue;     // not under the balcony
+      if (!isClearOfKeepOuts(x, z, amp + 2)) continue;    // never across the stairs
+      var alongX = rand() < 0.5;
+      var amp = 3 + rand() * 3;
+      // keep the whole sweep inside the arena
+      if (alongX && Math.abs(x) + amp > half - 4) continue;
+      if (!alongX && Math.abs(z) + amp > half - 4) continue;
+      var clash = false;
+      for (var i = 0; i < obstacleBoxes.length; i++) {
+        var c = obstacleBoxes[i].getCenter(new THREE.Vector3());
+        if (Math.hypot(c.x - x, c.z - z) < amp + 4) { clash = true; break; }
+      }
+      if (clash) continue;
+      /* A slow, readable slide. Cover that travels faster than a sprinting
+       * player is both unreadable and impossible to keep in step across
+       * clients, since each one renders it at a slightly different instant. */
+      addMover(x, z, 2.2 + rand(), 1.8 + rand() * 1.2, 2.2 + rand(),
+               alongX ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1),
+               amp, 0.05 + rand() * 0.09, rand() * Math.PI * 2);
+      placed++;
+    }
+  })();
+
+  var _moverPos = new THREE.Vector3();
+
+  // Position every slider for world time `t`, and refresh its collider.
+  function updateMovers(t) {
+    for (var i = 0; i < movers.length; i++) {
+      var mv = movers[i];
+      var offset = Math.sin(t * mv.speed * Math.PI * 2 + mv.phase) * mv.amp;
+      _moverPos.copy(mv.base).addScaledVector(mv.axis, offset);
+      mv.mesh.position.copy(_moverPos);
+      mv.mesh.updateMatrixWorld(true);
+      mv.box.min.set(
+        _moverPos.x - mv.half.x, _moverPos.y - mv.half.y, _moverPos.z - mv.half.z);
+      mv.box.max.set(
+        _moverPos.x + mv.half.x, _moverPos.y + mv.half.y, _moverPos.z + mv.half.z);
+    }
+  }
+
   /* A cheap signature of the arena layout. Both sides compute it from the
    * same code, so a mismatch means the two worlds were generated differently
    * and every shot will disagree about what it hit. */
   function fingerprint() {
     var acc = 0;
-    for (var i = 0; i < obstacleBoxes.length; i++) {
-      var b = obstacleBoxes[i];
-      var vals = [b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z];
+    function mix(vals) {
       for (var v = 0; v < vals.length; v++) {
         acc = (acc * 31 + Math.round(vals[v] * 100)) | 0;
       }
     }
-    return (acc >>> 0).toString(16) + ':' + obstacleBoxes.length;
+    for (var i = 0; i < obstacleBoxes.length; i++) {
+      var b = obstacleBoxes[i];
+      mix([b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z]);
+    }
+    // the sliders go in by where they started and how they move, never by
+    // where they are right now — otherwise the check depends on the clock
+    for (var m = 0; m < movers.length; m++) {
+      var mv = movers[m];
+      mix([mv.base.x, mv.base.y, mv.base.z, mv.amp, mv.speed, mv.phase,
+           mv.axis.x, mv.axis.z]);
+    }
+    for (var p = 0; p < balconyParts.length; p++) {
+      var pb = balconyParts[p].box;
+      mix([pb.min.x, pb.min.y, pb.min.z, pb.max.x, pb.max.y, pb.max.z]);
+    }
+    return (acc >>> 0).toString(16) + ':' + obstacleBoxes.length + ':' + movers.length;
   }
 
   return {
     fingerprint: fingerprint,
+    balcony: balcony,
+    balconyParts: balconyParts,
+    movers: movers,
+    updateMovers: updateMovers,
     colliders: colliders,
     solidMeshes: solidMeshes,
     obstacleBoxes: obstacleBoxes,

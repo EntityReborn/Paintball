@@ -34,6 +34,22 @@ belongs to the next level, which has one more NPC than the last.
 The score never goes below zero. Every hit and every miss floats a `+100` / `−25`
 label at the spot, and the score readout flashes green or red to match.
 
+The arena has a **balcony** along one wall — walk up the stairs, shoot from the
+rail, or drop through the gap in the middle. A few pieces of cover **slide back
+and forth**, and a standing jump clears the low cover.
+
+**Perks** appear from time to time and last 15 seconds each:
+
+| Perk | Effect |
+| --- | --- |
+| RAPID FIRE | twice the rate of fire |
+| SPRINTER | around half again as fast |
+| BIG CLIP | double the magazine |
+| DOUBLE JUMP | one extra jump in the air |
+
+Walk over one to collect it; what you are holding is listed above the ammo
+readout with the time left.
+
 Pausing shows a career summary: accuracy, shots fired, hits and misses, targets
 broken, NPCs down, best streak, longest shot and distance walked (both in feet),
 jumps, reloads, time played, share of time sighted, and points per shot.
@@ -59,6 +75,17 @@ else and checks every position it is told about against the movement rules —
 speed, arena bounds, height, pitch. A client that claims to have moved further
 than a sprinting player could is rejected and snapped back. This is the part
 that keeps a public leaderboard honest without a full authoritative rewrite.
+
+**Statistics and perks belong to one player.** Everyone is told about every
+shot, because the world has to change for all of them, but only the player who
+fired has it counted. Perks are collected server-side and their effects — rate
+of fire, movement budget — are applied per player, so one player's rapid fire
+does not let anyone else shoot faster.
+
+**Moving cover rides a shared clock.** The sliders are a pure function of world
+time, so the only thing that has to travel is the clock itself. Clients take it
+from the snapshot stream and never advance it themselves; letting them run their
+own clock between snapshots put the same crate two metres apart on two screens.
 
 **Shots are adjudicated by the server.** The client fires, spends the round and
 draws the tracer, but what it hit is decided server-side by re-running the same
@@ -113,6 +140,7 @@ src/game.js     createGame(): composes the modules, owns state, input and the lo
 src/world.js    arena floor, perimeter walls, scattered cover
 src/targets.js  target spawning, drifting, breaking
 src/npcs.js     low-poly figures: build, wander, run and jump animation
+src/perks.js    pickups and the rules they bend while they last
 src/weapon.js   the viewmodel and its reload animation
 src/effects.js  pooled score labels, debris shards, break flashes
 src/audio.js    synthesised sound effects
@@ -132,11 +160,11 @@ a web server.
 
 Two layers, both driving the real engine in a real WebGL context.
 
-**Browser suite** (`tests/tests.html`) — 151 tests over bootstrap, world
+**Browser suite** (`tests/tests.html`) — 187 tests over bootstrap, world
 generation, targets, rendering, movement, collision, shooting, breaking, levels,
 input, the reload animation, NPCs, view angles, zoom, drifting targets, scoring,
-score indicators, player statistics, telling players from NPCs, performance,
-and HUD wiring. Rendering is
+score indicators, player statistics, telling players from NPCs, the balcony,
+moving cover, perks, jumping onto cover, performance, and HUD wiring. Rendering is
 checked by reading pixels back off the canvas; input by dispatching real
 `KeyboardEvent` / `MouseEvent` objects. Open it in a browser to watch it run, or
 let the driver do it.
@@ -145,7 +173,7 @@ let the driver do it.
 plays the game through Chrome's own input pipeline (trusted keyboard and mouse
 events, real pointer lock) and writes screenshots to `tests/shots/`.
 
-**Server tests** (`tests/server.test.js`) — 27 node tests over the headless
+**Server tests** (`tests/server.test.js`) — 35 node tests over the headless
 engine, seed determinism, the room's plausibility rules, server-side shot
 validation and lag compensation, snapshot cadence and size, and the static file
 server's path handling.
@@ -211,6 +239,14 @@ re-entering the window rather than a real flick.
   requested with `unadjustedMovement`. Every write to the angles goes through one
   clamped path, and samples beyond `lookSpikePx` (500 by default) are discarded
   rather than clamped — clamping still turns the view, just less far.
+- **One player's shooting moved everybody's statistics.** Every client applies
+  every hit the server broadcasts, because the target has to break for all of
+  them — but it was also running the accounting each time, so accuracy and
+  streaks counted shots other people fired. Only the shooter is credited now.
+- **Everyone ran about with their backpack in front.** A figure faces its local
+  -Z, which is also where a player yaw of zero looks, so the extra half turn on
+  remote players pointed them backwards. NPCs had the opposite problem: they
+  travel along local +Z, so they needed the half turn nobody had given them.
 - **An arena cleared in multiplayer just sat there.** The server broke the
   target but never asked whether that finished the level — only the client's
   local hit path did that, and it is skipped in networked play. NPC kills

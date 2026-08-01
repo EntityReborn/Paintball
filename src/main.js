@@ -50,7 +50,26 @@ var el = {
   menuScore: document.getElementById('m-score'),
   crosshair: document.getElementById('crosshair'),
   summary: document.getElementById('summary'),
+  perks: document.getElementById('perks'),
 };
+
+var PERK_COLOURS = {
+  fireRate: '#ffb03a', speed: '#6ee7ff', clip: '#a78bfa', doubleJump: '#8ef2a0',
+};
+
+// what is running right now, and how much of it is left
+function renderPerks() {
+  if (!game || !el.perks) return;
+  var held = game.state.perks || {};
+  var rows = [];
+  game.perkSystem.kinds.forEach(function (def) {
+    var left = held[def.kind];
+    if (!(left > 0)) return;
+    rows.push('<div class="perk" style="color:' + (PERK_COLOURS[def.kind] || '#fff') + '">' +
+              def.label + '<span class="time">' + left.toFixed(0) + 's</span></div>');
+  });
+  el.perks.innerHTML = rows.join('');
+}
 
 /* The career summary shown while paused. Distance is reported in feet because
  * that is what people ask for; everything internal stays in metres. */
@@ -121,8 +140,9 @@ function toast(text) {
 function wire() {
 game.on('score', function (d) { refresh(); flashScore(d.delta); });
 game.on('ammo', refresh);
-game.on('hit', function () {
+game.on('hit', function (d) {
   refresh();
+  if (d && d.mine === false) return;      // somebody else's hit, not our marker
   el.hit.style.transition = 'none';
   el.hit.style.opacity = 1;
   requestAnimationFrame(function () {
@@ -142,6 +162,13 @@ game.on('levelComplete', function (d) {
 game.on('zoom', function (d) {
   el.crosshair.classList.toggle('sighted', d.sighted);
 });
+game.on('perk', function (d) {
+  if (d.mine === false) return;
+  toast(d.label || 'PERK');
+  renderPerks();
+});
+game.on('perkExpired', renderPerks);
+game.on('frame', renderPerks);
 game.on('reloadStart', function () { el.reloading.textContent = 'RELOADING'; });
 game.on('reloadEnd', function () { el.reloading.textContent = ''; refresh(); });
 

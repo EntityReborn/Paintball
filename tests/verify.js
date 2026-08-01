@@ -359,16 +359,32 @@ async function shot(page, name) {
   const levelBefore = await page.evaluate('game.state.level');
   const npcCount = await page.evaluate('game.npcs.length');
   const afterTargets = await page.evaluate(async () => {
+    // Stand somewhere with an actual line to each target: a fixed offset can
+    // drop you inside cover, and then the same target is shot at forever.
+    const standClearOf = point => {
+      for (let a = 0; a < Math.PI * 2; a += Math.PI / 10) {
+        const eye = new THREE.Vector3(
+          point.x + Math.sin(a) * 3.5, game.cfg.eye, point.z + Math.cos(a) * 3.5);
+        if (Math.abs(eye.x) > 28 || Math.abs(eye.z) > 28) continue;
+        const box = game.playerBox(eye, new THREE.Box3());
+        if (game.colliders.some(c => c.intersectsBox(box))) continue;
+        if (!game.hasLineOfSight(eye, point)) continue;
+        game.teleport(eye.x, game.cfg.eye, eye.z);
+        game.aimAt(point);
+        return true;
+      }
+      return false;
+    };
+
     // clearing every target must NOT end the level
-    for (let i = 0; i < 20 && game.aliveCount() > 0; i++) {
-      const t = game.targets.find(t => t.alive);
-      if (!t) break;
-      const p = t.mesh.position;
-      game.teleport(p.x + 3, p.y, p.z);
-      game.aimAt(p);
-      game.state.mag = 12; game.state.lastShot = -1e9;
-      game.shoot();
-      await new Promise(r => setTimeout(r, 110));
+    for (let pass = 0; pass < 4 && game.aliveCount() > 0; pass++) {
+      for (const t of game.targets) {
+        if (!t.alive) continue;
+        if (!standClearOf(t.mesh.position)) continue;
+        game.state.mag = 12; game.state.lastShot = -1e9;
+        game.shoot();
+        await new Promise(r => setTimeout(r, 110));
+      }
     }
     return { level: game.state.level, targets: game.aliveCount() };
   });

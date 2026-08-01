@@ -20,7 +20,7 @@ function load() {
 
   const order = [
     'figure.js', 'audio.js', 'world.js', 'effects.js',
-    'targets.js', 'weapon.js', 'npcs.js', 'game.js',
+    'targets.js', 'weapon.js', 'npcs.js', 'perks.js', 'game.js',
   ];
   for (const file of order) {
     const src = fs.readFileSync(path.join(ROOT, 'src', file), 'utf8');

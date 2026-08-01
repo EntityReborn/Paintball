@@ -270,8 +270,10 @@ describe('World', function () {
     });
   });
 
-  it('registers a collider for every wall and obstacle', function () {
-    assert.equal(g.colliders.length, 4 + g.obstacleMeshes.length, 'collider count');
+  it('registers a collider for every wall, obstacle, slider and structure', function () {
+    assert.equal(g.colliders.length,
+                 4 + g.obstacleMeshes.length + g.movers.length + g.balcony.parts.length,
+                 'collider count');
   });
 
   it('adds every solid to the scene graph', function () {
@@ -862,19 +864,29 @@ describe('Levels', function () {
     var level0 = g.state.level;
     clearNPCs();
     assert.equal(g.state.level, level0, 'ended early');
-    // now break every target; the last one should tip it over
-    for (var pass = 0; pass < 3 && g.state.level === level0; pass++) {
-      for (var i = 0; i < g.targets.length; i++) {
-        var t = g.targets[i];
-        if (!t.alive) continue;
-        if (!standClearOf(t.mesh.position, 3)) continue;
-        g.state.mag = g.cfg.magSize;
-        g.state.lastShot = -1e9;
-        g.shoot();
-        step(0.4);
-        if (g.state.level !== level0) break;
+
+    // pick a target we can definitely shoot, clear the rest out of the way,
+    // then take that one for real: the shot is what has to finish the level
+    var last = null;
+    for (var i = 0; i < g.targets.length && !last; i++) {
+      if (g.targets[i].alive && standClearOf(g.targets[i].mesh.position, 3)) {
+        last = g.targets[i];
       }
     }
+    assert.ok(last, 'no target with a clear line of sight');
+
+    for (var j = 0; j < g.targets.length; j++) {
+      var t = g.targets[j];
+      if (t.alive && t !== last) g.breakTarget(t, new THREE.Vector3(0, 1, 0));
+    }
+    assert.equal(g.aliveCount(), 1, 'expected one target left');
+    assert.equal(g.state.level, level0, 'the level turned over without the last target');
+
+    standClearOf(last.mesh.position, 3);
+    g.state.mag = g.cfg.magSize;
+    g.state.lastShot = -1e9;
+    g.shoot();
+    step(0.6);
     assert.equal(g.state.level, level0 + 1, 'breaking the last target did not finish the level');
   });
 
@@ -1206,16 +1218,24 @@ describe('NPCs', function () {
     freshLevel();
     var n = g.npcs[0];
     n.jumpIn = 0;
-    var peak = 0, tucked = false;
-    for (var i = 0; i < 200; i++) {
+    var peak = 0, tucked = false, left = false, landed = false;
+    // watch one jump through to the ground: running a fixed window instead can
+    // catch the start of the next jump and look like it never came down
+    for (var i = 0; i < 200 && !landed; i++) {
       step(1 / 60);
       peak = Math.max(peak, n.root.position.y);
-      if (!n.grounded && n.legL.rotation.x < -0.3) tucked = true;
+      if (!n.grounded) {
+        left = true;
+        if (n.legL.rotation.x < -0.3) tucked = true;
+      } else if (left) {
+        landed = true;
+      }
     }
-    assert.greater(peak, 0.6, 'npc never left the ground');
+    assert.ok(left, 'npc never left the ground');
+    assert.greater(peak, 0.6, 'npc barely hopped');
     assert.ok(tucked, 'npc did not tuck its legs while airborne');
-    assert.close(n.root.position.y, 0, 0.01, 'npc did not land');
-    assert.ok(n.grounded, 'npc is stuck in the air');
+    assert.ok(landed, 'npc never came down');
+    assert.close(n.root.position.y, 0, 0.01, 'npc did not land on the floor');
   });
 
   it('keeps every NPC inside the arena', function () {
@@ -1494,6 +1514,424 @@ describe('View angles', function () {
   });
 });
 
+describe('The balcony', function () {
+  it('is built with a deck, supports, a railing and stairs', function () {
+    assert.ok(g.balcony, 'no balcony');
+    assert.greater(g.balcony.parts.length, 6, 'not enough pieces to be a balcony');
+    var names = g.balcony.parts.map(function (p) { return p.mesh.name; });
+    assert.ok(names.indexOf('balconyDeck') !== -1, 'no deck');
+    assert.ok(names.indexOf('balconyPillar') !== -1, 'nothing holding it up');
+    assert.ok(names.indexOf('balconyRail') !== -1, 'no railing');
+    assert.ok(names.indexOf('balconyStep') !== -1, 'no way up');
+  });
+
+  it('puts the deck above head height', function () {
+    assert.greater(g.balcony.height, g.cfg.playerHeight, 'you could not stand under it');
+  });
+
+  it('holds the player up when they stand on it', function () {
+    reset();
+    g.setActive(true);
+    g.teleport(0, g.balcony.height + 3, g.balcony.z);
+    step(2.5);
+    assert.close(g.state.pos.y - g.cfg.eye, g.balcony.height + 0.2, 0.3,
+                 'the player fell through the deck');
+    assert.ok(g.state.grounded, 'not standing on it');
+  });
+
+  it('can be walked up the stairs without jumping', function () {
+    reset();
+    g.setActive(true);
+    var steps = g.balcony.parts.filter(function (p) { return p.mesh.name === 'balconyStep'; });
+    assert.greater(steps.length, 1, 'no stairs to climb');
+    var lowest = steps.reduce(function (a, b) { return a.box.max.y < b.box.max.y ? a : b; });
+    var c = lowest.box.getCenter(new THREE.Vector3());
+    g.teleport(c.x, g.cfg.eye, c.z + 3);
+    g.aimAt(new THREE.Vector3(c.x, g.cfg.eye, c.z - 6));
+    var startY = g.state.pos.y;
+    g.setKey('KeyW', true);
+    step(5);
+    g.setKey('KeyW', false);
+    assert.greater(g.state.pos.y - startY, 1.5,
+                   'the player never climbed: ' + (g.state.pos.y - startY).toFixed(2) + 'u');
+  });
+
+  it('does not let the player step up a whole wall', function () {
+    reset();
+    g.setActive(true);
+    var tall = null;
+    for (var i = 0; i < g.obstacleBoxes.length; i++) {
+      if (g.obstacleBoxes[i].max.y > 3) { tall = g.obstacleBoxes[i]; break; }
+    }
+    assert.ok(tall, 'no tall cover in this arena');
+    var c = tall.getCenter(new THREE.Vector3());
+    g.teleport(c.x + 6, g.cfg.eye, c.z);
+    g.aimAt(c);
+    g.setKey('KeyW', true);
+    step(3);
+    g.setKey('KeyW', false);
+    assert.close(g.state.pos.y, g.cfg.eye, 0.3, 'the player walked up a wall');
+  });
+});
+
+describe('Moving obstacles', function () {
+  it('puts a few sliders in the arena', function () {
+    assert.equal(g.movers.length, g.cfg.movingObstacles, 'slider count');
+    g.movers.forEach(function (m, i) {
+      assert.greater(m.amp, 0, 'slider ' + i + ' does not travel');
+      assert.greater(m.speed, 0, 'slider ' + i + ' has no speed');
+    });
+  });
+
+  it('moves them along their track over time', function () {
+    var m = g.movers[0];
+    g.setWorldTime(0);
+    var from = m.mesh.position.clone();
+    // the sliders are slow on purpose, so sample a whole sweep rather than
+    // one second, which can land on the turn where they barely move
+    var travelled = 0;
+    for (var t = 0.5; t <= 20; t += 0.5) {
+      g.setWorldTime(t);
+      travelled = Math.max(travelled, from.distanceTo(m.mesh.position));
+    }
+    assert.greater(travelled, 1, 'the slider barely moved across a full sweep');
+    assert.less(travelled, m.amp * 2 + 0.01, 'it went further than its track');
+  });
+
+  it('is a pure function of the clock, so every client agrees', function () {
+    var m = g.movers[1];
+    g.setWorldTime(7.5);
+    var at = m.mesh.position.clone();
+    g.setWorldTime(30);
+    g.setWorldTime(7.5);
+    assert.less(m.mesh.position.distanceTo(at), 1e-9, 'the same time gave a different position');
+  });
+
+  it('keeps the collider with the mesh', function () {
+    var m = g.movers[0];
+    g.setWorldTime(3.3);
+    var c = m.box.getCenter(new THREE.Vector3());
+    assert.less(c.distanceTo(m.mesh.position), 0.01, 'the collider was left behind');
+  });
+
+  it('stays inside the arena for its whole run', function () {
+    var lim = g.cfg.arena / 2;
+    for (var t = 0; t < 30; t += 0.25) {
+      g.setWorldTime(t);
+      for (var i = 0; i < g.movers.length; i++) {
+        var b = g.movers[i].box;
+        assert.between(b.min.x, -lim, lim, 'slider ' + i + ' left the arena');
+        assert.between(b.min.z, -lim, lim, 'slider ' + i + ' left the arena');
+      }
+    }
+  });
+
+  it('still stops a bullet where it currently stands', function () {
+    reset();
+    g.setWorldTime(2);
+    var m = g.movers[0];
+    var c = m.box.getCenter(new THREE.Vector3());
+    g.teleport(c.x + 6, g.cfg.eye, c.z);
+    g.aimAt(c);
+    var hit = g.traceShot(g.camera.getWorldPosition(new THREE.Vector3()),
+                          g.camera.getWorldDirection(new THREE.Vector3()));
+    assert.less(hit.distance, 7, 'the shot went straight through the slider');
+  });
+});
+
+describe('Perks', function () {
+  function clearPerks() {
+    g.perkSystem.clear();
+    g.state.perks = {};
+  }
+
+  it('offers the four kinds', function () {
+    var kinds = g.perkSystem.kinds.map(function (k) { return k.kind; }).sort().join(',');
+    assert.equal(kinds, 'clip,doubleJump,fireRate,speed', 'perk kinds');
+  });
+
+  it('spawns them in the open, away from cover', function () {
+    freshLevel();
+    clearPerks();
+    var probe = new THREE.Vector3();
+    for (var i = 0; i < 12; i++) {
+      var p = g.perkSystem.spawn();
+      if (!p) continue;
+      probe.set(p.x, 1.1, p.z);
+      for (var b = 0; b < g.obstacleBoxes.length; b++) {
+        assert.greater(g.obstacleBoxes[b].distanceToPoint(probe), 1.2,
+                       'a perk spawned inside cover');
+      }
+      assert.between(p.x, -g.cfg.arena / 2, g.cfg.arena / 2, 'perk outside the arena');
+    }
+    clearPerks();
+  });
+
+  it('is collected by walking over it', function () {
+    freshLevel();
+    clearPerks();
+    var p = g.perkSystem.spawn({ kind: 'speed', x: g.state.pos.x + 0.4, y: 1.1, z: g.state.pos.z });
+    assert.ok(p, 'nothing spawned');
+    var got = null;
+    g.on('perk', function (d) { got = d; });
+    g.setActive(true);
+    step(0.2);
+    assert.ok(got, 'walking over it did nothing');
+    assert.equal(got.kind, 'speed');
+    assert.equal(g.perkSystem.perks.length, 0, 'it was left on the ground');
+    clearPerks();
+  });
+
+  it('runs out after its time is up', function () {
+    freshLevel();
+    clearPerks();
+    g.grantPerk('speed');
+    assert.ok(g.perkSystem.held(g.state, 'speed'), 'the perk did not take');
+    step(g.cfg.perkDuration - 1);
+    assert.ok(g.perkSystem.held(g.state, 'speed'), 'it expired early');
+    step(2);
+    assert.ok(!g.perkSystem.held(g.state, 'speed'), 'it never expired');
+  });
+
+  it('rapid fire really does fire faster', function () {
+    freshLevel();
+    clearPerks();
+    var plain = g.fireInterval();
+    g.grantPerk('fireRate');
+    assert.less(g.fireInterval(), plain * 0.75, 'the interval did not shorten');
+
+    reset();
+    g.resetStats();
+    g.grantPerk('fireRate');
+    g.setActive(true);
+    g.setFiring(true);
+    step(1);
+    g.setFiring(false);
+    var fast = g.state.stats.shotsFired;
+
+    reset();
+    g.resetStats();
+    clearPerks();
+    g.setActive(true);
+    g.setFiring(true);
+    step(1);
+    g.setFiring(false);
+    var normal = g.state.stats.shotsFired;
+    assert.greater(fast, normal * 1.4,
+                   'rapid fire got ' + fast + ' rounds off against ' + normal);
+  });
+
+  it('the speed perk really does move faster', function () {
+    freshLevel();
+    clearPerks();
+    function topSpeed() {
+      reset();
+      g.setActive(true);
+      g.setKey('KeyW', true);
+      var peak = 0;
+      for (var i = 0; i < 200; i++) {
+        g.update(1 / 120);
+        peak = Math.max(peak, Math.hypot(g.state.vel.x, g.state.vel.z));
+      }
+      g.setKey('KeyW', false);
+      return peak;
+    }
+    var plain = topSpeed();
+    g.grantPerk('speed');
+    var boosted = topSpeed();
+    assert.greater(boosted, plain * 1.25, 'no faster with the perk');
+    clearPerks();
+  });
+
+  it('the big clip perk holds more rounds', function () {
+    freshLevel();
+    clearPerks();
+    var plain = g.magSize();
+    g.grantPerk('clip');
+    assert.greater(g.magSize(), plain, 'the magazine did not grow');
+    g.state.mag = 1;
+    g.reload();
+    step(g.cfg.reloadMs / 1000 + 0.05);
+    assert.equal(g.state.mag, g.magSize(), 'it did not fill to the bigger size');
+    clearPerks();
+  });
+
+  it('the double jump perk gives exactly one extra jump', function () {
+    freshLevel();
+    clearPerks();
+    reset();
+    g.setActive(true);
+    assert.equal(g.airJumpsAllowed(), 0, 'we start with a spare jump');
+
+    g.grantPerk('doubleJump');
+    assert.equal(g.airJumpsAllowed(), 1, 'the perk gave no extra jump');
+
+    g.state.grounded = true;
+    g.setKey('Space', true);
+    step(0.2);
+    g.setKey('Space', false);
+    step(0.15);
+    var risingVy = g.state.vy;
+    g.setKey('Space', true);
+    step(1 / 60);
+    assert.greater(g.state.vy, risingVy, 'the second jump did not fire');
+    g.setKey('Space', false);
+
+    step(0.2);
+    var vy = g.state.vy;
+    g.setKey('Space', true);
+    step(1 / 60);
+    assert.less(g.state.vy, vy + 0.01, 'a third jump was allowed');
+    g.setKey('Space', false);
+    step(2);
+    clearPerks();
+  });
+
+  it('gets you higher with the double jump than without', function () {
+    freshLevel();
+    clearPerks();
+    function jumpPeak(withPerk) {
+      reset();
+      g.setActive(true);
+      g.state.perks = {};
+      if (withPerk) g.grantPerk('doubleJump');
+      g.state.grounded = true;
+      var peak = 0;
+      g.setKey('Space', true);
+      for (var i = 0; i < 20; i++) { g.update(1 / 60); peak = Math.max(peak, g.state.pos.y); }
+      g.setKey('Space', false);
+      for (var j = 0; j < 8; j++) { g.update(1 / 60); peak = Math.max(peak, g.state.pos.y); }
+      g.setKey('Space', true);
+      for (var k = 0; k < 60; k++) { g.update(1 / 60); peak = Math.max(peak, g.state.pos.y); }
+      g.setKey('Space', false);
+      step(2);
+      return peak;
+    }
+    var plain = jumpPeak(false);
+    var doubled = jumpPeak(true);
+    assert.greater(doubled, plain + 0.4,
+                   'double jump reached ' + doubled.toFixed(2) + ' against ' + plain.toFixed(2));
+    clearPerks();
+  });
+
+  it('expires without leaving the effect behind', function () {
+    freshLevel();
+    clearPerks();
+    var plain = g.fireInterval();
+    g.grantPerk('fireRate');
+    step(g.cfg.perkDuration + 0.5);
+    assert.close(g.fireInterval(), plain, 0.001, 'the effect outlived the perk');
+  });
+
+  it('clears the ground when a perk times out', function () {
+    freshLevel();
+    clearPerks();
+    g.perkSystem.spawn({ kind: 'clip', x: 20, y: 1.1, z: 20, life: 0.5 });
+    assert.equal(g.perkSystem.perks.length, 1, 'nothing on the ground');
+    step(1);
+    assert.equal(g.perkSystem.perks.length, 0, 'it never timed out');
+    clearPerks();
+  });
+});
+
+describe('Facing the right way', function () {
+  it('points a figure where it is looking, not away from it', function () {
+    var fig = PB.buildFigure({
+      geo: PB.figureGeometry(), shadows: false, variant: 'player',
+      color: new THREE.Color(0.4, 0.6, 0.9), trim: new THREE.Color(0.2, 0.3, 0.5),
+      accent: new THREE.Color(0, 0.8, 1),
+    });
+    // yaw 0 looks down -Z, so the visor must sit on the -Z side and the pack
+    // on the +Z side, or the figure runs about with the pack in front
+    var visor = fig.extras[0];
+    var pack = fig.extras[1];
+    assert.less(visor.position.z, 0, 'the visor is on the back of the head');
+    assert.greater(pack.position.z, 0, 'the pack is on the chest');
+  });
+
+  it('turns an NPC to face the way it is running', function () {
+    freshLevel();
+    var n = g.npcs[0];
+    step(0.5);
+    // where the figure faces: its local -Z in world space
+    var facing = new THREE.Vector3(0, 0, -1)
+      .applyAxisAngle(new THREE.Vector3(0, 1, 0), n.root.rotation.y);
+    var travel = new THREE.Vector3(Math.sin(n.heading), 0, Math.cos(n.heading));
+    assert.greater(facing.dot(travel), 0.9,
+                   'the NPC is facing ' + facing.dot(travel).toFixed(2) + ' against its travel');
+  });
+
+  it('leans an NPC into its run rather than away from it', function () {
+    freshLevel();
+    var n = g.npcs[0];
+    step(0.4);
+    // the torso pitches forward, which is only forward if the body is the
+    // right way round
+    assert.greater(n.torso.rotation.x, 0, 'the torso leans backwards while running');
+  });
+});
+
+describe('Jumping onto cover', function () {
+  it('clears the low cover from flat ground', function () {
+    reset();
+    g.setActive(true);
+    g.state.grounded = true;
+    var peak = 0;
+    g.setKey('Space', true);
+    for (var i = 0; i < 40; i++) { g.update(1 / 60); peak = Math.max(peak, g.state.pos.y); }
+    g.setKey('Space', false);
+    step(2);
+    var reach = (peak - g.cfg.eye) + g.cfg.stepHeight;
+    assert.greater(reach, 2.4,
+                   'a standing jump reaches ' + reach.toFixed(2) + 'u, too low for the cover');
+  });
+
+  it('lands the player on top of a low obstacle', function () {
+    reset();
+    g.setActive(true);
+    // the shortest piece of cover in the arena
+    var low = null;
+    for (var i = 0; i < g.obstacleBoxes.length; i++) {
+      var b = g.obstacleBoxes[i];
+      if (!low || b.max.y < low.max.y) low = b;
+    }
+    assert.ok(low, 'no cover at all');
+    assert.less(low.max.y, 2.7, 'the shortest cover is unexpectedly tall');
+
+    var c = low.getCenter(new THREE.Vector3());
+    var size = low.getSize(new THREE.Vector3());
+    // start just off one edge, facing the middle of it
+    g.teleport(c.x + size.x / 2 + 3.0, g.cfg.eye, c.z);
+    g.aimAt(new THREE.Vector3(c.x, g.cfg.eye, c.z));
+    g.setKey('KeyW', true);
+    g.setKey('Space', true);
+    step(1.6);
+    g.setKey('Space', false);
+    g.setKey('KeyW', false);
+    step(1.2);
+    assert.close(g.state.pos.y - g.cfg.eye, low.max.y, 0.35,
+                 'the player did not end up standing on the cover');
+  });
+
+  it('does not clear the tall cover on one jump', function () {
+    reset();
+    g.setActive(true);
+    var tall = null;
+    for (var i = 0; i < g.obstacleBoxes.length; i++) {
+      if (g.obstacleBoxes[i].max.y > 4) { tall = g.obstacleBoxes[i]; break; }
+    }
+    if (!tall) return;                       // this arena has no tall pillars
+    g.state.grounded = true;
+    var peak = 0;
+    g.setKey('Space', true);
+    for (var j = 0; j < 40; j++) { g.update(1 / 60); peak = Math.max(peak, g.state.pos.y); }
+    g.setKey('Space', false);
+    step(2);
+    assert.less((peak - g.cfg.eye) + g.cfg.stepHeight, tall.max.y,
+                'a standing jump gets on top of the tall cover');
+  });
+});
+
 describe('Zoom', function () {
   function rightDown() { window.dispatchEvent(new MouseEvent('mousedown', { button: 2 })); }
   function rightUp() { window.dispatchEvent(new MouseEvent('mouseup', { button: 2 })); }
@@ -1753,7 +2191,7 @@ describe('Scoring', function () {
     g.state.score = 10;
     for (var i = 0; i < 6; i++) {
       g.teleport(0, g.cfg.eye, 0);
-      g.aimAt(new THREE.Vector3(0, 0.2, g.cfg.arena / 2));
+      g.aimAt(new THREE.Vector3(0, -2, 0));            // straight down at the floor
       g.state.lastShot = -1e9;
       g.state.mag = g.cfg.magSize;
       g.shoot();
@@ -1912,6 +2350,110 @@ describe('Telling players from NPCs', function () {
     assert.ok(Math.abs(player.legL.rotation.x) > 0.1, 'the legs did not swing');
     PB.poseFigure(player, { phase: 1.2, grounded: false, vy: 5 });
     assert.less(player.legL.rotation.x, 0, 'the legs did not tuck in the air');
+  });
+});
+
+describe('Statistics belong to one player', function () {
+  function hitMessage(kind, index) {
+    return {
+      kind: kind, index: index,
+      by: 99,
+      origin: { x: 0, y: 1.7, z: 0 },
+      point: { x: 2, y: 1, z: 2 },
+      dir: { x: 0, y: 0, z: -1 },
+      normal: { x: 0, y: 1, z: 0 },
+      score: 5000,
+    };
+  }
+
+  it('does not count another shooter hit against our accuracy', function () {
+    freshLevel();
+    g.resetStats();
+    var before = JSON.stringify(g.stats());
+    g.applyServerHit(hitMessage('npc', 0), false);
+    g.applyServerHit(hitMessage('miss'), false);
+    var t = g.targets.findIndex(function (t) { return t.alive; });
+    g.applyServerHit(hitMessage('target', t), false);
+    assert.equal(JSON.stringify(g.stats()), before,
+                 'shooting by another player moved our statistics');
+  });
+
+  it('still counts our own', function () {
+    freshLevel();
+    g.resetStats();
+    g.applyServerHit(hitMessage('npc', 0), true);
+    assert.equal(g.stats().npcsDown, 1, 'our own kill was not counted');
+    assert.equal(g.stats().shotsHit, 1, 'our own hit was not counted');
+    g.applyServerHit(hitMessage('miss'), true);
+    assert.equal(g.stats().misses, 1, 'our own miss was not counted');
+    assert.equal(g.stats().streak, 0, 'the miss did not break our streak');
+  });
+
+  it('still changes the world when somebody else shoots', function () {
+    freshLevel();
+    var index = g.targets.findIndex(function (t) { return t.alive; });
+    g.applyServerHit(hitMessage('target', index), false);
+    assert.ok(!g.targets[index].alive, 'their shot did not break the target for us');
+    assert.greater(g.debris.length, 5, 'no debris from their shot');
+  });
+
+  it('marks whose hit it was so the HUD can tell', function () {
+    freshLevel();
+    var seen = [];
+    g.on('hit', function (d) { seen.push(d.mine); });
+    g.applyServerHit(hitMessage('npc', 0), true);
+    g.applyServerHit(hitMessage('npc', 0), false);
+    assert.equal(seen.join(','), 'true,false', 'hit events do not say who fired');
+  });
+});
+
+describe('Seeing and hearing other players shoot', function () {
+  it('draws a tracer along their line of fire', function () {
+    freshLevel();
+    var before = g.bullets.length;
+    var mesh = g.showRemoteShot({
+      by: 42,
+      origin: { x: 0, y: 1.7, z: 0 },
+      point: { x: 0, y: 1.7, z: -12 },
+    });
+    assert.ok(mesh, 'no tracer was created');
+    assert.equal(g.bullets.length, before + 1, 'the tracer is not in flight');
+    assert.less(mesh.position.distanceTo(new THREE.Vector3(0, 1.7, 0)), 0.01,
+                'the tracer did not start at their muzzle');
+  });
+
+  it('flies the tracer to where their shot landed and then clears it', function () {
+    freshLevel();
+    while (g.bullets.length) { g.scene.remove(g.bullets[0].mesh); g.bullets.shift(); }
+    g.showRemoteShot({
+      by: 42,
+      origin: { x: 0, y: 1.7, z: 0 },
+      point: { x: 0, y: 1.7, z: -12 },
+    });
+    var b = g.bullets[0];
+    assert.close(b.remaining, 12, 0.01, 'the tracer has the wrong distance to travel');
+    step(0.05);
+    assert.less(b.mesh.position.z, -1, 'the tracer did not move');
+    step(0.5);
+    assert.equal(g.bullets.length, 0, 'the tracer never cleared');
+  });
+
+  it('does not touch our ammunition or our statistics', function () {
+    freshLevel();
+    g.resetStats();
+    var mag = g.state.mag;
+    g.showRemoteShot({
+      by: 42, origin: { x: 0, y: 1.7, z: 0 }, point: { x: 0, y: 1.7, z: -12 },
+    });
+    assert.equal(g.state.mag, mag, 'their shot cost us a round');
+    assert.equal(g.stats().shotsFired, 0, 'their shot counted as ours');
+  });
+
+  it('ignores a malformed remote shot rather than throwing', function () {
+    freshLevel();
+    assert.equal(g.showRemoteShot({ by: 1 }), null, 'a shot with no origin was drawn');
+    assert.equal(g.showRemoteShot({ by: 1, origin: { x: 0, y: 1, z: 0 } }), null,
+                 'a shot with no landing point was drawn');
   });
 });
 
@@ -2110,15 +2652,29 @@ describe('Performance', function () {
 
   it('compiles no new shaders when a target breaks', function () {
     // A mid-frame shader compile was a ~300ms stall on the first break.
+    //
+    // Measured across the *second* break: rebuilding a level disposes its
+    // target materials, so the first break after one can legitimately rebuild
+    // a program that was released. What must never happen is a compile during
+    // ordinary play, once everything has been drawn at least once.
+    function breakOne() {
+      var t = findClearTarget();
+      if (!t) return false;
+      g.aimAt(t.mesh.position);
+      g.state.lastShot = -1e9;
+      g.state.mag = g.cfg.magSize;
+      g.shoot();
+      step(0.3);
+      g.render();
+      return !t.alive;
+    }
+
     reset();
     g.render();
+    assert.ok(breakOne(), 'could not break a target to warm up');
+
     var before = g.renderer.info.programs.length;
-    var t = findClearTarget();
-    assert.ok(t, 'no clear target');
-    g.aimAt(t.mesh.position);
-    g.shoot();
-    step(0.3);
-    g.render();
+    assert.ok(breakOne(), 'could not break a second target');
     assert.ok(g.debris.length > 0, 'no debris to draw');
     assert.equal(g.renderer.info.programs.length, before,
                  'a break triggered a shader compile mid-frame');

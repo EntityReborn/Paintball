@@ -87,6 +87,14 @@ PB.createNet = function (opts) {
       emit('hello', msg);
       return;
     }
+    if (msg.t === 'perk') {
+      if (game) {
+        if (msg.by === self.id) game.grantPerk(msg.kind);
+        game.perkSystem.remove(game.perkSystem.byId(msg.id) || {});
+      }
+      emit('perk', msg);
+      return;
+    }
     if (msg.t === 'levelStart') {
       snapshots.length = 0;              // the old indices mean nothing now
       if (game) game.applyLevel(msg);
@@ -95,7 +103,10 @@ PB.createNet = function (opts) {
     }
     if (msg.t === 'snapshot') {
       stats.received++;
-      snapshots.push({ at: now(), players: msg.players, npcs: msg.npcs, targets: msg.targets });
+      // keep every field the interpolation reads: picking out a few by hand is
+      // how the world clock and the perk list went missing on the way in
+      msg.at = now();
+      snapshots.push(msg);
       var cutoff = now() - BUFFER_MS;
       while (snapshots.length > 2 && snapshots[0].at < cutoff) snapshots.shift();
       return;
@@ -118,12 +129,15 @@ PB.createNet = function (opts) {
       return;
     }
     if (msg.t === 'hit') {
+      var mine = msg.by === self.id;
       stats.hits++;
-      if (msg.by === self.id) stats.lastHit = msg.kind;
+      if (mine) stats.lastHit = msg.kind;
       if (game) {
-        // the server decides outcomes; only our own shots move our score
-        if (msg.by === self.id) game.setScore(msg.score);
-        game.applyServerHit(msg);
+        // the server decides outcomes; only our own shots move our score,
+        // and only our own shots count towards our stats
+        if (mine) game.setScore(msg.score);
+        else game.showRemoteShot(msg);      // their tracer and the sound of it
+        game.applyServerHit(msg, mine);
       }
       emit('hit', msg);
       return;
@@ -277,7 +291,9 @@ PB.createNet = function (opts) {
       r.last = { x: x, y: y, z: z };
 
       r.fig.root.position.set(x, y - game.cfg.eye, z);
-      r.fig.root.rotation.y = lerpAngle(pa[4], pb[4], pair.f) + Math.PI;
+      // a figure's front is its local -Z, which is also where a player yaw of
+      // 0 looks: no half turn, or everyone runs about with the pack in front
+      r.fig.root.rotation.y = lerpAngle(pa[4], pb[4], pair.f);
       PB.poseFigure(r.fig, {
         phase: r.phase,
         grounded: !!pb[6],
@@ -290,6 +306,13 @@ PB.createNet = function (opts) {
     remotes.forEach(function (r, id) { if (!seen.has(id)) dropRemote(id); });
 
     applyEntities(pair);
+
+    // the sliders and the perks on the ground both come from the server
+    if (pair.b.wt !== undefined) {
+      var wtA = pair.a.wt === undefined ? pair.b.wt : pair.a.wt;
+      game.setWorldTime(lerp(wtA, pair.b.wt, pair.f));
+    }
+    if (pair.b.perks) game.perkSystem.applyList(pair.b.perks);
   }
 
   function findPlayer(list, id) {

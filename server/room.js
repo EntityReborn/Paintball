@@ -55,6 +55,7 @@ class Room {
       violations: 0,
       joinedAt: Date.now(),
       score: 0,
+      perks: {},
       stats: { shotsFired: 0, shotsHit: 0, misses: 0, targetsBroken: 0, npcsDown: 0 },
     };
     this.players.set(id, player);
@@ -168,6 +169,25 @@ class Room {
     return best;
   }
 
+  /* ---------------------------------------------------------------- perks */
+  /* The server owns what is on the ground and who got it. A client that walks
+   * over a perk does not grant itself anything — it waits to be told. */
+  collectPerks(now = Date.now()) {
+    const g = this.game;
+    const picked = [];
+    for (const player of this.players.values()) {
+      const perk = g.perkSystem.pickUpAt(player.x, player.z, player.y - g.cfg.eye);
+      if (!perk) continue;
+      g.perkSystem.grant(player, perk.kind);
+      g.perkSystem.remove(perk);
+      picked.push({
+        t: 'perk', by: player.id, kind: perk.kind, id: perk.id,
+        label: perk.def.label, duration: g.cfg.perkDuration,
+      });
+    }
+    return picked;
+  }
+
   /* ------------------------------------------------------------- shooting */
   /* The server owns what a shot hit. It re-runs the same raycast the client
    * ran, against its own copy of the world, so a client cannot claim a kill
@@ -185,8 +205,9 @@ class Room {
       return { ok: false, reason: 'non-finite shot' };
     }
 
-    // no firing faster than the weapon allows
-    if (now - player.lastShotAt < cfg.fireMs * 0.75) {
+    // no firing faster than the weapon allows — rapid fire included
+    const allowed = cfg.fireMs * g.perkSystem.factor(player, 'fireRate');
+    if (now - player.lastShotAt < allowed * 0.75) {
       player.violations++;
       return { ok: false, reason: 'rate of fire' };
     }
@@ -226,6 +247,7 @@ class Room {
 
     const event = {
       t: 'hit', by: id,
+      origin: { x: r3(o.x), y: r3(o.y), z: r3(o.z) },   // so others can draw the tracer
       point: { x: r3(hit.point.x), y: r3(hit.point.y), z: r3(hit.point.z) },
       dir: { x: r3(dir.x), y: r3(dir.y), z: r3(dir.z) },
     };
@@ -312,7 +334,9 @@ class Room {
 
     // horizontal budget: sprint speed plus slack for a burst of dropped packets
     const dt = Math.min(1.0, Math.max(0.001, (now - player.lastStateAt) / 1000));
-    const budget = cfg.sprint * dt * 1.35 + 0.35;
+    // a speed perk legitimately moves the player faster, so the budget grows
+    const boost = this.game.perkSystem.factor(player, 'speed');
+    const budget = cfg.sprint * boost * dt * 1.35 + 0.35;
     const moved = Math.hypot(msg.x - player.x, msg.z - player.z);
     if (moved > budget) {
       return { ok: false, reason: `moved ${moved.toFixed(2)}u in ${dt.toFixed(3)}s` };
@@ -370,13 +394,24 @@ class Room {
         round(t.mesh.position.x), round(t.mesh.position.y), round(t.mesh.position.z),
         t.alive ? 1 : 0,
       ])),
+      // the sliders are a pure function of this, so the clock is all that
+      // has to travel for every client to have them in the same place
+      wt: round(g.state.worldTime),
+      perks: g.perkSystem.describe(),
     };
   }
 
   /* ----------------------------------------------------------------- loop */
   step(dtMs, now = Date.now()) {
     this.tick++;
-    this.game.update(dtMs / 1000);
+    const dt = dtMs / 1000;
+    this.game.update(dt);
+
+    for (const player of this.players.values()) {
+      this.game.perkSystem.tickHolder(player, dt);
+    }
+    for (const msg of this.collectPerks(now)) this.onBroadcast(msg);
+
     this.sinceSnapshot += dtMs;
     if (this.sinceSnapshot >= this.snapshotMs) {
       this.recordHistory(now);
