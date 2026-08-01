@@ -24,8 +24,10 @@ const MAX_REWIND_MS = 700;
 
 class Room {
   constructor(opts = {}) {
-    this.seed = opts.seed || (Math.random() * 1e9) | 0;
-    this.game = createHeadlessGame(Object.assign({ seed: this.seed }, opts.game || {}));
+    // A pinned seed is for tuning and for tests that need the same arena every
+    // time; without one every fresh match gets a new map.
+    this.pinnedSeed = opts.seed || null;
+    this.gameOptions = opts.game || {};
     this.players = new Map();
     this.tick = 0;
     this.nextId = 1;
@@ -36,13 +38,34 @@ class Room {
     this.history = [];              // recent entity positions, for lag compensation
     this.onBroadcast = opts.onBroadcast || function () {};
     this.onSend = opts.onSend || function () {};
+    this.matches = 0;
+
+    this.buildWorld(this.pinnedSeed);
+  }
+
+  /* Build a world and hang the room's wiring off it. Called again whenever a
+   * fresh match starts, so everything that points at the old game has to be
+   * re-attached here. */
+  buildWorld(seed) {
+    this.seed = seed || (Math.random() * 1e9) | 0;
+    this.game = createHeadlessGame(Object.assign({ seed: this.seed }, this.gameOptions));
+    this.history.length = 0;
+    this.sinceSnapshot = 0;
+    this.matches++;
 
     // when the world moves on to the next level, everyone has to be told
     this.game.on('level', () => this.onBroadcast(this.levelMessage()));
+    return this.seed;
   }
 
   /* ------------------------------------------------------------- players */
   join(name) {
+    /* An empty room means the last match is over. Rebuild before letting the
+     * first player in, so they arrive on a fresh map at level one rather than
+     * inheriting whatever the previous session left behind — a half-cleared
+     * arena, a level count from someone else's game, perks on the ground. */
+    if (this.players.size === 0) this.buildWorld(this.pinnedSeed);
+
     const id = this.nextId++;
     const player = {
       id,

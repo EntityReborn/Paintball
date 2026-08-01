@@ -70,6 +70,12 @@ npm start                       # server + client on :8080
 
 then open `http://localhost:8080/?mp` in two windows.
 
+**Each session gets its own map.** When the first player joins an empty room
+the world is rebuilt: a new arena, level one, no bodies and nothing left on the
+ground from whoever was there before. Anyone joining after that lands in the
+match already in progress. Set `MAP_SEED` to pin the arena instead — the match
+still resets, but the layout stays put.
+
 **Hybrid authority.** Clients own where they are; the server owns everything
 else and checks every position it is told about against the movement rules —
 speed, arena bounds, height, pitch. A client that claims to have moved further
@@ -197,7 +203,7 @@ let the driver do it.
 plays the game through Chrome's own input pipeline (trusted keyboard and mouse
 events, real pointer lock) and writes screenshots to `tests/shots/`.
 
-**Server tests** (`tests/server.test.js`) — 35 node tests over the headless
+**Server tests** (`tests/server.test.js`) — 41 node tests over the headless
 engine, seed determinism, the room's plausibility rules, server-side shot
 validation and lag compensation, snapshot cadence and size, and the static file
 server's path handling.

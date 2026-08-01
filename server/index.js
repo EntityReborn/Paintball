@@ -106,7 +106,11 @@ wss.on('connection', socket => {
 
     if (msg.t === 'join') {
       if (player) return;
+      const matchesBefore = room.matches;
       player = room.join(msg.name);
+      if (room.matches !== matchesBefore) {
+        log(`new match — map seed ${room.seed}`);
+      }
       sockets.set(player.id, socket);
       send(socket, room.hello(player));
       broadcast({ t: 'joined', player: room.publicPlayer(player) }, player.id);
@@ -157,7 +161,9 @@ function log() {
 
 room.start();
 server.listen(PORT, HOST, () => {
-  log(`listening on ${HOST}:${PORT} — map seed ${room.seed}`);
+  log(`listening on ${HOST}:${PORT}` +
+      (process.env.MAP_SEED ? ` — map pinned to seed ${room.seed}`
+                            : ' — a new map is built for each session'));
 });
 
 function shutdown() {

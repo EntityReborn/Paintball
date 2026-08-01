@@ -326,6 +326,7 @@ test('malformed shots are rejected', () => {
 
 test('the level needs both the NPCs and the targets cleared', () => {
   const room = new Room({ seed: 31 });
+  room.join('watcher');                // the first join builds a fresh world
   const g = room.game;
   const level0 = g.state.level;
 
@@ -423,8 +424,8 @@ test('the level turns over when a shot breaks the last target', () => {
   // the NPC path checks the level for itself; the target path did not, so an
   // arena cleared by breaking the last target just sat there empty
   const room = new Room({ seed: 55 });
+  const p = room.join('ana');          // the first join builds a fresh world
   const g = room.game;
-  const p = room.join('ana');
   const level0 = g.state.level;
   const THREE = globalThis.THREE;
 
@@ -451,8 +452,9 @@ test('the level turns over when a shot breaks the last target', () => {
 test('clearing the arena tells every client about the new level', () => {
   const sent = [];
   const room = new Room({ seed: 55, onBroadcast: m => sent.push(m) });
+  const p = room.join('ana');          // the first join builds a fresh world
   const g = room.game;
-  const p = room.join('ana');
+  sent.length = 0;
   const THREE = globalThis.THREE;
 
   g.npcs.slice().forEach(n => { if (n.alive) g.knockDownNPC(n); });
@@ -473,8 +475,8 @@ test('clearing the arena tells every client about the new level', () => {
 /* ---------------------------------------------------------------- perks */
 test('the server owns the perks and hands them out', () => {
   const room = new Room({ seed: 88 });
+  const p = room.join('ana');          // the first join builds a fresh world
   const g = room.game;
-  const p = room.join('ana');
 
   g.perkSystem.clear();
   const perk = g.perkSystem.spawn({ kind: 'speed', x: 5, y: 1.1, z: 5 });
@@ -491,9 +493,9 @@ test('the server owns the perks and hands them out', () => {
 
 test('a perk belongs to the player who reached it', () => {
   const room = new Room({ seed: 88 });
-  const g = room.game;
-  const near = room.join('near');
+  const near = room.join('near');      // the first join builds a fresh world
   const far = room.join('far');
+  const g = room.game;
   g.perkSystem.clear();
   g.perkSystem.spawn({ kind: 'clip', x: -8, y: 1.1, z: -8 });
 
@@ -509,8 +511,8 @@ test('a perk belongs to the player who reached it', () => {
 
 test('a perk runs out on the server as well', () => {
   const room = new Room({ seed: 88 });
+  const p = room.join('ana');          // the first join builds a fresh world
   const g = room.game;
-  const p = room.join('ana');
   g.perkSystem.grant(p, 'fireRate');
   assert.ok(g.perkSystem.held(p, 'fireRate'));
   for (let i = 0; i < 30 * (g.cfg.perkDuration + 1); i++) room.step(1000 / 30);
@@ -519,9 +521,9 @@ test('a perk runs out on the server as well', () => {
 
 test('rapid fire lets that player shoot faster, and only that player', () => {
   const room = new Room({ seed: 88 });
-  const g = room.game;
-  const quick = room.join('quick');
+  const quick = room.join('quick');    // the first join builds a fresh world
   const plain = room.join('plain');
+  const g = room.game;
   g.perkSystem.grant(quick, 'fireRate');
 
   const down = who => ({
@@ -541,9 +543,9 @@ test('rapid fire lets that player shoot faster, and only that player', () => {
 
 test('the speed perk widens the movement budget for that player', () => {
   const room = new Room({ seed: 88 });
-  const g = room.game;
-  const fast = room.join('fast');
+  const fast = room.join('fast');      // the first join builds a fresh world
   const slow = room.join('slow');
+  const g = room.game;
   g.perkSystem.grant(fast, 'speed');
 
   const t0 = Date.now();
@@ -592,13 +594,13 @@ test('the sliders are in the same place on the server as on a client', () => {
 
 test('the balcony exists server-side and stops bullets', () => {
   const room = new Room({ seed: 4242 });
+  const p = room.join('ana');          // the first join builds a fresh world
   const g = room.game;
   assert.ok(g.balcony, 'no balcony on the server');
   const deck = g.balcony.parts.find(p => p.mesh.name === 'balconyDeck');
   assert.ok(deck, 'no deck');
 
   // fire up into the underside of the deck
-  const p = room.join('ana');
   const c = deck.box.getCenter(new globalThis.THREE.Vector3());
   p.x = c.x; p.y = g.cfg.eye; p.z = c.z;
   const res = room.applyShot(p.id, {
@@ -607,6 +609,104 @@ test('the balcony exists server-side and stops bullets', () => {
   assert.ok(res.ok, res.reason);
   assert.ok(res.event.point.y < deck.box.max.y + 0.1,
             'the shot went through the balcony');
+});
+
+/* ----------------------------------------------------------- fresh maps */
+test('the first player into an empty room gets a new map', () => {
+  const room = new Room({});
+  const atBoot = room.seed;
+  const player = room.join('ana');
+  assert.notEqual(room.seed, atBoot, 'the map was not rebuilt on the first join');
+  assert.equal(room.game.state.level, 1, 'the new match did not start at level one');
+  assert.equal(room.hello(player).seed, room.seed, 'hello carried the old seed');
+});
+
+test('a second player joins the map already in play', () => {
+  const room = new Room({});
+  room.join('ana');
+  const seed = room.seed;
+  const arena = room.game.arenaFingerprint();
+  room.join('bo');
+  assert.equal(room.seed, seed, 'the second join rebuilt the world underneath the first');
+  assert.equal(room.game.arenaFingerprint(), arena, 'the arena changed underneath them');
+});
+
+test('the room empties and the next session starts somewhere new', () => {
+  const room = new Room({});
+  const a = room.join('ana');
+  const b = room.join('bo');
+  const played = room.seed;
+
+  room.leave(a.id);
+  assert.equal(room.seed, played, 'the map changed while somebody was still in it');
+  room.leave(b.id);
+  assert.equal(room.seed, played, 'the map changed before anyone rejoined');
+
+  room.join('cara');
+  assert.notEqual(room.seed, played, 'the next session inherited the old map');
+});
+
+test('nothing from the last session leaks into the next one', () => {
+  const room = new Room({});
+  const first = room.join('ana');
+  const g = room.game;
+
+  // play a bit: clear the arena, collect a perk, run the clock on
+  g.npcs.slice().forEach(n => { if (n.alive) g.knockDownNPC(n); });
+  g.targets.slice().forEach(t => {
+    if (t.alive) g.breakTarget(t, new globalThis.THREE.Vector3(0, 1, 0));
+  });
+  g.checkLevel();
+  for (let i = 0; i < 60; i++) room.step(1000 / 30);
+  assert.ok(room.game.state.level > 1, 'the test did not actually advance a level');
+  const leftBehind = {
+    level: room.game.state.level,
+    worldTime: room.game.state.worldTime,
+  };
+
+  room.leave(first.id);
+  room.join('bo');
+
+  assert.equal(room.game.state.level, 1, `level carried over (${leftBehind.level})`);
+  assert.equal(room.game.npcsAlive(), room.game.npcs.length, 'bodies carried over');
+  assert.equal(room.game.aliveCount(), room.game.cfg.targetsPerLevel, 'broken targets carried over');
+  assert.equal(room.game.perkSystem.perks.length, 0, 'perks were left on the ground');
+  assert.ok(room.game.state.worldTime < leftBehind.worldTime,
+            'the world clock carried over');
+  assert.equal(room.history.length, 0, 'lag-compensation history carried over');
+});
+
+test('a pinned seed keeps the same arena but still starts a fresh match', () => {
+  const room = new Room({ seed: 4242 });
+  const a = room.join('ana');
+  const arena = room.game.arenaFingerprint();
+  assert.equal(room.seed, 4242, 'the pinned seed was ignored');
+
+  room.game.npcs.slice().forEach(n => { if (n.alive) room.game.knockDownNPC(n); });
+  room.leave(a.id);
+  room.join('bo');
+
+  assert.equal(room.seed, 4242, 'the pinned seed did not survive the rebuild');
+  assert.equal(room.game.arenaFingerprint(), arena, 'the pinned arena came out different');
+  assert.equal(room.game.npcsAlive(), room.game.npcs.length, 'the NPCs were still down');
+});
+
+test('the level broadcast still works after a rebuild', () => {
+  const sent = [];
+  const room = new Room({ onBroadcast: m => sent.push(m) });
+  room.join('ana');            // rebuilds, and must re-attach the level listener
+  sent.length = 0;
+
+  const g = room.game;
+  g.npcs.slice().forEach(n => { if (n.alive) g.knockDownNPC(n); });
+  g.targets.slice().forEach(t => {
+    if (t.alive) g.breakTarget(t, new globalThis.THREE.Vector3(0, 1, 0));
+  });
+  g.checkLevel();
+
+  const levels = sent.filter(m => m.t === 'levelStart');
+  assert.equal(levels.length, 1, `expected one levelStart, got ${levels.length}`);
+  assert.equal(levels[0].level, 2, 'wrong level in the broadcast');
 });
 
 /* --------------------------------------------------------------- server */
