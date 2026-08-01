@@ -2023,6 +2023,292 @@ describe('A stranded target heals itself', function () {
   });
 });
 
+describe('Options', function () {
+  function fakeStore() {
+    var data = {};
+    return {
+      getItem: function (k) { return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null; },
+      setItem: function (k, v) { data[k] = String(v); },
+      removeItem: function (k) { delete data[k]; },
+      raw: data,
+    };
+  }
+
+  it('starts from sensible defaults', function () {
+    var o = PB.createOptions(fakeStore());
+    assert.equal(o.get('sensitivity'), 1, 'sensitivity');
+    assert.equal(o.get('masterVolume'), 0.8, 'master volume');
+    assert.equal(o.get('name'), 'player', 'name');
+    assert.equal(o.get('hitboxes'), false, 'hitboxes start off');
+  });
+
+  it('keeps settings in storage and reads them back', function () {
+    var store = fakeStore();
+    var o = PB.createOptions(store);
+    o.set('name', 'ana');
+    o.set('sensitivity', 2.5);
+    o.set('masterVolume', 0.25);
+    assert.ok(store.raw[o.key], 'nothing was written');
+
+    var again = PB.createOptions(store);
+    assert.equal(again.get('name'), 'ana', 'name did not survive');
+    assert.equal(again.get('sensitivity'), 2.5, 'sensitivity did not survive');
+    assert.equal(again.get('masterVolume'), 0.25, 'volume did not survive');
+  });
+
+  it('clamps anything out of range rather than trusting it', function () {
+    var o = PB.createOptions(fakeStore());
+    o.set('sensitivity', 999);
+    assert.equal(o.get('sensitivity'), 5, 'sensitivity ceiling');
+    o.set('sensitivity', -4);
+    assert.equal(o.get('sensitivity'), 0.1, 'sensitivity floor');
+    o.set('masterVolume', 4);
+    assert.equal(o.get('masterVolume'), 1, 'volume ceiling');
+  });
+
+  it('refuses a name that would break the display', function () {
+    var o = PB.createOptions(fakeStore());
+    o.set('name', '');
+    assert.equal(o.get('name'), 'player', 'an empty name was kept');
+    o.set('name', 'a-very-long-name-indeed-far-too-long');
+    assert.less(o.get('name').length, 17, 'the name was not trimmed');
+    o.set('name', '<script>x</script>');
+    assert.ok(o.get('name').indexOf('<') === -1, 'markup survived into the name');
+  });
+
+  it('survives storage holding rubbish', function () {
+    var store = fakeStore();
+    store.setItem('paintball.options', 'not json at all');
+    var o = PB.createOptions(store);
+    assert.equal(o.get('sensitivity'), 1, 'a corrupt store broke the defaults');
+
+    store.setItem('paintball.options', JSON.stringify({
+      sensitivity: 'fast', masterVolume: null, name: 42, nonsense: true,
+    }));
+    var b = PB.createOptions(store);
+    assert.equal(b.get('sensitivity'), 1, 'a bad number was kept');
+    assert.equal(b.get('masterVolume'), 0.8, 'a null volume was kept');
+    assert.equal(b.get('name'), 'player', 'a numeric name was kept');
+    assert.equal(b.all().nonsense, undefined, 'an unknown key was kept');
+  });
+
+  it('works when storage is unavailable', function () {
+    var o = PB.createOptions(null);
+    assert.equal(o.get('sensitivity'), 1, 'no defaults without storage');
+    assert.ok(o.set('sensitivity', 2), 'setting failed without storage');
+    assert.equal(o.get('sensitivity'), 2, 'the value was not held in memory');
+  });
+
+  it('tells anyone listening when something changes', function () {
+    var o = PB.createOptions(fakeStore());
+    var seen = [];
+    o.onChange(function (k, v) { seen.push(k + '=' + v); });
+    o.set('invertY', true);
+    o.set('invertY', true);        // no change, so no second event
+    assert.equal(seen.join(','), 'invertY=true', 'change events: ' + seen.join(','));
+  });
+
+  it('puts everything back on reset', function () {
+    var o = PB.createOptions(fakeStore());
+    o.set('name', 'ana');
+    o.set('sensitivity', 3);
+    o.reset();
+    assert.equal(o.get('name'), 'player');
+    assert.equal(o.get('sensitivity'), 1);
+  });
+});
+
+describe('Settings that change the game', function () {
+  it('turns the view faster at a higher sensitivity', function () {
+    reset();
+    g.bindInput(window);
+    g.setActive(true);
+    window.dispatchEvent(new MouseEvent('mousemove', { movementX: 0 }));
+
+    g.setSensitivity(1);
+    var yaw0 = g.yawObj.rotation.y;
+    window.dispatchEvent(new MouseEvent('mousemove', { movementX: 100 }));
+    var slow = Math.abs(g.yawObj.rotation.y - yaw0);
+
+    g.setSensitivity(2);
+    var yaw1 = g.yawObj.rotation.y;
+    window.dispatchEvent(new MouseEvent('mousemove', { movementX: 100 }));
+    var fast = Math.abs(g.yawObj.rotation.y - yaw1);
+
+    assert.close(fast / slow, 2, 0.01, 'doubling sensitivity did not double the turn');
+    g.setSensitivity(1);
+    g.unbindInput(window);
+  });
+
+  it('holds sensitivity inside a usable range', function () {
+    assert.equal(g.setSensitivity(1000), 5, 'no ceiling');
+    assert.equal(g.setSensitivity(0), 0.1, 'no floor');
+    assert.equal(g.setSensitivity('nonsense'), 1, 'a bad value was accepted');
+    g.setSensitivity(1);
+  });
+
+  it('inverts the vertical look when asked', function () {
+    reset();
+    g.bindInput(window);
+    g.setActive(true);
+    window.dispatchEvent(new MouseEvent('mousemove', { movementY: 0 }));
+
+    g.setInvertY(false);
+    var p0 = g.pitchObj.rotation.x;
+    window.dispatchEvent(new MouseEvent('mousemove', { movementY: 50 }));
+    var normal = g.pitchObj.rotation.x - p0;
+
+    g.setInvertY(true);
+    var p1 = g.pitchObj.rotation.x;
+    window.dispatchEvent(new MouseEvent('mousemove', { movementY: 50 }));
+    var inverted = g.pitchObj.rotation.x - p1;
+
+    assert.ok(normal * inverted < 0, 'inverting did not flip the direction');
+    g.setInvertY(false);
+    g.unbindInput(window);
+  });
+
+  it('carries the volume settings into the audio', function () {
+    assert.ok(g.sfx.setVolume, 'no volume control');
+    assert.equal(g.sfx.setVolume('master', 0.4), 0.4, 'master volume');
+    assert.equal(g.sfx.getVolume('master'), 0.4, 'master volume not held');
+    assert.equal(g.sfx.setVolume('gun', 0), 0, 'gunfire volume');
+    assert.equal(g.sfx.setVolume('master', 5), 1, 'volume was not clamped');
+    assert.equal(g.sfx.setVolume('master', -1), 0, 'volume was not clamped');
+    g.sfx.setVolume('master', 0.8);
+    g.sfx.setVolume('gun', 0.8);
+  });
+});
+
+describe('Debug overlays', function () {
+  it('draws a wireframe for every collider in the level', function () {
+    assert.ok(g.debugView, 'no debug view');
+    g.debugView.setColliders(true);
+    assert.equal(g.debugView.colliderCount(), g.colliders.length,
+                 'wireframe count does not match the colliders');
+    assert.ok(g.debugView.colliderGroup.visible, 'the group is hidden');
+  });
+
+  it('hides them again without leaving anything behind', function () {
+    g.debugView.setColliders(true);
+    g.debugView.setColliders(false);
+    assert.ok(!g.debugView.colliderGroup.visible, 'still visible');
+    assert.equal(g.debugView.state.colliders, false, 'state not updated');
+  });
+
+  it('drags a wireframe along with the cover it belongs to', function () {
+    g.debugView.setColliders(true);
+    var mover = g.movers[0];
+    var helper = null;
+    g.debugView.colliderGroup.children.forEach(function (h) {
+      if (h.box === mover.box) helper = h;
+    });
+    assert.ok(helper, 'the sliding cover has no wireframe');
+
+    g.setWorldTime(0);
+    helper.updateMatrixWorld(true);
+    var a = helper.matrixWorld.elements.slice(12, 15).join(',');
+    g.setWorldTime(9);
+    helper.updateMatrixWorld(true);
+    var b = helper.matrixWorld.elements.slice(12, 15).join(',');
+    assert.ok(a !== b, 'the wireframe stayed behind when the cover moved');
+    g.debugView.setColliders(false);
+  });
+
+  it('outlines what bullets are tested against', function () {
+    freshLevel();
+    g.debugView.setHitboxes(true);
+    var expected = g.npcs.length + g.aliveCount();
+    assert.equal(g.debugView.hitboxCount(), expected,
+                 'expected an outline per NPC and live target');
+
+    /* Every outline has to be genuinely renderable. Hanging one on the hitbox
+     * itself looked right in the counts and drew nothing at all: the hitbox is
+     * invisible, and three.js skips the whole subtree of an invisible object. */
+    var outlines = g.debugView.hitboxGroup.userData.outlines;
+    outlines.forEach(function (o, i) {
+      var node = o;
+      while (node) {
+        assert.ok(node.visible, 'outline ' + i + ' hangs under something invisible');
+        node = node.parent;
+      }
+    });
+
+    // and they move with what they outline
+    var npc = g.npcs[0];
+    var mine = outlines.filter(function (o) {
+      var n = o.parent;
+      while (n) { if (n === npc.root) return true; n = n.parent; }
+      return false;
+    });
+    assert.greater(mine.length, 0, 'the NPC has no outline attached to it');
+    npc.root.position.set(11, 0, -6);
+    npc.root.updateMatrixWorld(true);
+    var at = new THREE.Vector3().setFromMatrixPosition(mine[0].matrixWorld);
+    assert.close(at.x, 11, 0.01, 'the outline did not follow the NPC');
+    assert.close(at.z, -6, 0.01, 'the outline did not follow the NPC');
+
+    g.debugView.setHitboxes(false);
+  });
+
+  it('takes the outlines away again', function () {
+    freshLevel();
+    g.debugView.setHitboxes(true);
+    g.debugView.setHitboxes(false);
+    assert.equal(g.debugView.hitboxCount(), 0, 'outlines were left behind');
+    var left = 0;
+    g.npcs[0].root.traverse(function (c) { if (c.isLineSegments) left++; });
+    assert.equal(left, 0, 'an outline is still attached to the NPC');
+  });
+
+  it('follows the world onto the next level', function () {
+    freshLevel();
+    g.debugView.setHitboxes(true);
+    var before = g.debugView.hitboxCount();
+    assert.greater(before, 0, 'nothing outlined to begin with');
+
+    g.applyLevel({ level: g.state.level + 1, npcs: 3, targets: [[5, 1.5, 5, 0], [-5, 1.5, -5, 1]] });
+    assert.equal(g.debugView.hitboxCount(), 3 + 2,
+                 'the outlines did not follow the new level');
+    g.debugView.setHitboxes(false);
+    freshLevel();
+  });
+
+  it('leaves the game alone when it is off', function () {
+    g.debugView.setHitboxes(false);
+    g.debugView.setColliders(false);
+    assert.ok(!g.debugView.colliderGroup.visible, 'colliders visible while off');
+    assert.ok(!g.debugView.hitboxGroup.visible, 'hitboxes visible while off');
+    assert.equal(g.debugView.hitboxCount(), 0, 'outlines left in place');
+  });
+});
+
+describe('Name tags', function () {
+  it('draws a readable label', function () {
+    var tag = PB.createNameTag('ana', '#6ee7ff');
+    assert.ok(tag.sprite, 'no sprite');
+    assert.equal(tag.text, 'ana');
+    assert.greater(tag.sprite.position.y, 1.8, 'the tag is not above the head');
+    assert.ok(tag.sprite.material.depthTest === false, 'the tag hides behind cover');
+  });
+
+  it('sits on the figure so it follows them about', function () {
+    var fig = PB.buildFigure({
+      geo: PB.figureGeometry(), shadows: false, variant: 'player',
+      color: new THREE.Color(0.3, 0.6, 0.9), trim: new THREE.Color(0.2, 0.3, 0.5),
+      accent: new THREE.Color(0, 0.8, 1),
+    });
+    var tag = PB.createNameTag('bo', '#8ef2a0');
+    fig.root.add(tag.sprite);
+    fig.root.position.set(12, 0, -7);
+    fig.root.updateMatrixWorld(true);
+    var world = new THREE.Vector3().setFromMatrixPosition(tag.sprite.matrixWorld);
+    assert.close(world.x, 12, 0.01, 'the tag did not move with the figure');
+    assert.close(world.z, -7, 0.01, 'the tag did not move with the figure');
+    assert.greater(world.y, 1.8, 'the tag is not above the head');
+  });
+});
+
 describe('Zoom', function () {
   function rightDown() { window.dispatchEvent(new MouseEvent('mousedown', { button: 2 })); }
   function rightUp() { window.dispatchEvent(new MouseEvent('mouseup', { button: 2 })); }
@@ -2271,7 +2557,7 @@ describe('Scoring', function () {
     freshLevel();
     g.state.score = 1000;
     g.teleport(0, g.cfg.eye, 0);
-    g.aimAt(new THREE.Vector3(0, 0.2, g.cfg.arena / 2));   // into the floor/wall
+    g.aimAt(new THREE.Vector3(0, -2, 0));      // straight down: nothing can wander in
     g.shoot();
     step(1);
     assert.equal(g.state.score, 1000 + g.cfg.scoreMiss, 'a miss did not cost anything');

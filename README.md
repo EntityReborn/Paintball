@@ -61,8 +61,8 @@ plain `index.html` still boots offline with its own random map and no server at
 all.
 
 Other players are easy to pick out: they carry a visor, a pack and a weapon,
-wear a floating marker overhead, and are coloured from the cool half of the
-wheel. NPCs get the warm half and none of the gear.
+wear a floating marker overhead with their name above it, and are coloured from
+the cool half of the wheel. NPCs get the warm half and none of the gear.
 
 ```bash
 npm start                       # server + client on :8080
@@ -130,6 +130,26 @@ HTTP and the WebSocket upgrade to the same port, so the client and the socket
 share an origin. Rooms live in memory, so keep it at one replica until there is
 a reason to add room affinity.
 
+## Menus
+
+The pause screen has two panels. Both open without grabbing the pointer, so
+reaching for a slider does not drop you into the game.
+
+**Options** — player name, mouse sensitivity, inverted look, master and gunfire
+volume, and whether to show names over other players. Everything is kept in
+local storage under `paintball.options` and applied the moment it changes.
+Values are validated on the way in: storage is editable by hand, and a
+sensitivity of zero or a NaN volume would leave the game unplayable.
+
+**Debug** — two overlays that draw the real data structures rather than copies
+of them, so if an overlay disagrees with what happens in play, the overlay is
+right:
+
+| Overlay | Shows |
+| --- | --- |
+| hitboxes | what bullets are tested against: NPCs, other players, targets |
+| collision wireframes | every collider, coloured by what it belongs to — walls, cover, sliding cover, the balcony |
+
 ## Layout
 
 ```
@@ -141,6 +161,9 @@ src/world.js    arena floor, perimeter walls, scattered cover
 src/targets.js  target spawning, drifting, breaking
 src/npcs.js     low-poly figures: build, wander, run and jump animation
 src/perks.js    pickups and the rules they bend while they last
+src/options.js  settings, validated and kept in local storage
+src/debug.js    the hitbox and collider overlays
+src/ui.js       the pause-screen panels
 src/weapon.js   the viewmodel and its reload animation
 src/effects.js  pooled score labels, debris shards, break flashes
 src/audio.js    synthesised sound effects
@@ -160,11 +183,12 @@ a web server.
 
 Two layers, both driving the real engine in a real WebGL context.
 
-**Browser suite** (`tests/tests.html`) — 192 tests over bootstrap, world
+**Browser suite** (`tests/tests.html`) — 213 tests over bootstrap, world
 generation, targets, rendering, movement, collision, shooting, breaking, levels,
 input, the reload animation, NPCs, view angles, zoom, drifting targets, scoring,
 score indicators, player statistics, telling players from NPCs, the balcony,
-moving cover, perks, jumping onto cover, performance, and HUD wiring. Rendering is
+moving cover, perks, jumping onto cover, settings, the debug overlays, name
+tags, performance, and HUD wiring. Rendering is
 checked by reading pixels back off the canvas; input by dispatching real
 `KeyboardEvent` / `MouseEvent` objects. Open it in a browser to watch it run, or
 let the driver do it.
@@ -178,6 +202,10 @@ engine, seed determinism, the room's plausibility rules, server-side shot
 validation and lag compensation, snapshot cadence and size, and the static file
 server's path handling.
 
+**Menus** (`tests/ui.js`) — drives the pause-screen panels in a real browser:
+the buttons open their panels without starting the game, the debug toggles put
+real geometry in the scene, and settings survive a reload.
+
 **Multiplayer** (`tests/multiplayer.js`) — starts the server, opens two real
 Chrome windows against it, walks one player with genuine key presses and checks
 the other window sees that movement on the right body in the right place, that
@@ -186,6 +214,7 @@ both built the same arena, and that a teleport gets rejected and corrected.
 ```bash
 npm run test:server   # node tests
 npm run test:browser  # browser suite + live game
+npm run test:ui       # the pause-screen menus
 npm run test:mp       # two browsers, one server
 npm test              # all three
 ```

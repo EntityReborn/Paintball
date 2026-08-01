@@ -216,6 +216,29 @@ async function advance(page, seconds, timeout = 60000) {
         npcHue: +npcHsl.h.toFixed(2),
       };
     });
+    const tags = await bo.evaluate(() => {
+      const r = [...net.remotes.values()][0];
+      return {
+        has: !!(r && r.tag),
+        text: r && r.tag ? r.tag.text : null,
+        known: [...net.names.values()],
+        aboveHead: r && r.tag ? r.tag.sprite.position.y : 0,
+      };
+    });
+    check('a remote player carries their name over their head',
+          tags.has && tags.text === 'ana' && tags.aboveHead > 1.8,
+          `tag "${tags.text}" at y=${tags.aboveHead}, names known: ${JSON.stringify(tags.known)}`);
+
+    const hidden = await bo.evaluate(() => {
+      net.setShowNames(false);
+      const r = [...net.remotes.values()][0];
+      const off = r.tag ? r.tag.sprite.visible : null;
+      net.setShowNames(true);
+      return { off, on: r.tag ? r.tag.sprite.visible : null };
+    });
+    check('and the name tags can be turned off', hidden.off === false && hidden.on === true,
+          `off=${hidden.off}, on=${hidden.on}`);
+
     check('a remote player looks like a player, not an NPC',
           looks.playerIsMarked && looks.playerGear > 3 && !looks.npcMarked,
           `player has ${looks.playerGear} distinguishing parts, NPC has none`);
@@ -247,7 +270,9 @@ async function advance(page, seconds, timeout = 60000) {
     const npcShot = await ana.evaluate(async () => {
       const before = game.state.score;
       let chosen = null;
-      for (let attempt = 0; attempt < 24 && !chosen; attempt++) {
+      // the arena has more cover in it now, so give the wandering NPCs longer
+      // to come into the open rather than calling it a failure
+      for (let attempt = 0; attempt < 70 && chosen === null; attempt++) {
         for (const n of game.npcs) {
           if (!n.alive || !n.grounded) continue;
           const chest = n.root.position.clone().setY(1.0);
@@ -257,7 +282,7 @@ async function advance(page, seconds, timeout = 60000) {
           chosen = game.npcs.indexOf(n);
           break;
         }
-        if (!chosen && chosen !== 0) await new Promise(r => setTimeout(r, 120));
+        if (chosen === null) await new Promise(r => setTimeout(r, 150));
       }
       if (chosen === null) return null;
       // A running NPC can duck behind cover between aiming and firing, which

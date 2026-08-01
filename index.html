@@ -42,6 +42,10 @@
   <div class="score" id="m-score"></div>
   <div id="summary"></div>
   <div class="play">CLICK TO PLAY</div>
+  <div id="menu-buttons">
+    <button type="button" id="btn-options">OPTIONS</button>
+    <button type="button" id="btn-debug">DEBUG</button>
+  </div>
   <div id="keys">
     <b>W A S D</b><span>move</span>
     <b>MOUSE</b><span>look</span>
@@ -54,12 +58,75 @@
   </div>
 </div>
 
+<!-- Panels sit outside the menu: a click inside the menu grabs the pointer
+     and starts play, which would fire every time you reached for a slider. -->
+<div id="panels">
+  <div class="panel" id="panel-options">
+    <h2>OPTIONS <button type="button" class="x" id="close-options">CLOSE</button></h2>
+
+    <label class="row">
+      <span>PLAYER NAME</span>
+      <input type="text" id="opt-name" maxlength="16" spellcheck="false">
+    </label>
+
+    <label class="row">
+      <span>MOUSE SENSITIVITY</span>
+      <input type="range" id="opt-sensitivity" min="0.1" max="5" step="0.05">
+      <em id="opt-sensitivity-value"></em>
+    </label>
+
+    <label class="row">
+      <span>INVERT LOOK</span>
+      <input type="checkbox" id="opt-invert">
+    </label>
+
+    <label class="row">
+      <span>MASTER VOLUME</span>
+      <input type="range" id="opt-master" min="0" max="1" step="0.01">
+      <em id="opt-master-value"></em>
+    </label>
+
+    <label class="row">
+      <span>GUNFIRE VOLUME</span>
+      <input type="range" id="opt-gun" min="0" max="1" step="0.01">
+      <em id="opt-gun-value"></em>
+    </label>
+
+    <label class="row">
+      <span>SHOW PLAYER NAMES</span>
+      <input type="checkbox" id="opt-names">
+    </label>
+
+    <div class="row note">Saved in this browser.</div>
+    <button type="button" class="wide" id="reset-options">RESET TO DEFAULTS</button>
+  </div>
+
+  <div class="panel" id="panel-debug">
+    <h2>DEBUG <button type="button" class="x" id="close-debug">CLOSE</button></h2>
+
+    <label class="row">
+      <span>HITBOXES</span>
+      <input type="checkbox" id="dbg-hitboxes">
+    </label>
+    <div class="row note">Outlines what bullets are actually tested against:
+      NPCs, other players and targets.</div>
+
+    <label class="row">
+      <span>COLLISION WIREFRAMES</span>
+      <input type="checkbox" id="dbg-colliders">
+    </label>
+    <div class="row note">Every collider in the level, in the colours of what
+      it belongs to: walls, cover, sliding cover, and the balcony.</div>
+  </div>
+</div>
+
 <div id="fatal" hidden>
   <h2>Could not start</h2>
   <p id="fatal-msg"></p>
 </div>
 
 <script src="vendor/three.min.js"></script>
+<script src="src/options.js"></script>
 <script src="src/figure.js"></script>
 <script src="src/audio.js"></script>
 <script src="src/world.js"></script>
@@ -68,8 +135,10 @@
 <script src="src/weapon.js"></script>
 <script src="src/npcs.js"></script>
 <script src="src/perks.js"></script>
+<script src="src/debug.js"></script>
 <script src="src/game.js"></script>
 <script src="src/net.js"></script>
+<script src="src/ui.js"></script>
 <script src="src/main.js"></script>
 </body>
 </html>

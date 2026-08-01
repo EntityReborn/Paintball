@@ -116,6 +116,37 @@ PB.buildFigure = function (opts) {
   };
 };
 
+/* A name that floats over a figure. Drawn once into a canvas: the text never
+ * changes for the life of a player, so there is nothing to update per frame
+ * beyond keeping it upright. */
+PB.createNameTag = function (text, colour) {
+  var THREE = global.THREE;
+  var canvas = document.createElement('canvas');
+  canvas.width = 256;
+  canvas.height = 64;
+  var c = canvas.getContext('2d');
+  c.font = 'bold 34px ui-monospace, Menlo, Consolas, monospace';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.lineWidth = 8;
+  c.lineJoin = 'round';
+  c.strokeStyle = 'rgba(0,0,0,0.85)';
+  c.strokeText(text, 128, 34);
+  c.fillStyle = colour || '#e6edf3';
+  c.fillText(text, 128, 34);
+
+  var tex = new THREE.CanvasTexture(canvas);
+  var mat = new THREE.SpriteMaterial({
+    map: tex, transparent: true, depthTest: false, depthWrite: false,
+  });
+  var sprite = new THREE.Sprite(mat);
+  sprite.scale.set(2.2, 0.55, 1);
+  sprite.position.y = 2.05;
+  sprite.renderOrder = 7;
+  sprite.name = 'nameTag';
+  return { sprite: sprite, texture: tex, material: mat, text: text };
+};
+
 PB.figureGeometry = function () {
   var THREE = global.THREE;
   return {

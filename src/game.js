@@ -46,6 +46,8 @@ var DEFAULTS = {
   fov: 75,
   zoomFov: 42,                // right mouse button sights down the barrel
   zoomTime: 0.13,             // seconds to go all the way in or out
+  sensitivity: 1.0,           // multiplier on the base look speed
+  invertY: false,
 
   balconyHeight: 3.4,
   balconyWidth: 26,
@@ -202,6 +204,7 @@ function createGame(options) {
   var arenaFingerprint = world.fingerprint;
   var movers = ctx.movers = world.movers;
   var balcony = ctx.balcony = world.balcony;
+  ctx.remoteHitboxes = [];        // net.js fills this as players appear
 
   var fx = ctx.fx = PB.createEffects(ctx);
   var indicators = fx.indicators;
@@ -213,7 +216,7 @@ function createGame(options) {
   var spawnIndicator = fx.spawnIndicator;
 
   var T = PB.createTargets(ctx);
-  var targets = T.targets;
+  var targets = ctx.targets = T.targets;
   var spawnTarget = T.spawnTarget;
   var spawnTargets = T.spawnTargets;
   var moveTarget = T.moveTarget;
@@ -239,6 +242,7 @@ function createGame(options) {
   var knockDownNPC = N.knockDownNPC;
   var updateNPCs = N.updateNPCs;
 
+  var debugView = cfg.headless ? null : PB.createDebug(ctx);
   var perkSystem = PB.createPerks(ctx);
   var sfx = PB.createAudio(ctx);
 
@@ -372,7 +376,8 @@ function createGame(options) {
    * pitch limit can never be bypassed, and so the debug log sees everything
    * that moved the camera. Turn the log on with game.setLookDebug(true) and
    * read it back with game.lookStats(). */
-  var LOOK_SENS = 0.0022;              // radians per pixel
+  var LOOK_BASE = 0.0022;              // radians per pixel at sensitivity 1
+  var LOOK_SENS = LOOK_BASE * cfg.sensitivity;
   var PITCH_LIMIT = Math.PI / 2 - 0.01;
   var SPIKE_PX = cfg.lookSpikePx;      // one event this big is not a hand movement
   var swallowFirstMove = false;
@@ -434,7 +439,7 @@ function createGame(options) {
     // scale with the lens so sighted aim is as fine as the picture is close
     var sens = LOOK_SENS * (camera.fov / cfg.fov);
     yawObj.rotation.y -= dx * sens;
-    setPitch(pitchObj.rotation.x - dy * sens);
+    setPitch(pitchObj.rotation.x - (cfg.invertY ? -dy : dy) * sens);
     logLook('move', dx, dy);
     return true;
   }
@@ -628,6 +633,7 @@ function createGame(options) {
     }
     for (var n = 0; n < desc.npcs; n++) npcs.push(makeNPC(n));
     scene.updateMatrixWorld(true);
+    if (debugView) debugView.refresh();
     emit('level', {
       level: state.level, npcs: npcsAlive(), targets: aliveCount(), complete: false,
     });
@@ -1213,6 +1219,16 @@ function createGame(options) {
     isActive: function () { return state.active; },
     setFiring: function (v) { firing = !!v; },
     isFiring: function () { return firing; },
+    debugView: debugView,
+    debugHitboxes: ctx.remoteHitboxes,
+    setSensitivity: function (v) {
+      cfg.sensitivity = Math.min(5, Math.max(0.1, typeof v === 'number' ? v : 1));
+      LOOK_SENS = LOOK_BASE * cfg.sensitivity;
+      return cfg.sensitivity;
+    },
+    getSensitivity: function () { return cfg.sensitivity; },
+    setInvertY: function (v) { cfg.invertY = !!v; return cfg.invertY; },
+    sfx: sfx,
     setNetworked: function (v) { state.networked = !!v; },
     setWorldTime: function (t) {
       state.worldTime = t;

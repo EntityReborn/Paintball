@@ -6,11 +6,12 @@
   "scripts": {
     "start": "node server/index.js",
     "serve": "python -m http.server 8123",
-    "test": "node --test tests/server.test.js && node tests/verify.js && node tests/multiplayer.js",
+    "test": "node --test tests/server.test.js && node tests/verify.js && node tests/ui.js && node tests/multiplayer.js",
     "test:server": "node --test tests/server.test.js",
     "test:browser": "node tests/verify.js",
     "test:mp": "node tests/multiplayer.js",
-    "test:headful": "node tests/verify.js --headful"
+    "test:headful": "node tests/verify.js --headful",
+    "test:ui": "node tests/ui.js"
   },
   "devDependencies": {
     "puppeteer-core": "^25.4.0"

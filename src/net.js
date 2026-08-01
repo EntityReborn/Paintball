@@ -32,6 +32,8 @@ PB.createNet = function (opts) {
   var snapshots = [];           // {at, players, npcs, targets}
   var remotes = new Map();      // id -> {fig, phase, name, last}
   var departed = new Set();     // ids that have left, so a stale snapshot cannot revive them
+  var names = new Map();        // id -> display name, for the tags over their heads
+  var showNames = true;
   var game = null;
   var sendTimer = null;
   var statsTimer = null;
@@ -84,6 +86,7 @@ PB.createNet = function (opts) {
     if (msg.t === 'hello') {
       self.id = msg.id;
       self.seed = msg.seed;
+      (msg.players || []).forEach(function (p) { names.set(p.id, p.name); });
       emit('hello', msg);
       return;
     }
@@ -113,6 +116,7 @@ PB.createNet = function (opts) {
     }
     if (msg.t === 'joined') {
       departed.delete(msg.player.id);
+      names.set(msg.player.id, msg.player.name);
       emit('joined', msg.player);
       return;
     }
@@ -249,7 +253,15 @@ PB.createNet = function (opts) {
       accent: accent,
     });
     game.scene.add(fig.root);
-    r = { fig: fig, phase: 0, last: null };
+    r = { fig: fig, phase: 0, last: null, tag: null };
+
+    var label = names.get(id);
+    if (label) {
+      r.tag = PB.createNameTag(label, '#' + accent.getHexString());
+      r.tag.sprite.visible = showNames;
+      fig.root.add(r.tag.sprite);
+    }
+    if (fig.hitbox) game.debugHitboxes && game.debugHitboxes.push(fig.hitbox);
     remotes.set(id, r);
     return r;
   }
@@ -259,6 +271,14 @@ PB.createNet = function (opts) {
     if (!r) return;
     game.scene.remove(r.fig.root);
     r.fig.materials.forEach(function (m) { m.dispose(); });
+    if (r.tag) {
+      r.tag.material.dispose();
+      r.tag.texture.dispose();
+    }
+    if (game.debugHitboxes) {
+      var at = game.debugHitboxes.indexOf(r.fig.hitbox);
+      if (at !== -1) game.debugHitboxes.splice(at, 1);
+    }
     remotes.delete(id);
   }
 
@@ -390,6 +410,19 @@ PB.createNet = function (opts) {
     ping: function () { send({ t: 'ping', c: now() }); },
     close: function () { stopSending(); if (socket) socket.close(); },
     remoteCount: function () { return remotes.size; },
+    names: names,
+    setName: function (v) {
+      name = (v || 'player').toString().slice(0, 16);
+      // a name set before joining travels with the join; afterwards it is the
+      // label everyone else already has, so it only applies next time
+      return name;
+    },
+    getName: function () { return name; },
+    setShowNames: function (on) {
+      showNames = !!on;
+      remotes.forEach(function (r) { if (r.tag) r.tag.sprite.visible = showNames; });
+      return showNames;
+    },
   };
   return api;
 };

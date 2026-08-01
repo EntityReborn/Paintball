@@ -27,9 +27,23 @@ var game = null;
 var net = null;
 window.PB = window.PB || {};
 
+/* Settings come from local storage, with the URL still able to override the
+ * name so a link can carry one. */
+var options = window.PB.createOptions();
+window.options = options;
+if (params.get('name')) options.set('name', params.get('name'));
+
+var ui = null;
+
 function build(seed) {
+  var settings = {
+    audio: true,
+    sensitivity: options.get('sensitivity'),
+    invertY: options.get('invertY'),
+  };
+  if (seed !== undefined) settings.seed = seed;
   try {
-    return window.createGame(seed === undefined ? { audio: true } : { audio: true, seed: seed });
+    return window.createGame(settings);
   } catch (err) {
     die('WebGL failed to initialise: ' + err.message);
     return null;
@@ -211,13 +225,26 @@ refresh();
 game.start();
 }
 
+window.addEventListener('keydown', function (e) {
+  if (e.code === 'Escape' && ui && ui.isOpen()) {
+    ui.close();
+    e.stopPropagation();
+  }
+}, true);
+
+ui = window.PB.createUI({
+  options: options,
+  getGame: function () { return game; },
+  getNet: function () { return net; },
+});
+
 /* ------------------------------------------------------------- boot */
 if (!wantsNet) {
   game = build();
-  if (game) { window.game = game; wire(); }
+  if (game) { window.game = game; wire(); ui.applyAll(); }
 } else {
   // wait for the server's map seed so every client builds the same arena
-  net = window.PB.createNet({ url: netUrl, name: params.get('name') || 'player' });
+  net = window.PB.createNet({ url: netUrl, name: options.get('name') });
   window.net = net;
   el.menuScore.textContent = 'CONNECTING…';
 
@@ -244,6 +271,7 @@ if (!wantsNet) {
     wire();
     net.attach(game);
     game.on('frame', function (dt) { net.update(dt); });
+    ui.applyAll();
     el.menuScore.textContent = 'ONLINE  ·  MAP ' + msg.seed;
     setInterval(function () { net.ping(); }, 2000);
   });
