@@ -362,9 +362,16 @@ PB.createNet = function (opts) {
         lerp(ta[1], tb[1], pair.f),
         lerp(ta[2], tb[2], pair.f)
       );
+      /* The server is the authority in both directions: break what it says is
+       * gone, and put back anything this client broke that the server still
+       * has standing. Only handling the first direction meant one wrong break
+       * stranded a target — invisible here, alive there, and the level could
+       * never be completed. */
       if (!tb[3] && t.alive) {
         // somebody else shot it: play the break rather than blinking it out
         game.breakTarget(t, new THREE.Vector3(0, 1, 0));
+      } else if (tb[3] && !t.alive) {
+        game.reviveTarget(t);
       }
       t.mesh.updateMatrixWorld(true);
     }

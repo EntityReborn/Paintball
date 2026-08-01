@@ -247,6 +247,7 @@ class Room {
 
     const event = {
       t: 'hit', by: id,
+      level: g.state.level,        // so a client that has moved on can ignore it
       origin: { x: r3(o.x), y: r3(o.y), z: r3(o.z) },   // so others can draw the tracer
       point: { x: r3(hit.point.x), y: r3(hit.point.y), z: r3(hit.point.z) },
       dir: { x: r3(dir.x), y: r3(dir.y), z: r3(dir.z) },

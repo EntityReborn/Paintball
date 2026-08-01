@@ -160,7 +160,7 @@ a web server.
 
 Two layers, both driving the real engine in a real WebGL context.
 
-**Browser suite** (`tests/tests.html`) — 187 tests over bootstrap, world
+**Browser suite** (`tests/tests.html`) — 192 tests over bootstrap, world
 generation, targets, rendering, movement, collision, shooting, breaking, levels,
 input, the reload animation, NPCs, view angles, zoom, drifting targets, scoring,
 score indicators, player statistics, telling players from NPCs, the balcony,
@@ -239,6 +239,15 @@ re-entering the window rather than a real flick.
   requested with `unadjustedMovement`. Every write to the angles goes through one
   clamped path, and samples beyond `lookSpikePx` (500 by default) are discarded
   rather than clamped — clamping still turns the view, just less far.
+- **A level could not be finished because one target was invisible.** The
+  client only ever synced targets one way — it broke what the server said was
+  gone, but had no way to put back one it had destroyed by mistake. A hit
+  adjudicated on the previous level, arriving just after the next one was
+  built, broke a brand new target through an index that meant something else a
+  moment earlier; the server kept it standing, no client could see or shoot it,
+  and reloading was the only way out. Hits now carry the level they were judged
+  on, and target state follows the server in both directions, so any
+  divergence heals itself within a snapshot or two.
 - **One player's shooting moved everybody's statistics.** Every client applies
   every hit the server broadcasts, because the target has to break for all of
   them — but it was also running the accounting each time, so accuracy and

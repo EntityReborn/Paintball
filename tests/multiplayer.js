@@ -539,6 +539,54 @@ async function advance(page, seconds, timeout = 60000) {
     await late.close();
     await sleep(400);
 
+    /* ------------------- the arena can actually be cleared with two players */
+    /* The reported bug: everything looks dead, the level never turns over, and
+     * reloading reveals one target that was invisible all along. It happens
+     * when a client destroys a target the server still has standing — after
+     * that nobody can shoot it, because on every screen it is not there. */
+    const strandCheck = await ana.evaluate(async () => {
+      // put the client into exactly that state: break one locally behind the
+      // server's back, the way a stale hit event used to
+      const victim = game.targets.find(t => t.alive);
+      if (!victim) return { skipped: true };
+      const index = game.targets.indexOf(victim);
+      game.breakTarget(victim, new THREE.Vector3(0, 1, 0));
+      const goneLocally = !victim.alive;
+
+      // the next snapshots should put it straight back
+      for (let i = 0; i < 40 && !victim.alive; i++) {
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return {
+        index, goneLocally,
+        restored: victim.alive,
+        visible: victim.mesh.visible && !!victim.mesh.parent,
+      };
+    });
+
+    if (!strandCheck.skipped) {
+      check('a target wrongly destroyed on a client is put back by the server',
+            strandCheck.goneLocally && strandCheck.restored,
+            `target ${strandCheck.index}: broken locally, restored=${strandCheck.restored}`);
+      check('and it comes back visible rather than as a ghost',
+            strandCheck.visible === true);
+    }
+
+    // and a hit from a level nobody is on any more must be ignored
+    const staleHit = await ana.evaluate(() => {
+      const index = game.targets.findIndex(t => t.alive);
+      const before = game.aliveCount();
+      game.applyServerHit({
+        kind: 'target', index, by: 999, level: game.state.level - 1,
+        origin: { x: 0, y: 1.7, z: 0 }, point: { x: 1, y: 1, z: 1 },
+        dir: { x: 0, y: 0, z: -1 }, score: 0,
+      }, false);
+      return { before, after: game.aliveCount() };
+    });
+    check('a hit from a finished level does not destroy a live target',
+          staleHit.before === staleHit.after,
+          `${staleHit.before} targets before, ${staleHit.after} after`);
+
     /* ------------------------------------------------ cheating is caught */
     const cheat = await ana.evaluate(async () => {
       const before = net.stats.corrections;

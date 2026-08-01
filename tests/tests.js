@@ -145,17 +145,20 @@ function isBackground(c, tol) {
 // Stand somewhere with an unobstructed shot at a world point. Returns false if
 // nowhere within reach works.
 function standClearOf(point, range) {
-  var r = range || 4;
-  for (var a = 0; a < Math.PI * 2; a += Math.PI / 10) {
-    var eye = new THREE.Vector3(point.x + Math.sin(a) * r, g.cfg.eye, point.z + Math.cos(a) * r);
-    if (Math.abs(eye.x) > g.cfg.arena / 2 - 1.5) continue;
-    if (Math.abs(eye.z) > g.cfg.arena / 2 - 1.5) continue;
-    var box = g.playerBox(eye, new THREE.Box3());
-    var blocked = g.colliders.some(function (c) { return c.intersectsBox(box); });
-    if (blocked || !g.hasLineOfSight(eye, point)) continue;
-    g.teleport(eye.x, g.cfg.eye, eye.z);
-    g.aimAt(point);
-    return true;
+  var radii = range ? [range, range + 1.5, range + 3] : [4, 5.5, 7];
+  for (var ri = 0; ri < radii.length; ri++) {
+    var r = radii[ri];
+    for (var a = 0; a < Math.PI * 2; a += Math.PI / 12) {
+      var eye = new THREE.Vector3(point.x + Math.sin(a) * r, g.cfg.eye, point.z + Math.cos(a) * r);
+      if (Math.abs(eye.x) > g.cfg.arena / 2 - 1.5) continue;
+      if (Math.abs(eye.z) > g.cfg.arena / 2 - 1.5) continue;
+      var box = g.playerBox(eye, new THREE.Box3());
+      var blocked = g.colliders.some(function (c) { return c.intersectsBox(box); });
+      if (blocked || !g.hasLineOfSight(eye, point)) continue;
+      g.teleport(eye.x, g.cfg.eye, eye.z);
+      g.aimAt(point);
+      return true;
+    }
   }
   return false;
 }
@@ -1929,6 +1932,94 @@ describe('Jumping onto cover', function () {
     step(2);
     assert.less((peak - g.cfg.eye) + g.cfg.stepHeight, tall.max.y,
                 'a standing jump gets on top of the tall cover');
+  });
+});
+
+describe('A stranded target heals itself', function () {
+  function hitMessage(index, level) {
+    return {
+      kind: 'target', index: index, by: 7, level: level,
+      origin: { x: 0, y: 1.7, z: 0 },
+      point: { x: 1, y: 1, z: 1 },
+      dir: { x: 0, y: 0, z: -1 },
+      score: 100,
+    };
+  }
+
+  it('puts back a target the server still has standing', function () {
+    freshLevel();
+    var index = g.targets.findIndex(function (t) { return t.alive; });
+    var t = g.targets[index];
+
+    g.breakTarget(t, new THREE.Vector3(0, 1, 0));
+    assert.ok(!t.alive, 'the target did not break');
+    assert.ok(!t.mesh.parent, 'it is still in the scene');
+
+    assert.ok(g.reviveTarget(t), 'it could not be put back');
+    assert.ok(t.alive, 'it is still counted as broken');
+    assert.ok(t.mesh.visible, 'it came back invisible');
+    assert.equal(t.mesh.parent, g.scene, 'it came back outside the scene');
+  });
+
+  it('can be shot again once it is back', function () {
+    freshLevel();
+    var t = findClearTarget();
+    assert.ok(t, 'no clear target');
+    g.breakTarget(t, new THREE.Vector3(0, 1, 0));
+    g.reviveTarget(t);
+
+    // the revived target has to be solid to a shot again, not a ghost
+    assert.ok(standClearOf(t.mesh.position, 3), 'cannot line up on it');
+    var shot = g.shoot();
+    assert.equal(shot.hit.target, t, 'the shot passed through the revived target');
+    step(0.6);
+    assert.ok(!t.alive, 'it survived being shot the second time');
+  });
+
+  it('brings the count back in line with the server', function () {
+    freshLevel();
+    // the shape of the bug: this client thinks the arena is empty while the
+    // server still has one target standing, so nobody can finish the level
+    var stranded = findClearTarget();
+    assert.ok(stranded, 'no clear target');
+    for (var i = 0; i < g.targets.length; i++) {
+      if (g.targets[i].alive) g.breakTarget(g.targets[i], new THREE.Vector3(0, 1, 0));
+    }
+    assert.equal(g.aliveCount(), 0, 'the client should think it is empty');
+
+    g.reviveTarget(stranded);
+    assert.equal(g.aliveCount(), 1, 'the count did not come back');
+    assert.ok(standClearOf(stranded.mesh.position, 3), 'cannot line up on it');
+    g.state.mag = g.cfg.magSize;
+    g.state.lastShot = -1e9;
+    g.shoot();
+    step(0.6);
+    assert.ok(!stranded.alive, 'the revived target could not be shot');
+    assert.equal(g.aliveCount(), 0, 'it is still counted after being shot');
+  });
+
+  it('ignores a hit adjudicated on a level we have already left', function () {
+    freshLevel();
+    var level = g.state.level;
+    var index = g.targets.findIndex(function (t) { return t.alive; });
+    var alive = g.aliveCount();
+
+    // exactly the race: a hit from the previous level arriving after the next
+    // one has been built, carrying an index that now means a different target
+    g.applyServerHit(hitMessage(index, level - 1), false);
+    assert.equal(g.aliveCount(), alive, 'a stale hit broke a target in this level');
+    assert.ok(g.targets[index].alive, 'the wrong target was destroyed');
+
+    // and one for the level we are actually on still lands
+    g.applyServerHit(hitMessage(index, level), false);
+    assert.ok(!g.targets[index].alive, 'a current hit was ignored');
+  });
+
+  it('does nothing when asked to revive a target that is already up', function () {
+    freshLevel();
+    var t = g.targets.find(function (t) { return t.alive; });
+    assert.ok(!g.reviveTarget(t), 'reviving a standing target reported a change');
+    assert.ok(t.alive, 'it is still standing');
   });
 });
 

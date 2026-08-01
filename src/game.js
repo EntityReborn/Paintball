@@ -218,6 +218,7 @@ function createGame(options) {
   var spawnTargets = T.spawnTargets;
   var moveTarget = T.moveTarget;
   var breakTarget = T.breakTarget;
+  var reviveTarget = T.reviveTarget;
   var aliveCount = T.aliveCount;
 
   var weapon = cfg.headless ? PB.stubWeapon(ctx) : PB.createWeapon(ctx);
@@ -1013,6 +1014,11 @@ function createGame(options) {
    * shooting quietly inflated everybody else's accuracy and streaks.
    */
   function applyServerHit(msg, mine) {
+    /* A hit adjudicated on the previous level can still be in flight when the
+     * next one begins. Applying it here breaks a brand new target through an
+     * index that meant something else a moment ago, and because the server
+     * still has that target standing it becomes invisible and unkillable. */
+    if (typeof msg.level === 'number' && msg.level !== state.level) return;
     var point = msg.point
       ? new THREE.Vector3(msg.point.x, msg.point.y, msg.point.z)
       : null;
@@ -1165,7 +1171,7 @@ function createGame(options) {
     on: on, emit: emit, start: start, stop: stop, update: update, render: render,
     shoot: shoot, reload: reload, spawnTargets: spawnTargets, spawnTarget: spawnTarget,
     startLevel: startLevel, checkLevel: checkLevel, clearLevel: clearLevel,
-    applyLevel: applyLevel,
+    applyLevel: applyLevel, reviveTarget: reviveTarget,
     npcsAlive: npcsAlive, addScore: addScore, spawnIndicator: spawnIndicator,
     moveTarget: moveTarget, makeNPC: makeNPC,
     traceShot: traceShot, aliveCount: aliveCount, movePlayer: movePlayer,

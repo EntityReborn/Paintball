@@ -133,6 +133,22 @@ PB.createTargets = function (ctx) {
     f.life = 0.28;
   }
 
+  /* Put a target back.
+   *
+   * The server decides what is standing. A client that broke one the server
+   * still has alive currently has no way to undo it, so that target stays
+   * invisible and unkillable and the level can never be finished — reloading
+   * is the only way out, because that rebuilds from the server's description.
+   */
+  function reviveTarget(t) {
+    if (!t || t.alive) return false;
+    t.alive = true;
+    t.mesh.visible = true;
+    if (!t.mesh.parent) scene.add(t.mesh);
+    t.mesh.updateMatrixWorld(true);
+    return true;
+  }
+
   function aliveCount() {
     var n = 0;
     for (var i = 0; i < targets.length; i++) if (targets[i].alive) n++;
@@ -141,7 +157,8 @@ PB.createTargets = function (ctx) {
 
   return {
     targets: targets, spawnTarget: spawnTarget, spawnTargets: spawnTargets,
-    moveTarget: moveTarget, breakTarget: breakTarget, aliveCount: aliveCount,
+    moveTarget: moveTarget, breakTarget: breakTarget, reviveTarget: reviveTarget,
+    aliveCount: aliveCount,
   };
 };
 
