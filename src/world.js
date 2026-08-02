@@ -83,13 +83,21 @@ PB.createWorld = function (ctx) {
       obstacleMats[Math.floor(rand() * obstacleMats.length)]
     );
     m.position.set(x, h / 2, z);
-    m.rotation.y = (rand() - 0.5) * 0.5;
+
+    /* Quarter turns only.
+     *
+     * The collider is an axis-aligned box fitted around the mesh, so any other
+     * angle makes it bigger than the thing you can see — on average half again,
+     * and worse than double for a long thin wall, which is a body's width of
+     * cover you get stopped by without touching. A quarter turn just swaps
+     * width and depth, so the box is exactly the obstacle.
+     */
+    m.rotation.y = Math.floor(rand() * 4) * (Math.PI / 2);
     m.castShadow = m.receiveShadow = true;
     m.name = 'obstacle';
     scene.add(m);
 
-    // Rotation grows the world-space box, so nudge anything that ended up
-    // poking into a perimeter wall back inside the play area.
+    // Nudge anything that ended up poking into a perimeter wall back inside.
     var box = new THREE.Box3().setFromObject(m);
     var lim = half - 0.6;
     var shift = new THREE.Vector3();
@@ -241,6 +249,7 @@ PB.createWorld = function (ctx) {
     var mover = {
       mesh: m, box: box,
       base: new THREE.Vector3(x, h / 2, z),
+      delta: new THREE.Vector3(),
       axis: axis, amp: amp, speed: speed, phase: phase,
       half: new THREE.Vector3(w / 2, h / 2, d / 2),
     };
@@ -248,8 +257,17 @@ PB.createWorld = function (ctx) {
     return mover;
   }
 
+  // the ground each slider sweeps over, so two of them cannot share it
+  function sweptFootprint(x, z, w, d, alongX, amp) {
+    return new THREE.Box3(
+      new THREE.Vector3(x - w / 2 - (alongX ? amp : 0), 0, z - d / 2 - (alongX ? 0 : amp)),
+      new THREE.Vector3(x + w / 2 + (alongX ? amp : 0), 1, z + d / 2 + (alongX ? 0 : amp))
+    );
+  }
+
   (function buildMovers() {
     var placed = 0, guard = 0;
+    var sweeps = [];
     while (placed < cfg.movingObstacles && guard++ < 2000) {
       var x = (rand() - 0.5) * (cfg.arena - 16);
       var z = (rand() - 0.5) * (cfg.arena - 16);
@@ -267,10 +285,22 @@ PB.createWorld = function (ctx) {
         if (Math.hypot(c.x - x, c.z - z) < amp + 4) { clash = true; break; }
       }
       if (clash) continue;
+
+      /* And never across another slider's path. Two of them sharing ground
+       * pass straight through each other, and a player riding one gets picked
+       * up by the other as it crosses. */
+      var w = 2.2 + rand(), h = 1.8 + rand() * 1.2, d = 2.2 + rand();
+      var sweep = sweptFootprint(x, z, w, d, alongX, amp);
+      sweep.expandByScalar(1.2);
+      for (var sIdx = 0; sIdx < sweeps.length; sIdx++) {
+        if (sweep.intersectsBox(sweeps[sIdx])) { clash = true; break; }
+      }
+      if (clash) continue;
+      sweeps.push(sweep);
       /* A slow, readable slide. Cover that travels faster than a sprinting
        * player is both unreadable and impossible to keep in step across
        * clients, since each one renders it at a slightly different instant. */
-      addMover(x, z, 2.2 + rand(), 1.8 + rand() * 1.2, 2.2 + rand(),
+      addMover(x, z, w, h, d,
                alongX ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 0, 1),
                amp, 0.05 + rand() * 0.09, rand() * Math.PI * 2);
       placed++;
@@ -285,6 +315,8 @@ PB.createWorld = function (ctx) {
       var mv = movers[i];
       var offset = Math.sin(t * mv.speed * Math.PI * 2 + mv.phase) * mv.amp;
       _moverPos.copy(mv.base).addScaledVector(mv.axis, offset);
+      // how far it travelled this update, so anything riding it can follow
+      mv.delta.subVectors(_moverPos, mv.mesh.position);
       mv.mesh.position.copy(_moverPos);
       mv.mesh.updateMatrixWorld(true);
       mv.box.min.set(

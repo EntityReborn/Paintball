@@ -34,7 +34,8 @@ belongs to the next level, which has one more NPC than the last.
 The score never goes below zero. Every hit and every miss floats a `+100` / `−25`
 label at the spot, and the score readout flashes green or red to match.
 
-The arena has a **balcony** along one wall — walk up the stairs, shoot from the
+Cover you are standing on carries you with it. The arena has a **balcony**
+along one wall — walk up the stairs, shoot from the
 rail, or drop through the gap in the middle. A few pieces of cover **slide back
 and forth**, and a standing jump clears the low cover.
 
@@ -189,7 +190,7 @@ a web server.
 
 Two layers, both driving the real engine in a real WebGL context.
 
-**Browser suite** (`tests/tests.html`) — 213 tests over bootstrap, world
+**Browser suite** (`tests/tests.html`) — 221 tests over bootstrap, world
 generation, targets, rendering, movement, collision, shooting, breaking, levels,
 input, the reload animation, NPCs, view angles, zoom, drifting targets, scoring,
 score indicators, player statistics, telling players from NPCs, the balcony,
@@ -274,6 +275,16 @@ re-entering the window rather than a real flick.
   requested with `unadjustedMovement`. Every write to the angles goes through one
   clamped path, and samples beyond `lookSpikePx` (500 by default) are discarded
   rather than clamped — clamping still turns the view, just less far.
+- **Cover was bigger than it looked.** Obstacles were turned by a small random
+  angle, but their collider is an axis-aligned box fitted around the mesh, so
+  any angle other than a quarter turn makes it larger than the thing you can
+  see — 40% larger on average, and 149% for a long thin wall, which is most of
+  a body's width of cover you get stopped by without touching. Quarter turns
+  only now, which just swap width and depth.
+- **Sliding cover could pass through other sliding cover.** Placement checked
+  against the static obstacles but never against the other sliders, so two
+  could share ground — and a player riding one got handed to the other as it
+  crossed underneath.
 - **A level could not be finished because one target was invisible.** The
   client only ever synced targets one way — it broke what the server said was
   gone, but had no way to put back one it had destroyed by mistake. A hit

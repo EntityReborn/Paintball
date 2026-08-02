@@ -158,7 +158,7 @@ function createGame(options) {
     vy: 0, grounded: true, bob: 0, bobX: 0, bobY: 0, recoil: 0, kick: 0,
     kickBack: 0, reloadT: 0, active: false, shotsFired: 0, elapsed: 0,
     lookSpikes: 0, maxLookDelta: 0, zoom: 0, networked: false,
-    worldTime: 0, airJumps: 0,
+    worldTime: 0, airJumps: 0, standingOn: null,
 
     /* Everything worth bragging about. Distance is kept in world units and
      * converted on the way out — the arena is metric, a unit is a metre. */
@@ -727,7 +727,41 @@ function createGame(options) {
   var _wish = new THREE.Vector3();
   var UP = new THREE.Vector3(0, 1, 0);
 
+  /* What the player is standing on, if it is something that moves.
+   *
+   * Cover slides out from under a player otherwise: they stay put in the air
+   * while the crate they were on walks away. Checked against the box the
+   * player is actually resting on, with a little tolerance for the gap the
+   * collision resolver leaves. */
+  function standsOn(mover, pos) {
+    var b = mover.box;
+    var feet = pos.y - cfg.eye;
+    if (Math.abs(feet - b.max.y) > 0.3) return false;
+    if (pos.x + cfg.radius < b.min.x || pos.x - cfg.radius > b.max.x) return false;
+    if (pos.z + cfg.radius < b.min.z || pos.z - cfg.radius > b.max.z) return false;
+    return true;
+  }
+
+  function supportingMover(pos) {
+    // stay with whatever we are already riding while it still holds us up,
+    // rather than being handed to another one that happens to pass under
+    if (state.standingOn && standsOn(state.standingOn, pos)) return state.standingOn;
+    for (var i = 0; i < movers.length; i++) {
+      if (standsOn(movers[i], pos)) return movers[i];
+    }
+    return null;
+  }
+
+  var MAX_CARRY = 1.0;        // a jump in the world clock must not fling anyone
+
   function movePlayer(dt) {
+    // ride whatever we were standing on at the end of the last frame
+    var riding = state.standingOn;
+    if (riding && riding.delta.lengthSq() > 0 && riding.delta.length() < MAX_CARRY) {
+      state.pos.add(riding.delta);
+      resolveCollisions(state.pos);        // in case it carried us into something
+    }
+
     _wish.set(0, 0, 0);
     if (keys['KeyW']) _wish.z -= 1;
     if (keys['KeyS']) _wish.z += 1;
@@ -800,6 +834,7 @@ function createGame(options) {
     yawObj.position.set(p.x, p.y + bobY, p.z);
     state.bobX = bobX;
     state.bobY = bobY;
+    state.standingOn = state.grounded ? supportingMover(p) : null;
   }
 
   // Runs every frame, paused or not, so a reload animates to completion.
@@ -1235,6 +1270,7 @@ function createGame(options) {
       world.updateMovers(state.worldTime);
     },
     movers: movers, balcony: balcony, updateMovers: world.updateMovers,
+    supportingMover: supportingMover,
     perkSystem: perkSystem, perks: perkSystem.perks,
     fireInterval: fireInterval, walkSpeed: walkSpeed, runSpeed: runSpeed,
     magSize: magSize, airJumpsAllowed: airJumpsAllowed,

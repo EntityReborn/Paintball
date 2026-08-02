@@ -273,6 +273,65 @@ describe('World', function () {
     });
   });
 
+  it('gives every obstacle a collider the same size as the obstacle', function () {
+    /* The collider is an axis-aligned box fitted around the mesh. Rotate the
+     * mesh by anything but a quarter turn and the box grows past what you can
+     * see — you get stopped by cover you have not reached. */
+    var size = new THREE.Vector3();
+    g.obstacleMeshes.forEach(function (m, i) {
+      var p = m.geometry.parameters;
+      g.obstacleBoxes[i].getSize(size);
+
+      // a quarter turn swaps width and depth, so compare the footprint either way
+      var visual = [Math.min(p.width, p.depth), Math.max(p.width, p.depth)];
+      var box = [Math.min(size.x, size.z), Math.max(size.x, size.z)];
+
+      assert.close(box[0], visual[0], 0.01, 'obstacle ' + i + ' collider is the wrong width');
+      assert.close(box[1], visual[1], 0.01, 'obstacle ' + i + ' collider is the wrong depth');
+      assert.close(size.y, p.height, 0.01, 'obstacle ' + i + ' collider is the wrong height');
+    });
+  });
+
+  it('only turns obstacles in quarter turns', function () {
+    g.obstacleMeshes.forEach(function (m, i) {
+      var quarters = m.rotation.y / (Math.PI / 2);
+      assert.close(quarters, Math.round(quarters), 1e-6,
+                   'obstacle ' + i + ' sits at ' + (m.rotation.y * 180 / Math.PI).toFixed(1) +
+                   ' degrees, so its collider is bigger than it is');
+    });
+  });
+
+  it('stops the player at the face of the cover, not short of it', function () {
+    // walk into a piece of cover and check where we come to rest
+    reset();
+    g.setActive(true);
+    var worst = 0, worstAt = '';
+    for (var i = 0; i < g.obstacleBoxes.length; i += 4) {
+      var box = g.obstacleBoxes[i];
+      if (box.max.y < 1.2) continue;
+      var c = box.getCenter(new THREE.Vector3());
+      var size = box.getSize(new THREE.Vector3());
+      var startX = c.x + size.x / 2 + 5;
+      if (Math.abs(startX) > g.cfg.arena / 2 - 2) continue;
+
+      reset();
+      g.setActive(true);
+      g.teleport(startX, g.cfg.eye, c.z);
+      var probe = g.playerBox(g.state.pos, new THREE.Box3());
+      if (g.colliders.some(function (o) { return o.intersectsBox(probe); })) continue;
+      g.aimAt(c);
+      g.setKey('KeyW', true);
+      step(3);
+      g.setKey('KeyW', false);
+
+      // the gap between the player's edge and the face of the cover
+      var gap = (g.state.pos.x - g.cfg.radius) - box.max.x;
+      if (gap > worst) { worst = gap; worstAt = 'obstacle ' + i; }
+    }
+    assert.less(worst, 0.15,
+                'stopped ' + worst.toFixed(2) + 'u short of ' + worstAt);
+  });
+
   it('registers a collider for every wall, obstacle, slider and structure', function () {
     assert.equal(g.colliders.length,
                  4 + g.obstacleMeshes.length + g.movers.length + g.balcony.parts.length,
@@ -303,9 +362,11 @@ describe('Targets', function () {
   });
 
   it('never spawns a target on top of the player', function () {
+    // freshly placed, before any of them have drifted anywhere
+    freshLevel();
     g.targets.forEach(function (t, i) {
       var d = Math.hypot(t.mesh.position.x, t.mesh.position.z);
-      assert.greater(d, 7.9, 'target ' + i + ' spawned in the player\'s lap');
+      assert.greater(d, 7.9, 'target ' + i + ' was placed in the player lap');
     });
   });
 
@@ -372,7 +433,16 @@ describe('Rendering', function () {
 
   it('draws a red target at the crosshair when aimed at one', function () {
     reset();
-    var t = findClearTarget();
+    // the nearest clear one: a target across the arena barely covers the
+    // middle pixel, so the sample lands on whatever is behind it
+    var eye = new THREE.Vector3(g.state.pos.x, g.cfg.eye, g.state.pos.z);
+    var t = null, best = Infinity;
+    for (var i = 0; i < g.targets.length; i++) {
+      var c = g.targets[i];
+      if (!c.alive || !g.hasLineOfSight(eye, c.mesh.position)) continue;
+      var d = eye.distanceTo(c.mesh.position);
+      if (d < best) { best = d; t = c; }
+    }
     assert.ok(t, 'no target with a clear line of sight');
     g.aimAt(t.mesh.position);
     var px = grab(g);
@@ -885,11 +955,14 @@ describe('Levels', function () {
     assert.equal(g.aliveCount(), 1, 'expected one target left');
     assert.equal(g.state.level, level0, 'the level turned over without the last target');
 
-    standClearOf(last.mesh.position, 3);
-    g.state.mag = g.cfg.magSize;
-    g.state.lastShot = -1e9;
-    g.shoot();
-    step(0.6);
+    // it drifts, so line up again each time until the shot lands
+    for (var attempt = 0; attempt < 8 && g.state.level === level0; attempt++) {
+      if (!standClearOf(last.mesh.position, 3)) { step(0.4); continue; }
+      g.state.mag = g.cfg.magSize;
+      g.state.lastShot = -1e9;
+      g.shoot();
+      step(0.6);
+    }
     assert.equal(g.state.level, level0 + 1, 'breaking the last target did not finish the level');
   });
 
@@ -1629,6 +1702,96 @@ describe('Moving obstacles', function () {
     }
   });
 
+  it('keeps the sliders off each other', function () {
+    // two sharing ground pass straight through each other, and a player riding
+    // one gets handed to the other as it crosses
+    function sweep(m) {
+      return new THREE.Box3(
+        new THREE.Vector3(m.base.x - m.half.x - (m.axis.x ? m.amp : 0), 0,
+                          m.base.z - m.half.z - (m.axis.z ? m.amp : 0)),
+        new THREE.Vector3(m.base.x + m.half.x + (m.axis.x ? m.amp : 0), 1,
+                          m.base.z + m.half.z + (m.axis.z ? m.amp : 0)));
+    }
+    for (var i = 0; i < g.movers.length; i++) {
+      for (var j = i + 1; j < g.movers.length; j++) {
+        assert.ok(!sweep(g.movers[i]).intersectsBox(sweep(g.movers[j])),
+                  'sliders ' + i + ' and ' + j + ' share ground');
+      }
+    }
+  });
+
+  it('carries a player standing on one', function () {
+    reset();
+    g.setActive(true);
+    var mv = g.movers[0];
+    var c = mv.box.getCenter(new THREE.Vector3());
+    g.teleport(c.x, mv.box.max.y + g.cfg.eye + 0.05, c.z);
+    step(0.5);                                   // land on it
+    assert.ok(g.state.standingOn === mv, 'not standing on the slider');
+
+    var player = g.state.pos.clone();
+    var box = mv.mesh.position.clone();
+    step(3);
+    var movedPlayer = new THREE.Vector3().subVectors(g.state.pos, player);
+    var movedBox = new THREE.Vector3().subVectors(mv.mesh.position, box);
+
+    assert.greater(movedBox.length(), 0.3, 'the slider did not travel far enough to tell');
+    assert.close(movedPlayer.x, movedBox.x, 0.02, 'the player was left behind on x');
+    assert.close(movedPlayer.z, movedBox.z, 0.02, 'the player was left behind on z');
+    assert.close(g.state.pos.y - g.cfg.eye, mv.box.max.y, 0.05, 'no longer on top of it');
+  });
+
+  it('keeps a rider on board across a turnaround', function () {
+    reset();
+    g.setActive(true);
+    var mv = g.movers[0];
+    var c = mv.box.getCenter(new THREE.Vector3());
+    g.teleport(c.x, mv.box.max.y + g.cfg.eye + 0.05, c.z);
+    step(0.5);
+
+    var worst = 0;
+    for (var i = 0; i < 900; i++) {           // long enough to reverse a few times
+      step(1 / 60);
+      worst = Math.max(worst, Math.abs((g.state.pos.y - g.cfg.eye) - mv.box.max.y));
+    }
+    assert.less(worst, 0.1, 'fell off after ' + worst.toFixed(2) + 'u of drift');
+    assert.ok(g.state.standingOn === mv, 'stopped riding it');
+  });
+
+  it('does not carry a player standing on the floor beside one', function () {
+    reset();
+    g.setActive(true);
+    var mv = g.movers[0];
+    var c = mv.box.getCenter(new THREE.Vector3());
+    var size = mv.box.getSize(new THREE.Vector3());
+    g.teleport(c.x + size.x / 2 + 2.5, g.cfg.eye, c.z + size.z / 2 + 2.5);
+    step(0.5);
+    assert.equal(g.state.standingOn, null, 'the floor counted as a slider');
+
+    var from = g.state.pos.clone();
+    step(2);
+    assert.close(g.state.pos.distanceTo(from), 0, 0.01, 'the player was dragged along');
+  });
+
+  it('lets a rider walk off the edge', function () {
+    reset();
+    g.setActive(true);
+    var mv = g.movers[0];
+    var c = mv.box.getCenter(new THREE.Vector3());
+    g.teleport(c.x, mv.box.max.y + g.cfg.eye + 0.05, c.z);
+    step(0.5);
+    assert.ok(g.state.standingOn === mv, 'not on it to begin with');
+
+    // walk off the side and fall
+    g.aimAt(new THREE.Vector3(c.x + 20, g.cfg.eye, c.z));
+    g.setKey('KeyW', true);
+    step(2.5);
+    g.setKey('KeyW', false);
+    step(1);
+    assert.equal(g.state.standingOn, null, 'still riding it after walking off');
+    assert.close(g.state.pos.y, g.cfg.eye, 0.35, 'did not come back down to the floor');
+  });
+
   it('still stops a bullet where it currently stands', function () {
     reset();
     g.setWorldTime(2);
@@ -1890,30 +2053,44 @@ describe('Jumping onto cover', function () {
   });
 
   it('lands the player on top of a low obstacle', function () {
-    reset();
-    g.setActive(true);
-    // the shortest piece of cover in the arena
-    var low = null;
-    for (var i = 0; i < g.obstacleBoxes.length; i++) {
-      var b = g.obstacleBoxes[i];
-      if (!low || b.max.y < low.max.y) low = b;
-    }
-    assert.ok(low, 'no cover at all');
-    assert.less(low.max.y, 2.7, 'the shortest cover is unexpectedly tall');
+    // Any low piece will do; some sit against a wall or another crate with no
+    // room for a run-up, so work down the list until one can be reached.
+    var candidates = g.obstacleBoxes
+      .filter(function (b) { return b.max.y < 2.7; })
+      .sort(function (a, b) { return a.max.y - b.max.y; });
+    assert.greater(candidates.length, 0, 'no low cover in this arena');
 
-    var c = low.getCenter(new THREE.Vector3());
-    var size = low.getSize(new THREE.Vector3());
-    // start just off one edge, facing the middle of it
-    g.teleport(c.x + size.x / 2 + 3.0, g.cfg.eye, c.z);
-    g.aimAt(new THREE.Vector3(c.x, g.cfg.eye, c.z));
-    g.setKey('KeyW', true);
-    g.setKey('Space', true);
-    step(1.6);
-    g.setKey('Space', false);
-    g.setKey('KeyW', false);
-    step(1.2);
-    assert.close(g.state.pos.y - g.cfg.eye, low.max.y, 0.35,
-                 'the player did not end up standing on the cover');
+    var landedOn = null;
+    for (var i = 0; i < candidates.length && !landedOn; i++) {
+      var low = candidates[i];
+      var c = low.getCenter(new THREE.Vector3());
+      var size = low.getSize(new THREE.Vector3());
+
+      for (var side = 0; side < 4 && !landedOn; side++) {
+        var dx = side === 0 ? 1 : side === 1 ? -1 : 0;
+        var dz = side === 2 ? 1 : side === 3 ? -1 : 0;
+        var startX = c.x + dx * (size.x / 2 + 3.0);
+        var startZ = c.z + dz * (size.z / 2 + 3.0);
+        if (Math.abs(startX) > g.cfg.arena / 2 - 2) continue;
+        if (Math.abs(startZ) > g.cfg.arena / 2 - 2) continue;
+
+        reset();
+        g.setActive(true);
+        g.teleport(startX, g.cfg.eye, startZ);
+        var probe = g.playerBox(g.state.pos, new THREE.Box3());
+        if (g.colliders.some(function (o) { return o.intersectsBox(probe); })) continue;
+
+        g.aimAt(new THREE.Vector3(c.x, g.cfg.eye, c.z));
+        g.setKey('KeyW', true);
+        g.setKey('Space', true);
+        step(1.6);
+        g.setKey('Space', false);
+        g.setKey('KeyW', false);
+        step(1.2);
+        if (Math.abs((g.state.pos.y - g.cfg.eye) - low.max.y) < 0.35) landedOn = low;
+      }
+    }
+    assert.ok(landedOn, 'could not get on top of any low cover by jumping');
   });
 
   it('does not clear the tall cover on one jump', function () {
@@ -1968,12 +2145,19 @@ describe('A stranded target heals itself', function () {
     g.breakTarget(t, new THREE.Vector3(0, 1, 0));
     g.reviveTarget(t);
 
-    // the revived target has to be solid to a shot again, not a ghost
-    assert.ok(standClearOf(t.mesh.position, 3), 'cannot line up on it');
-    var shot = g.shoot();
-    assert.equal(shot.hit.target, t, 'the shot passed through the revived target');
-    step(0.6);
-    assert.ok(!t.alive, 'it survived being shot the second time');
+    // the revived target has to be solid to a shot again, not a ghost.
+    // it drifts, so line up again on each attempt.
+    var landed = null;
+    for (var attempt = 0; attempt < 8 && !landed; attempt++) {
+      if (!standClearOf(t.mesh.position, 3)) { step(0.4); continue; }
+      g.state.mag = g.cfg.magSize;
+      g.state.lastShot = -1e9;
+      var shot = g.shoot();
+      if (shot && shot.hit.target === t) landed = shot;
+      step(0.6);
+    }
+    assert.ok(landed, 'every shot passed through the revived target');
+    assert.ok(!t.alive, 'it survived being shot');
   });
 
   it('brings the count back in line with the server', function () {
@@ -2641,6 +2825,8 @@ describe('Score indicators', function () {
 
   it('recycles a fixed pool instead of allocating', function () {
     freshLevel();
+    var perksWere = g.cfg.perks;
+    g.cfg.perks = false;          // a perk appearing would add to the scene too
     var before = g.scene.children.length;
     for (var i = 0; i < 30; i++) {
       g.teleport(0, g.cfg.eye, 0);
@@ -2652,6 +2838,7 @@ describe('Score indicators', function () {
     }
     assert.less(g.scene.children.length, before + 1, 'indicators grew the scene');
     assert.less(g.indicators.length, g.indicatorPool.length + 1, 'more live labels than the pool');
+    g.cfg.perks = perksWere;
   });
 });
 
