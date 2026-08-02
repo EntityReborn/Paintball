@@ -34,12 +34,14 @@ PB.createNet = function (opts) {
   var departed = new Set();     // ids that have left, so a stale snapshot cannot revive them
   var names = new Map();        // id -> display name, for the tags over their heads
   var showNames = true;
+  var maxHealth = 10;
   var game = null;
   var sendTimer = null;
   var statsTimer = null;
   var lastUpdateAt = 0;
   var figureGeo = null;
-  var stats = { sent: 0, received: 0, corrections: 0, lastLatency: 0, hits: 0, shots: 0, rejected: 0, lastRejection: null };
+  var stats = { sent: 0, received: 0, corrections: 0, lastCorrection: null,
+                lastLatency: 0, hits: 0, shots: 0, rejected: 0, lastRejection: null };
 
   function on(evt, cb) { (listeners[evt] || (listeners[evt] = [])).push(cb); return api; }
   function emit(evt, data) {
@@ -87,6 +89,12 @@ PB.createNet = function (opts) {
       self.id = msg.id;
       self.seed = msg.seed;
       (msg.players || []).forEach(function (p) { names.set(p.id, p.name); });
+      if (msg.you && msg.you.maxHealth) maxHealth = msg.you.maxHealth;
+      if (game && msg.you) {
+        game.setHealth(msg.you.health, maxHealth);
+        // the server picked our spot, so we do not land on top of somebody
+        game.teleport(msg.you.x, msg.you.y, msg.you.z);
+      }
       emit('hello', msg);
       return;
     }
@@ -128,6 +136,7 @@ PB.createNet = function (opts) {
     }
     if (msg.t === 'correction') {
       stats.corrections++;
+      stats.lastCorrection = msg.reason || null;
       if (game) game.teleport(msg.x, msg.y, msg.z);
       emit('correction', msg);
       return;
@@ -144,6 +153,14 @@ PB.createNet = function (opts) {
         game.applyServerHit(msg, mine);
       }
       emit('hit', msg);
+      return;
+    }
+    if (msg.t === 'respawn') {
+      if (game && msg.id === self.id) {
+        game.teleport(msg.x, msg.y, msg.z);
+        game.setHealth(msg.health, maxHealth);
+      }
+      emit('respawn', msg);
       return;
     }
     if (msg.t === 'shotRejected') {
@@ -261,6 +278,9 @@ PB.createNet = function (opts) {
       r.tag.sprite.visible = showNames;
       fig.root.add(r.tag.sprite);
     }
+    r.health = PB.createHealthBar();
+    fig.root.add(r.health.sprite);
+
     if (fig.hitbox) game.debugHitboxes && game.debugHitboxes.push(fig.hitbox);
     remotes.set(id, r);
     return r;
@@ -274,6 +294,10 @@ PB.createNet = function (opts) {
     if (r.tag) {
       r.tag.material.dispose();
       r.tag.texture.dispose();
+    }
+    if (r.health) {
+      r.health.material.dispose();
+      r.health.texture.dispose();
     }
     if (game.debugHitboxes) {
       var at = game.debugHitboxes.indexOf(r.fig.hitbox);
@@ -295,7 +319,12 @@ PB.createNet = function (opts) {
     for (var i = 0; i < pair.b.players.length; i++) {
       var pb = pair.b.players[i];
       var id = pb[0];
-      if (id === self.id || departed.has(id)) continue;
+      if (id === self.id) {
+        // our own entry carries the health the server has for us
+        if (pb.length > 9) game.setHealth(pb[9], maxHealth);
+        continue;
+      }
+      if (departed.has(id)) continue;
       seen.add(id);
 
       var pa = findPlayer(pair.a.players, id) || pb;
@@ -309,6 +338,11 @@ PB.createNet = function (opts) {
         r.phase += moved * PHASE_PER_UNIT;   // legs keep step with the ground
       }
       r.last = { x: x, y: y, z: z };
+
+      // a player waiting to respawn is not in the world
+      var down = pb.length > 10 && pb[10];
+      r.fig.root.visible = !down;
+      if (r.health && pb.length > 9) r.health.set(down ? 0 : pb[9], maxHealth);
 
       r.fig.root.position.set(x, y - game.cfg.eye, z);
       // a figure's front is its local -Z, which is also where a player yaw of

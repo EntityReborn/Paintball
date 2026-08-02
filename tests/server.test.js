@@ -8,7 +8,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
 const { createHeadlessGame } = require('../server/engine.js');
-const { Room, REWIND_MS, MAX_REWIND_MS } = require('../server/room.js');
+const { Room, REWIND_MS, MAX_REWIND_MS, MOVE_BURST } = require('../server/room.js');
 
 /* ------------------------------------------------------------- headless */
 test('the browser engine runs in node with no renderer or DOM', () => {
@@ -72,6 +72,7 @@ test('a normal move is accepted', () => {
   const room = new Room({ seed: 1 });
   const p = room.join('ana');
   const t0 = Date.now();
+  p.x = 0; p.z = 0;                                  // the server spawns us somewhere clear
   p.lastStateAt = t0;
   const res = room.applyState(p.id, {
     x: 0.5, y: 1.7, z: 0.2, yaw: 1, pitch: 0.1, moving: true, grounded: true, vy: 0,
@@ -85,6 +86,8 @@ test('a teleport is rejected and corrected', () => {
   const room = new Room({ seed: 1 });
   const p = room.join('ana');
   const t0 = Date.now();
+  p.x = 0; p.z = 0;                                  // the server spawns us somewhere clear
+  p.settleUntil = 0;                                 // and past the grace for arriving
   p.lastStateAt = t0;
   const res = room.applyState(p.id, {
     x: 25, y: 1.7, z: 25, yaw: 0, pitch: 0, moving: true, grounded: true, vy: 0,
@@ -103,6 +106,7 @@ test('sprinting flat out is still allowed', () => {
   const cfg = room.game.cfg;
   let t = Date.now();
   let x = 0;
+  p.x = 0; p.z = 0;                                  // the server spawns us somewhere clear
   p.lastStateAt = t;
   for (let i = 0; i < 20; i++) {
     t += 100;
@@ -541,6 +545,75 @@ test('rapid fire lets that player shoot faster, and only that player', () => {
             'a player without the perk fired too fast');
 });
 
+test('a bunch of state messages arriving together is not a teleport', () => {
+  // packets do not arrive evenly; a hiccup delivers several in the same
+  // millisecond, and each one still describes a legitimate 33ms of running
+  const room = new Room({ seed: 1 });
+  const p = room.join('ana');
+  const cfg = room.game.cfg;
+  p.x = 0; p.z = 0;
+  const t0 = Date.now();
+  p.lastStateAt = t0;
+
+  // stand still for a moment, then four frames of running land at once
+  let x = 0;
+  for (let i = 0; i < 4; i++) {
+    x += cfg.sprint / 30;
+    const res = room.applyState(p.id, {
+      x, y: cfg.eye, z: 0, yaw: 0, pitch: 0, moving: true, grounded: true, vy: 0,
+    }, t0 + 300);                                  // all at the same instant
+    assert.ok(res.ok, `packet ${i} refused: ${res.reason}`);
+  }
+  assert.ok(Math.abs(p.x - x) < 1e-9, 'the server did not take the moves');
+});
+
+test('a burst does not add up to running faster than anybody can run', () => {
+  const room = new Room({ seed: 1 });
+  const p = room.join('ana');
+  const cfg = room.game.cfg;
+  p.x = 0; p.z = 0;
+  let t = Date.now();
+  p.lastStateAt = t;
+
+  // twice sprint speed, sustained: the allowance runs dry and stays dry
+  let claim = 0;
+  let refused = 0;
+  for (let i = 0; i < 40; i++) {
+    t += 33;
+    claim += cfg.sprint * 2 / 30;                  // where a speed hack says it is
+    const res = room.applyState(p.id, {
+      x: claim, y: cfg.eye, z: 0, yaw: 0, pitch: 0, moving: true, grounded: true, vy: 0,
+    }, t);
+    if (!res.ok) refused++;
+  }
+  assert.ok(refused > 30, `only ${refused} of 40 over-speed moves were refused`);
+  const seconds = 40 * 0.033;
+  const honest = cfg.sprint * 1.35 * seconds + MOVE_BURST;
+  assert.ok(p.x < honest,
+            `covered ${p.x.toFixed(1)}u in ${seconds.toFixed(1)}s, ` +
+            `honestly good for ${honest.toFixed(1)}u`);
+});
+
+test('a state sent before the respawn landed is refused but not held against them', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  let t = Date.now();
+  for (let i = 0; i < room.game.cfg.playerHealth; i++) { room.applyShot(ana.id, shot(), t); t += 200; }
+  const diedAt = { x: bo.x, z: bo.z };
+  room.updateHealth(t + room.game.cfg.respawnDelay * 1000 + 50);
+
+  const before = bo.violations;
+  // a packet still in flight, describing the spot they fell on
+  const res = room.applyState(bo.id, {
+    x: diedAt.x, y: room.game.cfg.eye, z: diedAt.z, yaw: 0, pitch: 0,
+    moving: false, grounded: true, vy: 0,
+  }, Date.now());
+  assert.ok(!res.ok, 'the server let them walk back to where they died');
+  assert.equal(bo.violations, before, 'a stale packet was counted as cheating');
+});
+
 test('the speed perk widens the movement budget for that player', () => {
   const room = new Room({ seed: 88 });
   const fast = room.join('fast');      // the first join builds a fresh world
@@ -707,6 +780,264 @@ test('the level broadcast still works after a rebuild', () => {
   const levels = sent.filter(m => m.t === 'levelStart');
   assert.equal(levels.length, 1, `expected one levelStart, got ${levels.length}`);
   assert.equal(levels[0].level, 2, 'wrong level in the broadcast');
+});
+
+/* ------------------------------------------------------- shooting people */
+// stand `shooter` a few metres from `victim`, facing them
+function faceOff(room, shooter, victim, range = 6) {
+  const g = room.game;
+  victim.x = 0; victim.z = 0; victim.y = g.cfg.eye;
+  shooter.x = range; shooter.z = 0; shooter.y = g.cfg.eye;
+  return () => {
+    const THREE = globalThis.THREE;
+    const o = { x: shooter.x, y: shooter.y, z: shooter.z };
+    const d = new THREE.Vector3(victim.x - o.x, (victim.y - 0.8) - o.y, victim.z - o.z)
+      .normalize();
+    return { t: 'shot', origin: o, dir: { x: d.x, y: d.y, z: d.z } };
+  };
+}
+
+test('players arrive somewhere clear, not on top of each other', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const lim = room.game.cfg.arena / 2;
+  for (const p of [ana, bo]) {
+    assert.ok(Math.abs(p.x) < lim && Math.abs(p.z) < lim, 'spawned outside the arena');
+    const probe = new globalThis.THREE.Vector3(p.x, room.game.cfg.eye, p.z);
+    assert.ok(!room.game.obstacleBoxes.some(b => b.containsPoint(probe)),
+              'spawned inside a piece of cover');
+  }
+  assert.ok(Math.hypot(ana.x - bo.x, ana.z - bo.z) > 2,
+            'two players spawned in the same spot');
+  // and the client is told where it landed
+  assert.equal(room.hello(bo).you.x, bo.x, 'hello does not carry the spawn point');
+});
+
+test('a player starts on full health', () => {
+  const room = new Room({ seed: 4242 });
+  const p = room.join('ana');
+  assert.equal(p.health, room.game.cfg.playerHealth, 'not on full health');
+  assert.equal(room.hello(p).you.maxHealth, room.game.cfg.playerHealth,
+               'hello does not say how much health there is');
+});
+
+test('shooting somebody takes a point off them', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+
+  const res = room.applyShot(ana.id, shot());
+  assert.ok(res.ok, res.reason);
+  assert.equal(res.event.kind, 'player', `hit a ${res.event.kind}`);
+  assert.equal(res.event.victim, bo.id, 'the wrong player was hit');
+  assert.equal(bo.health, room.game.cfg.playerHealth - 1, 'no damage was done');
+  assert.equal(res.event.killed, false, 'one hit killed them');
+});
+
+test('ten hits kill, and pay the shooter', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  const max = room.game.cfg.playerHealth;
+
+  let t = Date.now();
+  let killed = null;
+  for (let i = 1; i <= max; i++) {
+    const res = room.applyShot(ana.id, shot(), t);
+    t += 200;
+    assert.ok(res.ok, `shot ${i} refused: ${res.reason}`);
+    assert.equal(res.event.kind, 'player', `shot ${i} missed`);
+    if (res.event.killed) killed = i;
+  }
+  assert.equal(killed, max, `died on hit ${killed}, expected ${max}`);
+  assert.equal(ana.score, room.game.cfg.scoreKill, 'the kill did not pay');
+  assert.equal(ana.kills, 1, 'the kill was not counted');
+  assert.equal(bo.deaths, 1, 'the death was not counted');
+  assert.ok(bo.deadUntil > 0, 'the victim is not down');
+});
+
+test('you cannot shoot yourself', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  ana.x = 0; ana.z = 0; ana.y = room.game.cfg.eye;
+  // straight down through our own box
+  const res = room.applyShot(ana.id, {
+    t: 'shot', origin: { x: 0, y: ana.y, z: 0 }, dir: { x: 0, y: -1, z: 0 },
+  });
+  assert.ok(res.ok, res.reason);
+  assert.notEqual(res.event.kind, 'player', 'shot ourselves');
+  assert.equal(ana.health, room.game.cfg.playerHealth, 'we took damage from our own round');
+});
+
+test('a body does not stop bullets, and cannot shoot back', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  let t = Date.now();
+  for (let i = 0; i < room.game.cfg.playerHealth; i++) { room.applyShot(ana.id, shot(), t); t += 200; }
+  assert.ok(bo.deadUntil, 'not dead');
+
+  const through = room.applyShot(ana.id, shot(), t);
+  assert.ok(through.ok, through.reason);
+  assert.notEqual(through.event.kind, 'player', 'a body was still shootable');
+
+  const fromTheGrave = room.applyShot(bo.id, {
+    t: 'shot', origin: { x: bo.x, y: bo.y, z: bo.z }, dir: { x: 0, y: -1, z: 0 },
+  }, t);
+  assert.ok(!fromTheGrave.ok, 'a dead player got a shot off');
+});
+
+test('cover stops a shot before it reaches somebody behind it', () => {
+  const room = new Room({ seed: 4242 });
+  const g = room.game;
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+
+  // put bo on the far side of a piece of cover, ana on the near side
+  const box = g.obstacleBoxes.find(b => b.max.y > 1.8);
+  assert.ok(box, 'no tall cover in this arena');
+  const c = box.getCenter(new globalThis.THREE.Vector3());
+  const size = box.getSize(new globalThis.THREE.Vector3());
+  bo.x = c.x - size.x / 2 - 1.2; bo.z = c.z; bo.y = g.cfg.eye;
+  ana.x = c.x + size.x / 2 + 1.2; ana.z = c.z; ana.y = g.cfg.eye;
+
+  const THREE = globalThis.THREE;
+  const d = new THREE.Vector3(bo.x - ana.x, 0, bo.z - ana.z).normalize();
+  const res = room.applyShot(ana.id, {
+    t: 'shot', origin: { x: ana.x, y: ana.y, z: ana.z }, dir: { x: d.x, y: d.y, z: d.z },
+  });
+  assert.ok(res.ok, res.reason);
+  assert.notEqual(res.event.kind, 'player', 'the shot went through the cover');
+  assert.equal(bo.health, g.cfg.playerHealth, 'they took damage through cover');
+});
+
+test('health comes back a point at a time', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  const cfg = room.game.cfg;
+
+  let t = Date.now();
+  for (let i = 0; i < 3; i++) { room.applyShot(ana.id, shot(), t); t += 200; }
+  t -= 200;                                    // the moment of the last hit
+  assert.equal(bo.health, cfg.playerHealth - 3, 'wrong damage to start from');
+
+  // not yet
+  room.updateHealth(t + cfg.healEvery * 1000 - 100);
+  assert.equal(bo.health, cfg.playerHealth - 3, 'healed early');
+
+  // one point per interval, and no more
+  room.updateHealth(t + cfg.healEvery * 1000 + 10);
+  assert.equal(bo.health, cfg.playerHealth - 2, 'did not heal a point');
+  room.updateHealth(t + cfg.healEvery * 1000 + 20);
+  assert.equal(bo.health, cfg.playerHealth - 2, 'healed twice in one interval');
+  room.updateHealth(t + cfg.healEvery * 2000 + 30);
+  assert.equal(bo.health, cfg.playerHealth - 1, 'did not heal the second point');
+});
+
+test('healing stops at full health', () => {
+  const room = new Room({ seed: 4242 });
+  const p = room.join('ana');
+  const cfg = room.game.cfg;
+  for (let i = 0; i < 20; i++) room.updateHealth(Date.now() + i * cfg.healEvery * 1000);
+  assert.equal(p.health, cfg.playerHealth, 'healed past full');
+});
+
+test('being shot restarts the wait for the next point of health', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  const cfg = room.game.cfg;
+
+  const t0 = Date.now();
+  room.applyShot(ana.id, shot(), t0);
+  // most of the way to a heal, then shot again
+  room.updateHealth(t0 + cfg.healEvery * 1000 - 200);
+  room.applyShot(ana.id, shot(), t0 + cfg.healEvery * 1000 - 100);
+  room.updateHealth(t0 + cfg.healEvery * 1000 + 50);
+  assert.equal(bo.health, cfg.playerHealth - 2, 'healed straight after being hit');
+});
+
+test('the dead come back whole, somewhere else', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  const cfg = room.game.cfg;
+
+  let t = Date.now();
+  for (let i = 0; i < cfg.playerHealth; i++) { room.applyShot(ana.id, shot(), t); t += 200; }
+  const diedAt = { x: bo.x, z: bo.z };
+
+  const early = room.updateHealth(t + cfg.respawnDelay * 1000 - 500);
+  assert.equal(early.length, 0, 'came back early');
+  assert.ok(bo.deadUntil, 'no longer waiting');
+
+  const events = room.updateHealth(t + cfg.respawnDelay * 1000 + 50);
+  assert.equal(events.length, 1, 'no respawn was announced');
+  assert.equal(events[0].t, 'respawn');
+  assert.equal(events[0].id, bo.id);
+  assert.equal(bo.health, cfg.playerHealth, 'came back hurt');
+  assert.equal(bo.deadUntil, 0, 'still marked as dead');
+  assert.ok(Math.hypot(bo.x - diedAt.x, bo.z - diedAt.z) > 1,
+            'came back exactly where they died');
+  assert.ok(Math.abs(bo.x) < cfg.arena / 2 && Math.abs(bo.z) < cfg.arena / 2,
+            'came back outside the arena');
+});
+
+test('a dead player is left out of the world until they are back', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  let t = Date.now();
+  for (let i = 0; i < room.game.cfg.playerHealth; i++) { room.applyShot(ana.id, shot(), t); t += 200; }
+
+  const entry = room.snapshot().players.find(p => p[0] === bo.id);
+  assert.ok(entry, 'the dead player vanished from the snapshot entirely');
+  assert.equal(entry[10], 1, 'the snapshot does not say they are down');
+  assert.equal(entry[9], 0, 'the snapshot does not show them at zero health');
+
+  // and their claimed position is ignored while they wait
+  const res = room.applyState(bo.id, {
+    x: 5, y: room.game.cfg.eye, z: 5, yaw: 0, pitch: 0,
+    moving: true, grounded: true, vy: 0,
+  }, t);
+  assert.ok(!res.ok, 'a dead player moved themselves');
+});
+
+test('health rides along in the snapshot', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  room.applyShot(ana.id, shot());
+
+  const entry = room.snapshot().players.find(p => p[0] === bo.id);
+  assert.equal(entry[9], room.game.cfg.playerHealth - 1, 'the snapshot has the wrong health');
+});
+
+test('a shot at where somebody was still counts', () => {
+  // the same rewind the NPCs get, or nobody could ever hit a moving player
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  const aimed = shot();
+
+  room.recordHistory(Date.now());
+  // bo has run on since the shot was aimed
+  bo.x = 4; bo.z = 3;
+  const res = room.applyShot(ana.id, Object.assign({ lag: 120 }, aimed));
+  assert.ok(res.ok, res.reason);
+  assert.equal(res.event.kind, 'player', 'the rewind did not credit the hit');
+  assert.equal(bo.health, room.game.cfg.playerHealth - 1, 'no damage was done');
 });
 
 /* --------------------------------------------------------------- server */

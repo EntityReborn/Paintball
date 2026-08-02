@@ -128,8 +128,14 @@ wss.on('connection', socket => {
 
     if (msg.t === 'shot') {
       const res = room.applyShot(player.id, msg);
-      if (res.ok) broadcast(res.event);          // everyone needs the effects
-      else send(socket, { t: 'shotRejected', reason: res.reason });
+      if (res.ok) {
+        broadcast(res.event);                    // everyone needs the effects
+        if (res.event.kind === 'player' && res.event.killed) {
+          log(`${res.event.killerName} killed ${res.event.victimName}`);
+        }
+      } else {
+        send(socket, { t: 'shotRejected', reason: res.reason });
+      }
       return;
     }
 

@@ -147,6 +147,53 @@ PB.createNameTag = function (text, colour) {
   return { sprite: sprite, texture: tex, material: mat, text: text };
 };
 
+/* A health bar to float over somebody's head. Redrawn only when the number
+ * changes — a canvas repaint per frame for every player would be wasteful. */
+PB.createHealthBar = function () {
+  var THREE = global.THREE;
+  var canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 20;
+  var tex = new THREE.CanvasTexture(canvas);
+  var mat = new THREE.SpriteMaterial({
+    map: tex, transparent: true, depthTest: false, depthWrite: false,
+  });
+  var sprite = new THREE.Sprite(mat);
+  sprite.scale.set(1.5, 0.23, 1);
+  sprite.position.y = 2.32;
+  sprite.renderOrder = 8;
+  sprite.name = 'healthBar';
+  sprite.visible = false;
+
+  var shown = -1;
+
+  function draw(fraction) {
+    var c = canvas.getContext('2d');
+    c.clearRect(0, 0, 128, 20);
+    c.fillStyle = 'rgba(0,0,0,0.72)';
+    c.fillRect(0, 0, 128, 20);
+    var w = Math.max(0, Math.min(1, fraction)) * 120;
+    // green while healthy, amber when worn down, red when nearly gone
+    c.fillStyle = fraction > 0.6 ? '#8ef2a0' : fraction > 0.3 ? '#ffb03a' : '#ff6b6b';
+    c.fillRect(4, 4, w, 12);
+    c.strokeStyle = 'rgba(255,255,255,0.35)';
+    c.lineWidth = 2;
+    c.strokeRect(1, 1, 126, 18);
+    tex.needsUpdate = true;
+  }
+
+  return {
+    sprite: sprite, texture: tex, material: mat,
+    /* Only ever shown on somebody who has been hurt. */
+    set: function (health, max) {
+      var f = max > 0 ? health / max : 1;
+      if (f !== shown) { draw(f); shown = f; }
+      sprite.visible = f < 1 && health > 0;
+      return sprite.visible;
+    },
+  };
+};
+
 PB.figureGeometry = function () {
   var THREE = global.THREE;
   return {

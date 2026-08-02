@@ -28,6 +28,7 @@ belongs to the next level, which has one more NPC than the last.
 | --- | --- |
 | target broken | +100 |
 | NPC down | +250 |
+| **player killed** | **+1000** |
 | level complete | +500 |
 | shot that hits nothing | −25 |
 
@@ -65,6 +66,18 @@ Other players are easy to pick out: they carry a visor, a pack and a weapon,
 wear a floating marker overhead with their name above it, and are coloured from
 the cool half of the wheel. NPCs get the warm half and none of the gear.
 
+**Other players can be shot, and shoot back.** It takes ten hits to put someone
+down and the kill is worth 1000. A hurt player wears a health bar over their
+head — green, then amber, then red — which appears only once they have taken a
+hit, so a full-health player is not advertising anything. Your own health sits
+in the bottom-left corner and the screen flashes red when you are hit. Health
+comes back on its own at a point every two seconds, and being hit restarts that
+wait, so a firefight cannot be won by standing still. The dead spend two and a
+half seconds on the floor — no shooting, no moving, no body in the world for
+anyone else to shoot — and come back whole, somewhere clear and well away from
+whoever is still standing. Players arrive the same way, so nobody spawns inside
+anybody else.
+
 ```bash
 npm start                       # server + client on :8080
 ```
@@ -83,6 +96,14 @@ speed, arena bounds, height, pitch. A client that claims to have moved further
 than a sprinting player could is rejected and snapped back. This is the part
 that keeps a public leaderboard honest without a full authoritative rewrite.
 
+The speed check is a running allowance rather than a per-message one. State
+messages do not arrive evenly — a hiccup anywhere along the way delivers three
+or four of them in the same millisecond — and judging each against the gap
+since the last one found honest players moving "0.85u in 0.001s" and snapped
+them back mid-stride. The allowance fills at sprint speed and holds about a
+third of a second of running, so a burst spends what the quiet moment before it
+earned, and nobody outruns the game over any stretch of time.
+
 **Statistics and perks belong to one player.** Everyone is told about every
 shot, because the world has to change for all of them, but only the player who
 fired has it counted. Perks are collected server-side and their effects — rate
@@ -96,8 +117,10 @@ own clock between snapshots put the same crate two metres apart on two screens.
 
 **Shots are adjudicated by the server.** The client fires, spends the round and
 draws the tracer, but what it hit is decided server-side by re-running the same
-raycast, with the rate of fire and the shot's origin checked against where the
-player actually is. Because clients render everyone else an interpolation window
+raycast — against the targets, the NPCs *and* the other players, nearest wins —
+with the rate of fire and the shot's origin checked against where the player
+actually is. Nobody can shoot themselves, and the dead can neither shoot nor be
+shot. Because clients render everyone else an interpolation window
 behind, the server rewinds up to 350ms — more if a slow client asks, capped at
 700ms — and sweeps between position samples so a running figure cannot slip
 through the gaps. The rewind can never reach through cover.
@@ -204,10 +227,11 @@ let the driver do it.
 plays the game through Chrome's own input pipeline (trusted keyboard and mouse
 events, real pointer lock) and writes screenshots to `tests/shots/`.
 
-**Server tests** (`tests/server.test.js`) — 41 node tests over the headless
-engine, seed determinism, the room's plausibility rules, server-side shot
-validation and lag compensation, snapshot cadence and size, and the static file
-server's path handling.
+**Server tests** (`tests/server.test.js`) — 58 node tests over the headless
+engine, seed determinism, the room's plausibility rules, spawn placement,
+server-side shot validation and lag compensation, the player-versus-player rules
+(ten hits to kill, healing, respawning, no shooting yourself or the dead),
+snapshot cadence and size, and the static file server's path handling.
 
 **Menus** (`tests/ui.js`) — drives the pause-screen panels in a real browser:
 the buttons open their panels without starting the game, the debug toggles put
@@ -216,7 +240,11 @@ real geometry in the scene, and settings survive a reload.
 **Multiplayer** (`tests/multiplayer.js`) — starts the server, opens two real
 Chrome windows against it, walks one player with genuine key presses and checks
 the other window sees that movement on the right body in the right place, that
-both built the same arena, and that a teleport gets rejected and corrected.
+both built the same arena, and that a teleport gets rejected and corrected. It
+also runs one player at the other and kills them: the health drops on the
+victim's own screen, the bar appears over their head on the shooter's, a point
+comes back on its own, the tenth hit pays 1000 and takes the body out of the
+world, and they return on full health somewhere else.
 
 ```bash
 npm run test:server   # node tests

@@ -173,12 +173,15 @@ async function advance(page, seconds, timeout = 60000) {
       return r && r.last ? { x: r.last.x, z: r.last.z } : null;
     });
 
-    // point somewhere with room to run, then hold W for real
+    // point somewhere with room to run, then hold W for real. No teleporting
+    // to a known spot first: the server chooses where each player arrives.
     await ana.evaluate(() => {
-      game.teleport(0, game.cfg.eye, 0);
-      const eye = new THREE.Vector3(0, game.cfg.eye, 0);
+      const eye = new THREE.Vector3(game.state.pos.x, game.cfg.eye, game.state.pos.z);
+      const lim = game.cfg.arena / 2 - 3;
       for (let a = 0; a < Math.PI * 2; a += Math.PI / 16) {
-        const to = new THREE.Vector3(Math.sin(a) * 12, game.cfg.eye, Math.cos(a) * 12);
+        const to = new THREE.Vector3(eye.x + Math.sin(a) * 12, game.cfg.eye,
+                                     eye.z + Math.cos(a) * 12);
+        if (Math.abs(to.x) > lim || Math.abs(to.z) > lim) continue;
         if (game.hasLineOfSight(eye, to)) { game.aimAt(to); return; }
       }
     });
@@ -322,10 +325,14 @@ async function advance(page, seconds, timeout = 60000) {
             (npcShot.rejected ? `, ${npcShot.rejected} rejected: ${npcShot.reason}` : ''));
       check('the NPC is down on the shooting client', npcShot.aliveHere === false);
 
-      const boSaw = await bo.evaluate(i => ({
-        alive: game.npcs[i].alive,
-        toppled: game.npcs[i].root.rotation.x,
-      }), npcShot.index);
+      const boSaw = await bo.evaluate(async (i) => {
+        // the body falls over the course of a second, so give it that
+        for (let k = 0; k < 30; k++) {
+          if (game.npcs[i].root.rotation.x > 0.5) break;
+          await new Promise(r => setTimeout(r, 100));
+        }
+        return { alive: game.npcs[i].alive, toppled: game.npcs[i].root.rotation.x };
+      }, npcShot.index);
       check('the NPC is down on the other client too', boSaw.alive === false,
             `bo sees alive=${boSaw.alive}`);
       check('the body toppled over rather than walking on', boSaw.toppled > 0.5,
@@ -611,6 +618,163 @@ async function advance(page, seconds, timeout = 60000) {
     check('a hit from a finished level does not destroy a live target',
           staleHit.before === staleHit.after,
           `${staleHit.before} targets before, ${staleHit.after} after`);
+
+    /* --------------------------------------------------- shooting people */
+    /* Walk ana up to bo, empty a magazine into him, and watch it land on both
+     * sides: his health, the bar over his head, her score, and the body. */
+    const boWhere = await bo.evaluate(() => ({ ...game.state.pos }));
+
+    /* Run at him for real — point the camera and hold W, the same path a
+     * player's keystrokes take. Nudging the position from script would look
+     * like a teleport to the server, and it would be right to say so. */
+    const range = target => ana.evaluate((t) => {
+      const eye = new THREE.Vector3(game.state.pos.x, game.cfg.eye, game.state.pos.z);
+      const chest = new THREE.Vector3(t.x, 1.1, t.z);
+      game.aimAt(chest);
+      return {
+        gap: Math.hypot(eye.x - t.x, eye.z - t.z),
+        los: game.hasLineOfSight(eye, chest),
+      };
+    }, target);
+
+    const beforeWalk = await ana.evaluate(() => net.stats.corrections);
+    let closed = await range(boWhere);
+    let lastGap = closed.gap;
+    for (let attempt = 0; attempt < 16 && !(closed.gap < 9 && closed.los); attempt++) {
+      await ana.keyboard.down('KeyW');
+      await advance(ana, 0.7);
+      await ana.keyboard.up('KeyW');
+      await sleep(120);
+      closed = await range(boWhere);
+      // wedged against cover? sidestep and come at it from another angle
+      if (lastGap - closed.gap < 0.5) {
+        await ana.keyboard.down(attempt % 2 ? 'KeyA' : 'KeyD');
+        await advance(ana, 0.6);
+        await ana.keyboard.up(attempt % 2 ? 'KeyA' : 'KeyD');
+        await sleep(120);
+        closed = await range(boWhere);
+      }
+      lastGap = closed.gap;
+    }
+    const walked = await ana.evaluate(() => ({
+      corrections: net.stats.corrections, why: net.stats.lastCorrection || null,
+    }));
+    check('ana closed on bo without the server calling it a hack',
+          closed.gap < 9 && closed.los && walked.corrections === beforeWalk,
+          `${closed.gap.toFixed(1)}u away, line of sight ${closed.los}, ` +
+          `${walked.corrections - beforeWalk} corrections while running` +
+          `${walked.why ? ` (${walked.why})` : ''}`);
+
+    const anaScoreBefore = await ana.evaluate(() => game.state.score);
+    check('bo joined on full health',
+          await bo.evaluate(() => game.state.health) === 10);
+
+    // empty `rounds` into whoever we can see, aiming afresh every time
+    const fire = rounds => ana.evaluate(async (n) => {
+      let biggest = 0;
+      let last = game.state.score;
+      const watch = setInterval(() => {
+        biggest = Math.max(biggest, game.state.score - last);
+        last = game.state.score;
+      }, 20);
+      for (let i = 0; i < n; i++) {
+        const r = [...net.remotes.values()][0];
+        if (!r) break;
+        const p = r.fig.root.position;
+        game.aimAt(new THREE.Vector3(p.x, p.y + 1.1, p.z));
+        game.state.mag = 12;
+        game.state.lastShot = -1e9;
+        game.shoot();
+        await new Promise(done => setTimeout(done, 190));
+      }
+      await new Promise(done => setTimeout(done, 400));
+      clearInterval(watch);
+      return { score: game.state.score, biggest, rejected: net.stats.rejected,
+               reason: net.stats.lastRejection };
+    }, rounds);
+
+    // four rounds first, so we can see him hurt but still standing
+    await fire(4);
+    const hurt = await Promise.all([
+      bo.evaluate(() => ({ health: game.state.health, dead: game.state.dead })),
+      ana.evaluate(() => {
+        const r = [...net.remotes.values()][0];
+        return {
+          barShown: r.health ? r.health.sprite.visible : null,
+          barAbove: r.health ? r.health.sprite.position.y : 0,
+          bodyShown: r.fig.root.visible,
+        };
+      }),
+    ]);
+    // proof of the bar, from the shooter's own view
+    await ana.screenshot({ path: path.join(SHOTS, 'mp-hurt.png') });
+
+    check('shooting a player takes their health down',
+          hurt[0].health < 10 && hurt[0].health > 0, `bo is on ${hurt[0].health}`);
+    check('a hurt player wears a health bar over their head',
+          hurt[1].barShown === true && hurt[1].barAbove > 1.8,
+          `bar visible=${hurt[1].barShown} at y=${hurt[1].barAbove}`);
+    check('four hits do not kill anybody',
+          hurt[0].dead === false && hurt[1].bodyShown === true,
+          `dead=${hurt[0].dead}, body visible=${hurt[1].bodyShown}`);
+
+    // left alone, he gets a point back every couple of seconds
+    const healed = await bo.evaluate(async (from) => {
+      const t0 = performance.now();
+      for (let i = 0; i < 60; i++) {
+        if (game.state.health > from) break;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      return { health: game.state.health, after: (performance.now() - t0) / 1000 };
+    }, hurt[0].health);
+    check('health comes back a point at a time',
+          healed.health === hurt[0].health + 1 && healed.after > 0.3 && healed.after < 3.5,
+          `${hurt[0].health} -> ${healed.health} after ${healed.after.toFixed(1)}s`);
+
+    // now finish him — more rounds than he has health, the spares will miss
+    const emptied = await fire(12);
+    const killed = await Promise.all([
+      bo.evaluate(() => ({ health: game.state.health, dead: game.state.dead,
+                           pos: { ...game.state.pos } })),
+      ana.evaluate(() => {
+        const r = [...net.remotes.values()][0];
+        return { bodyShown: r.fig.root.visible, score: game.state.score };
+      }),
+    ]);
+    check('ten hits put a player down',
+          killed[0].dead === true && killed[0].health === 0,
+          `bo: health ${killed[0].health}, dead ${killed[0].dead}` +
+          (emptied.rejected ? `, ${emptied.rejected} shots rejected: ${emptied.reason}` : ''));
+    check('a kill is worth 1000', emptied.biggest === 1000,
+          `biggest jump ${emptied.biggest}, ana went ${anaScoreBefore} -> ${killed[1].score}`);
+    check('the body is taken out of the world while they wait',
+          killed[1].bodyShown === false, `body still drawn: ${killed[1].bodyShown}`);
+
+    // and back, whole, somewhere else
+    const back = await bo.evaluate(async (diedAt) => {
+      for (let i = 0; i < 60; i++) {
+        if (!game.state.dead) break;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      await new Promise(r => setTimeout(r, 400));
+      return {
+        dead: game.state.dead, health: game.state.health,
+        moved: Math.hypot(game.state.pos.x - diedAt.x, game.state.pos.z - diedAt.z),
+      };
+    }, killed[0].pos);
+    check('the dead come back on full health',
+          back.dead === false && back.health === 10,
+          `dead=${back.dead}, health ${back.health}`);
+    check('and they come back somewhere else', back.moved > 1,
+          `respawned ${back.moved.toFixed(1)}u from where they fell`);
+
+    const whole = await ana.evaluate(() => {
+      const r = [...net.remotes.values()][0];
+      return { visible: r.fig.root.visible, bar: r.health ? r.health.sprite.visible : null };
+    });
+    check('a player back on full health has no bar over their head',
+          whole.visible === true && whole.bar === false,
+          `body ${whole.visible}, bar ${whole.bar}`);
 
     /* ------------------------------------------------ cheating is caught */
     const cheat = await ana.evaluate(async () => {

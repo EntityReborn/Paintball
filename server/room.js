@@ -22,6 +22,11 @@ const REWIND_MS = 350;
  * beyond it, a claim is not a late packet, it is someone shooting at ghosts. */
 const MAX_REWIND_MS = 700;
 
+/* Most a player may move in one go having stood still long enough to earn it.
+ * Roughly a third of a second of running: enough to swallow a bunch of state
+ * messages arriving together, far too little to cross the map with. */
+const MOVE_BURST = 2.5;
+
 class Room {
   constructor(opts = {}) {
     // A pinned seed is for tuning and for tests that need the same arena every
@@ -75,13 +80,29 @@ class Room {
       moving: false, grounded: true, vy: 0,
       lastStateAt: Date.now(),
       lastShotAt: 0,
+      moveCredit: MOVE_BURST,        // distance they may move right now
+      settleUntil: 0,                // grace while a teleport is in flight
       violations: 0,
       joinedAt: Date.now(),
       score: 0,
+      health: 0,                 // set from the world's config just below
+      deadUntil: 0,              // waiting to respawn
+      healAt: 0,                 // when the next point of health is due
+      kills: 0,
+      deaths: 0,
       perks: {},
       stats: { shotsFired: 0, shotsHit: 0, misses: 0, targetsBroken: 0, npcsDown: 0 },
     };
+    player.health = this.game.cfg.playerHealth;
+    player.healAt = Date.now() + this.game.cfg.healEvery * 1000;
     this.players.set(id, player);
+    // arrive somewhere of your own; `hello` carries it back to the client
+    const at = this.clearSpot(player);
+    player.x = at.x;
+    player.z = at.z;
+    // anything sent before that hello landed describes the client's own idea
+    // of where it started, which is not their fault either
+    player.settleUntil = player.lastStateAt + 1000;
     return player;
   }
 
@@ -121,7 +142,124 @@ class Room {
   }
 
   publicPlayer(p) {
-    return { id: p.id, name: p.name, x: p.x, y: p.y, z: p.z, yaw: p.yaw, score: p.score };
+    return {
+      id: p.id, name: p.name, x: p.x, y: p.y, z: p.z, yaw: p.yaw,
+      score: p.score, health: p.health, maxHealth: this.game.cfg.playerHealth,
+    };
+  }
+
+  /* ---------------------------------------------------------- being shot */
+  /* A player is a box standing on their feet. Square in plan on purpose: the
+   * figure turns with its owner, and a box that turned with it would make you
+   * easier or harder to hit depending on which way you happened to be facing. */
+  playerBox(p, out) {
+    const feet = p.y - this.game.cfg.eye;
+    out.min.set(p.x - 0.36, feet, p.z - 0.36);
+    out.max.set(p.x + 0.36, feet + 1.8, p.z + 0.36);
+    return out;
+  }
+
+  // Nearest player the shot would hit right now, ignoring whoever fired it.
+  playerHit(origin, dir, maxDistance, exceptId) {
+    const THREE = globalThis.THREE;
+    const ray = new THREE.Ray(origin, dir);
+    const box = new THREE.Box3();
+    const point = new THREE.Vector3();
+    let best = null;
+    for (const p of this.players.values()) {
+      if (p.id === exceptId || p.deadUntil) continue;
+      this.playerBox(p, box);
+      if (!ray.intersectBox(box, point)) continue;
+      const d = origin.distanceTo(point);
+      if (d <= maxDistance && (!best || d < best.distance)) {
+        best = { kind: 'player', entity: p, distance: d, point: point.clone() };
+      }
+    }
+    return best;
+  }
+
+  /* Take a hit off somebody, and hand out the kill if that was the last one. */
+  damage(victim, shooter, now = Date.now()) {
+    if (victim.deadUntil) return null;
+    victim.health -= 1;
+    victim.healAt = now + this.game.cfg.healEvery * 1000;
+
+    if (victim.health > 0) {
+      return { killed: false, health: victim.health };
+    }
+
+    victim.health = 0;
+    victim.deaths++;
+    victim.deadUntil = now + this.game.cfg.respawnDelay * 1000;
+    if (shooter && shooter !== victim) {
+      shooter.kills++;
+      this.award(shooter, this.game.cfg.scoreKill);
+    }
+    return { killed: true, health: 0 };
+  }
+
+  /* Somewhere clear, well away from whoever is still standing. Used both to
+   * come back from a death and to arrive in the first place — a player who
+   * joined at the origin would spawn inside whoever was already there. */
+  clearSpot(player) {
+    const g = this.game;
+    const lim = g.cfg.arena / 2 - 4;
+    let best = null;
+    let bestGap = -1;
+    for (let tries = 0; tries < 40; tries++) {
+      const x = (Math.random() - 0.5) * 2 * lim;
+      const z = (Math.random() - 0.5) * 2 * lim;
+      const probe = new globalThis.THREE.Vector3(x, g.cfg.eye, z);
+      if (g.obstacleBoxes.some(b => b.distanceToPoint(probe) < 1.5)) continue;
+
+      let gap = Infinity;
+      for (const other of this.players.values()) {
+        if (other.id === player.id || other.deadUntil) continue;
+        gap = Math.min(gap, Math.hypot(other.x - x, other.z - z));
+      }
+      if (gap > bestGap) { bestGap = gap; best = { x, z }; }
+      if (gap > 15) break;                       // far enough, stop looking
+    }
+    return best || { x: 0, z: 0 };
+  }
+
+  respawn(player) {
+    const g = this.game;
+    const at = this.clearSpot(player);
+    player.x = at.x;
+    player.y = g.cfg.eye;
+    player.z = at.z;
+    player.health = g.cfg.playerHealth;
+    player.deadUntil = 0;
+    player.lastStateAt = Date.now();
+    player.moveCredit = MOVE_BURST;
+    /* States sent before the client heard about the respawn still describe the
+     * spot they died on. Those are refused — the server owns where they came
+     * back — but they are not the player's fault, so they are not held
+     * against them. */
+    player.settleUntil = player.lastStateAt + 1000;
+    return at;
+  }
+
+  /* Health comes back a point at a time, and the dead come back whole. */
+  updateHealth(now = Date.now()) {
+    const events = [];
+    const cfg = this.game.cfg;
+    for (const p of this.players.values()) {
+      if (p.deadUntil) {
+        if (now >= p.deadUntil) {
+          const at = this.respawn(p);
+          events.push({ t: 'respawn', id: p.id, x: r3(at.x), y: r3(cfg.eye), z: r3(at.z),
+                        health: p.health });
+        }
+        continue;
+      }
+      if (p.health >= cfg.playerHealth) continue;
+      if (now < p.healAt) continue;
+      p.health = Math.min(cfg.playerHealth, p.health + 1);
+      p.healAt = now + cfg.healEvery * 1000;
+    }
+    return events;
   }
 
   /* ------------------------------------------------------- lag compensation */
@@ -139,13 +277,16 @@ class Room {
       targets: g.targets.map(t => (t.alive
         ? [t.mesh.position.x, t.mesh.position.y, t.mesh.position.z]
         : null)),
+      players: [...this.players.values()].map(p => (p.deadUntil
+        ? null
+        : [p.id, p.x, p.y, p.z])),
     });
     const cutoff = now - MAX_REWIND_MS - 200;
     while (this.history.length > 2 && this.history[0].t < cutoff) this.history.shift();
   }
 
   // Nearest entity the shot would have hit anywhere in the rewind window.
-  rewoundHit(origin, dir, maxDistance, now = Date.now(), windowMs = REWIND_MS) {
+  rewoundHit(origin, dir, maxDistance, now = Date.now(), windowMs = REWIND_MS, exceptId = null) {
     const THREE = globalThis.THREE;
     const ray = new THREE.Ray(origin, dir);
     const box = new THREE.Box3();
@@ -172,6 +313,27 @@ class Room {
         const d = origin.distanceTo(point);
         if (d <= maxDistance && (!best || d < best.distance)) {
           best = { kind: 'npc', index: i, entity: npc, distance: d, point: point.clone() };
+        }
+      }
+
+      for (let k = 0; k < (frame.players || []).length; k++) {
+        const rec = frame.players[k];
+        if (!rec) continue;
+        const player = this.players.get(rec[0]);
+        if (!player || player.deadUntil || rec[0] === exceptId) continue;
+        // swept the same way the NPCs are — a sprinting player covers most of
+        // their own width between two samples
+        const was = (older && older.players
+          && older.players.find(o => o && o[0] === rec[0])) || rec;
+        const feet = Math.min(rec[2], was[2]) - this.game.cfg.eye;
+        box.min.set(Math.min(rec[1], was[1]) - 0.36, feet, Math.min(rec[3], was[3]) - 0.36);
+        box.max.set(Math.max(rec[1], was[1]) + 0.36,
+                    Math.max(rec[2], was[2]) - this.game.cfg.eye + 1.8,
+                    Math.max(rec[3], was[3]) + 0.36);
+        if (!ray.intersectBox(box, point)) continue;
+        const d = origin.distanceTo(point);
+        if (d <= maxDistance && (!best || d < best.distance)) {
+          best = { kind: 'player', entity: player, distance: d, point: point.clone() };
         }
       }
 
@@ -228,6 +390,8 @@ class Room {
       return { ok: false, reason: 'non-finite shot' };
     }
 
+    if (player.deadUntil) return { ok: false, reason: 'waiting to respawn' };
+
     // no firing faster than the weapon allows — rapid fire included
     const allowed = cfg.fireMs * g.perkSystem.factor(player, 'fireRate');
     if (now - player.lastShotAt < allowed * 0.75) {
@@ -253,18 +417,29 @@ class Room {
     const origin = new THREE.Vector3(o.x, o.y, o.z);
     let hit = g.traceShot(origin, dir);
 
+    // other players are shootable too, and they are not part of the world the
+    // engine raycasts, so they are tested here
+    const onPlayer = this.playerHit(origin, dir, hit.distance || 300, id);
+    if (onPlayer && (!hit.distance || onPlayer.distance < hit.distance)) {
+      hit = { point: onPlayer.point, player: onPlayer.entity, distance: onPlayer.distance };
+    }
+
     /* If the shot did not land on an entity where it stands right now, judge it
      * against where the entities were while the round was in flight — but never
      * through cover, so the rewind can only reach as far as the first wall. */
-    if (!hit.target && !hit.npc) {
+    if (!hit.target && !hit.npc && !hit.player) {
       const reach = hit.distance || 300;
       const asked = typeof msg.lag === 'number' && isFinite(msg.lag) ? msg.lag : 0;
       const windowMs = Math.min(MAX_REWIND_MS, Math.max(REWIND_MS, asked + 120));
-      const rewound = this.rewoundHit(origin, dir, reach, now, windowMs);
+      const rewound = this.rewoundHit(origin, dir, reach, now, windowMs, id);
       if (rewound) {
-        hit = rewound.kind === 'npc'
-          ? { point: rewound.point, npc: rewound.entity, distance: rewound.distance }
-          : { point: rewound.point, target: rewound.entity, distance: rewound.distance };
+        if (rewound.kind === 'npc') {
+          hit = { point: rewound.point, npc: rewound.entity, distance: rewound.distance };
+        } else if (rewound.kind === 'player') {
+          hit = { point: rewound.point, player: rewound.entity, distance: rewound.distance };
+        } else {
+          hit = { point: rewound.point, target: rewound.entity, distance: rewound.distance };
+        }
       }
     }
 
@@ -287,6 +462,18 @@ class Room {
       // this for itself; breaking a target here does not, and without this the
       // arena empties and nothing happens.
       g.checkLevel();
+    } else if (hit.player) {
+      const victim = hit.player;
+      const outcome = this.damage(victim, player, now);
+      event.kind = 'player';
+      event.victim = victim.id;
+      event.victimHealth = victim.health;
+      event.killed = !!(outcome && outcome.killed);
+      player.stats.shotsHit++;
+      if (event.killed) {
+        event.victimName = victim.name;
+        event.killerName = player.name;
+      }
     } else if (hit.npc && hit.npc.alive) {
       event.kind = 'npc';
       event.index = g.npcs.indexOf(hit.npc);
@@ -356,15 +543,28 @@ class Room {
       return { ok: false, reason: 'impossible pitch' };
     }
 
-    // horizontal budget: sprint speed plus slack for a burst of dropped packets
-    const dt = Math.min(1.0, Math.max(0.001, (now - player.lastStateAt) / 1000));
-    // a speed perk legitimately moves the player faster, so the budget grows
+    /* Horizontal budget, kept as a running allowance rather than a per-packet
+     * one. State messages do not arrive evenly: a hiccup anywhere along the
+     * way delivers three or four of them in the same millisecond, and judging
+     * each against the gap since the last one would find an honest player
+     * moving 0.8u "in 0.001s" and snap them back. The allowance fills at
+     * sprint speed, so nobody outruns the game over any stretch of time, and
+     * a short burst simply spends what the quiet moment before it earned. */
+    const dt = Math.min(1.0, Math.max(0, (now - player.lastStateAt) / 1000));
+    // a speed perk legitimately moves the player faster, so it fills faster
+    // and holds more — the burst is a third of a second either way
     const boost = this.game.perkSystem.factor(player, 'speed');
-    const budget = cfg.sprint * boost * dt * 1.35 + 0.35;
+    player.moveCredit = Math.min(MOVE_BURST * boost,
+      player.moveCredit + cfg.sprint * boost * dt * 1.35);
+
     const moved = Math.hypot(msg.x - player.x, msg.z - player.z);
-    if (moved > budget) {
-      return { ok: false, reason: `moved ${moved.toFixed(2)}u in ${dt.toFixed(3)}s` };
+    if (moved > player.moveCredit + 0.05) {
+      return {
+        ok: false,
+        reason: `moved ${moved.toFixed(2)}u on ${player.moveCredit.toFixed(2)}u of credit`,
+      };
     }
+    player.moveCredit = Math.max(0, player.moveCredit - moved);
     return { ok: true };
   }
 
@@ -373,9 +573,15 @@ class Room {
     const player = this.players.get(id);
     if (!player) return { ok: false, reason: 'unknown player' };
 
+    if (player.deadUntil) {
+      // they are on the floor waiting; the server owns where they come back
+      player.lastStateAt = now;
+      return { ok: false, reason: 'waiting to respawn' };
+    }
+
     const verdict = this.checkMove(player, msg, now);
     if (!verdict.ok) {
-      player.violations++;
+      if (now >= player.settleUntil) player.violations++;
       player.lastStateAt = now;
       return {
         ok: false,
@@ -407,7 +613,7 @@ class Room {
         p.id,
         round(p.x), round(p.y), round(p.z),
         round(p.yaw), p.moving ? 1 : 0, p.grounded ? 1 : 0, round(p.vy),
-        p.score,
+        p.score, p.health, p.deadUntil ? 1 : 0,
       ])),
       npcs: g.npcs.map(n => ([
         round(n.root.position.x), round(n.root.position.y), round(n.root.position.z),
@@ -435,6 +641,7 @@ class Room {
       this.game.perkSystem.tickHolder(player, dt);
     }
     for (const msg of this.collectPerks(now)) this.onBroadcast(msg);
+    for (const msg of this.updateHealth(now)) this.onBroadcast(msg);
 
     this.sinceSnapshot += dtMs;
     if (this.sinceSnapshot >= this.snapshotMs) {
@@ -470,4 +677,4 @@ function round(n) {
 }
 const r3 = round;
 
-module.exports = { Room, SIM_HZ, SNAPSHOT_HZ, REWIND_MS, MAX_REWIND_MS };
+module.exports = { Room, SIM_HZ, SNAPSHOT_HZ, REWIND_MS, MAX_REWIND_MS, MOVE_BURST };

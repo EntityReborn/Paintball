@@ -36,6 +36,11 @@ var DEFAULTS = {
   scoreNpc: 250,
   scoreMiss: -25,
   scoreLevelBonus: 500,
+  scoreKill: 1000,
+
+  playerHealth: 10,           // hits a player can take
+  healEvery: 2,               // seconds per point of health recovered
+  respawnDelay: 2.5,          // seconds on the floor before coming back
   seed: null,               // number => deterministic world, null => random
   audio: true,
   shadows: true,
@@ -159,6 +164,7 @@ function createGame(options) {
     kickBack: 0, reloadT: 0, active: false, shotsFired: 0, elapsed: 0,
     lookSpikes: 0, maxLookDelta: 0, zoom: 0, networked: false,
     worldTime: 0, airJumps: 0, standingOn: null,
+    health: 0, maxHealth: 0, dead: false,
 
     /* Everything worth bragging about. Distance is kept in world units and
      * converted on the way out — the arena is metric, a unit is a metre. */
@@ -1067,6 +1073,20 @@ function createGame(options) {
       ? new THREE.Vector3(msg.dir.x, msg.dir.y, msg.dir.z)
       : new THREE.Vector3(0, 1, 0);
 
+    if (msg.kind === 'player') {
+      spawnIndicator(msg.killed ? cfg.scoreKill : 0, point);
+      if (mine) {
+        state.stats.shotsHit++;
+        recordHit(point);
+        sfx.hit();
+      }
+      emit('hit', {
+        player: msg.victim, killed: !!msg.killed,
+        score: state.score, left: aliveCount(), mine: !!mine,
+      });
+      return;
+    }
+
     if (msg.kind === 'target') {
       var t = targets[msg.index];
       if (t && t.alive) {
@@ -1101,6 +1121,21 @@ function createGame(options) {
     camera.getWorldPosition(_shotFrom);
     sfx.shootAt(_shotFrom.distanceTo(from));
     return mesh;
+  }
+
+  /* Our own health, as the server reports it. Nothing here decides damage —
+   * the server does — this is the readout and the effects. */
+  function setHealth(health, max) {
+    var was = state.health;
+    state.maxHealth = max || cfg.playerHealth;
+    state.health = Math.max(0, Math.min(state.maxHealth, health));
+    var nowDead = state.health <= 0;
+    if (was !== state.health || nowDead !== state.dead) {
+      if (state.health < was) emit('hurt', { health: state.health, max: state.maxHealth });
+      state.dead = nowDead;
+      emit('health', { health: state.health, max: state.maxHealth, dead: state.dead });
+    }
+    return state.health;
   }
 
   function setScore(n) {
@@ -1220,7 +1255,7 @@ function createGame(options) {
     arenaFingerprint: arenaFingerprint,
     stats: stats, resetStats: resetStats, recordHit: recordHit, FEET_PER_UNIT: FEET_PER_UNIT,
     applyServerHit: applyServerHit, showRemoteShot: showRemoteShot,
-    setScore: setScore, breakTarget: breakTarget,
+    setScore: setScore, setHealth: setHealth, breakTarget: breakTarget,
     applyLook: applyLook, setPitch: setPitch,
     setLookDebug: function (on) { lookDebug = !!on; if (!on) lookLog.length = 0; },
     lookLog: function () { return lookLog.slice(); },

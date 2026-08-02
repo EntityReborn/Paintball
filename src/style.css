@@ -191,3 +191,31 @@ canvas { display: block; position: fixed; inset: 0; }
   border: 1px solid #26344a; border-radius: 3px; cursor: pointer;
 }
 .panel .wide:hover { color: #ff9f9f; border-color: #6b2f2f; }
+
+/* own health, bottom left */
+#health {
+  position: absolute; left: 24px; bottom: 26px;
+  width: 190px; height: 16px;
+  background: rgba(10,16,24,.75); border: 1px solid #26344a; border-radius: 2px;
+  display: none; overflow: hidden;
+}
+#health.on { display: block; }
+#health-fill {
+  position: absolute; inset: 2px auto 2px 2px;
+  width: 0; background: #8ef2a0; transition: width .15s linear, background .15s;
+}
+#health.hurt #health-fill { background: #ffb03a; }
+#health.critical #health-fill { background: #ff6b6b; }
+#health-text {
+  position: absolute; inset: 0; text-align: center; line-height: 16px;
+  font-size: 11px; letter-spacing: .16em; font-weight: 700;
+  color: #0b0e13; text-shadow: none;
+}
+
+/* a flash of red when you take one */
+#damage {
+  position: absolute; inset: 0;
+  box-shadow: inset 0 0 140px rgba(255,50,50,.65); opacity: 0;
+  transition: opacity .4s; pointer-events: none;
+}
+#damage.on { opacity: 1; transition: opacity .05s; }

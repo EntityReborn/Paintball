@@ -65,7 +65,31 @@ var el = {
   crosshair: document.getElementById('crosshair'),
   summary: document.getElementById('summary'),
   perks: document.getElementById('perks'),
+  health: document.getElementById('health'),
+  healthFill: document.getElementById('health-fill'),
+  healthText: document.getElementById('health-text'),
+  damage: document.getElementById('damage'),
 };
+
+// own health: only worth showing once there is damage to worry about
+function renderHealth(d) {
+  if (!el.health) return;
+  var max = d.max || 10;
+  var f = max > 0 ? d.health / max : 1;
+  el.health.classList.add('on');
+  el.health.classList.toggle('hurt', f <= 0.6 && f > 0.3);
+  el.health.classList.toggle('critical', f <= 0.3);
+  el.healthFill.style.width = 'calc(' + (f * 100) + '% - 4px)';
+  el.healthText.textContent = d.health + ' / ' + max;
+}
+
+var damageTimer = null;
+function flashDamage() {
+  if (!el.damage) return;
+  el.damage.classList.add('on');
+  clearTimeout(damageTimer);
+  damageTimer = setTimeout(function () { el.damage.classList.remove('on'); }, 90);
+}
 
 var PERK_COLOURS = {
   fireRate: '#ffb03a', speed: '#6ee7ff', clip: '#a78bfa', doubleJump: '#8ef2a0',
@@ -165,6 +189,8 @@ game.on('hit', function (d) {
   });
 });
 game.on('miss', refresh);
+game.on('health', renderHealth);
+game.on('hurt', flashDamage);
 game.on('npcDown', refresh);
 game.on('level', function (d) {
   refresh();
@@ -175,6 +201,10 @@ game.on('levelComplete', function (d) {
 });
 game.on('zoom', function (d) {
   el.crosshair.classList.toggle('sighted', d.sighted);
+});
+/* Kills, both ways round. */
+game.on('hit', function (d) {
+  if (d.player && d.killed && d.mine) toast('KILLED  +' + game.cfg.scoreKill);
 });
 game.on('perk', function (d) {
   if (d.mine === false) return;
@@ -279,6 +309,10 @@ if (!wantsNet) {
   net.on('error', function () {
     die('could not reach the game server at ' + netUrl);
   });
+  net.on('respawn', function (msg) {
+    if (net.self && msg.id === net.self.id) toast('RESPAWNED');
+  });
+
   net.on('disconnected', function () {
     el.menuScore.textContent = 'DISCONNECTED';
   });
