@@ -18,8 +18,12 @@ function load() {
   // three.js first: every module reads it off the global
   globalThis.THREE = require(path.join(ROOT, 'vendor', 'three.min.js'));
 
+  /* options.js is in here for one reason: the name sanitiser. A name arrives
+   * from a client and is shown to every other client, so the server has to
+   * clean it — and cleaning it by a second, slightly different rule written
+   * out again here is how the two drift apart. */
   const order = [
-    'figure.js', 'audio.js', 'world.js', 'effects.js',
+    'options.js', 'figure.js', 'audio.js', 'world.js', 'effects.js',
     'targets.js', 'weapon.js', 'npcs.js', 'perks.js', 'game.js',
   ];
   for (const file of order) {

@@ -26,6 +26,8 @@ PB.createNet = function (opts) {
   var url = opts.url;
   var name = opts.name || 'player';
 
+  var pvp = opts.pvp !== false;
+
   var socket = null;
   var self = { id: null, seed: null, connected: false, error: null, arenaMatch: null };
   var listeners = {};
@@ -63,7 +65,7 @@ PB.createNet = function (opts) {
 
     socket.onopen = function () {
       self.connected = true;
-      send({ t: 'join', name: name });
+      send({ t: 'join', name: name, pvp: pvp });
     };
 
     socket.onmessage = function (ev) {
@@ -82,6 +84,11 @@ PB.createNet = function (opts) {
       self.error = 'connection failed';
       emit('error', { message: self.error });
     };
+  }
+
+  function sendPrefs() {
+    if (!self.id) return false;         // it will travel with the join instead
+    return send({ t: 'prefs', name: name, pvp: pvp });
   }
 
   function handle(msg) {
@@ -128,6 +135,27 @@ PB.createNet = function (opts) {
       emit('joined', msg.player);
       return;
     }
+    /* Somebody renamed themselves, or stepped in or out of the fight. Redraw
+     * the tag over their head there and then rather than waiting for them to
+     * leave and come back. */
+    if (msg.t === 'prefs') {
+      names.set(msg.id, msg.name);
+      var who = remotes.get(msg.id);
+      if (who) {
+        if (who.tag) who.tag.set(msg.name);
+        setRemotePvp(who, msg.pvp !== false);
+      }
+      emit('prefs', msg);
+      return;
+    }
+    if (msg.t === 'medkit') {
+      if (game) {
+        if (msg.by === self.id) game.setHealth(msg.health, maxHealth);
+        game.sfx.wave();
+      }
+      emit('medkit', { index: msg.index, by: msg.by, mine: msg.by === self.id });
+      return;
+    }
     if (msg.t === 'left') {
       departed.add(msg.id);
       dropRemote(msg.id);
@@ -159,6 +187,7 @@ PB.createNet = function (opts) {
       if (game && msg.id === self.id) {
         game.teleport(msg.x, msg.y, msg.z);
         game.setHealth(msg.health, maxHealth);
+        game.setShield(game.cfg.spawnShield);
       }
       emit('respawn', msg);
       return;
@@ -272,18 +301,30 @@ PB.createNet = function (opts) {
     game.scene.add(fig.root);
     r = { fig: fig, phase: 0, last: null, tag: null };
 
-    var label = names.get(id);
-    if (label) {
-      r.tag = PB.createNameTag(label, '#' + accent.getHexString());
-      r.tag.sprite.visible = showNames;
-      fig.root.add(r.tag.sprite);
-    }
+    // always build the tag: a rename can arrive before we ever hear a name
+    r.tag = PB.createNameTag(names.get(id) || '', '#' + accent.getHexString());
+    r.tag.sprite.visible = showNames;
+    fig.root.add(r.tag.sprite);
     r.health = PB.createHealthBar();
     fig.root.add(r.health.sprite);
+    r.pvp = true;
 
     if (fig.hitbox) game.debugHitboxes && game.debugHitboxes.push(fig.hitbox);
     remotes.set(id, r);
     return r;
+  }
+
+  /* Somebody out of the fight is drawn see-through, so it is obvious at a
+   * glance that shooting them is a waste of a round. */
+  function setRemotePvp(r, on) {
+    if (!r || r.pvp === on) return;
+    r.pvp = on;
+    r.fig.materials.forEach(function (m) {
+      if (m.name === 'shieldMat') return;
+      m.transparent = !on;
+      m.opacity = on ? 1 : 0.34;
+      m.needsUpdate = true;
+    });
   }
 
   function dropRemote(id) {
@@ -343,6 +384,11 @@ PB.createNet = function (opts) {
       var down = pb.length > 10 && pb[10];
       r.fig.root.visible = !down;
       if (r.health && pb.length > 9) r.health.set(down ? 0 : pb[9], maxHealth);
+      if (r.fig.shield) r.fig.shield.visible = !down && pb.length > 11 && !!pb[11];
+      if (pb.length > 12) setRemotePvp(r, !!pb[12]);
+      // cheap when nothing changed, and it covers a name that arrived after
+      // the body did
+      if (r.tag) r.tag.set(names.get(id) || '');
 
       r.fig.root.position.set(x, y - game.cfg.eye, z);
       // a figure's front is its local -Z, which is also where a player yaw of
@@ -367,6 +413,7 @@ PB.createNet = function (opts) {
       game.setWorldTime(lerp(wtA, pair.b.wt, pair.f));
     }
     if (pair.b.perks) game.perkSystem.applyList(pair.b.perks);
+    if (pair.b.kits) game.applyMedkits(pair.b.kits);
   }
 
   function findPlayer(list, id) {
@@ -447,11 +494,18 @@ PB.createNet = function (opts) {
     names: names,
     setName: function (v) {
       name = (v || 'player').toString().slice(0, 16);
-      // a name set before joining travels with the join; afterwards it is the
-      // label everyone else already has, so it only applies next time
+      // before joining this travels with the join; afterwards it goes out on
+      // its own, so the tag over our head changes on everyone's screen at once
+      sendPrefs();
       return name;
     },
     getName: function () { return name; },
+    setPvp: function (v) {
+      pvp = v !== false;
+      sendPrefs();
+      return pvp;
+    },
+    getPvp: function () { return pvp; },
     setShowNames: function (on) {
       showNames = !!on;
       remotes.forEach(function (r) { if (r.tag) r.tag.sprite.visible = showNames; });

@@ -67,6 +67,10 @@ PB.createUI = function (opts) {
       var net = getNet();
       if (net && net.setShowNames) net.setShowNames(v);
     },
+    pvp: function (v) {
+      var net = getNet();
+      if (net && net.setPvp) net.setPvp(v);
+    },
     hitboxes: function (v) {
       var game = getGame();
       if (game && game.debugView) game.debugView.setHitboxes(v);
@@ -159,6 +163,7 @@ PB.createUI = function (opts) {
     bindRange('opt-gun', 'gunVolume', function (v) { return Math.round(v * 100) + '%'; });
     bindToggle('opt-invert', 'invertY');
     bindToggle('opt-names', 'showNames');
+    bindToggle('opt-pvp', 'pvp');
     bindToggle('dbg-hitboxes', 'hitboxes');
     bindToggle('dbg-colliders', 'colliders');
   }
@@ -177,6 +182,7 @@ PB.createUI = function (opts) {
     set('opt-gun', all.gunVolume);
     set('opt-invert', all.invertY, true);
     set('opt-names', all.showNames, true);
+    set('opt-pvp', all.pvp, true);
     set('dbg-hitboxes', all.hitboxes, true);
     set('dbg-colliders', all.colliders, true);
 

@@ -47,7 +47,14 @@ if (process.env.PERK_EVERY) gameOverrides.perkEvery = Number(process.env.PERK_EV
 const room = new Room({
   seed: process.env.MAP_SEED ? Number(process.env.MAP_SEED) : undefined,
   game: gameOverrides,
-  onBroadcast: msg => broadcast(msg),
+  onBroadcast: msg => {
+    // worth a line in the log: these are the moments a match turns on
+    if (msg.t === 'medkit') {
+      const who = room.players.get(msg.by);
+      log(`${who ? who.name : msg.by} took health pack ${msg.index}`);
+    }
+    broadcast(msg);
+  },
 });
 
 const server = http.createServer((req, res) => {
@@ -108,6 +115,7 @@ wss.on('connection', socket => {
       if (player) return;
       const matchesBefore = room.matches;
       player = room.join(msg.name);
+      if (typeof msg.pvp === 'boolean') player.pvp = msg.pvp;
       if (room.matches !== matchesBefore) {
         log(`new match — map seed ${room.seed}`);
       }
@@ -135,6 +143,20 @@ wss.on('connection', socket => {
         }
       } else {
         send(socket, { t: 'shotRejected', reason: res.reason });
+      }
+      return;
+    }
+
+    /* A name or a change of heart about fighting. Both are visible to everyone
+     * else — a tag over a head, a translucent body — so both go out at once
+     * rather than waiting for whoever it is to reconnect. */
+    if (msg.t === 'prefs') {
+      const was = { name: player.name, pvp: player.pvp };
+      const out = room.setPrefs(player.id, msg);
+      if (!out) return;
+      if (out.name !== was.name || out.pvp !== was.pvp) {
+        broadcast(out);
+        if (out.name !== was.name) log(`player ${player.id} is now ${out.name}`);
       }
       return;
     }

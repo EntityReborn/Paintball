@@ -41,6 +41,11 @@ var DEFAULTS = {
   playerHealth: 10,           // hits a player can take
   healEvery: 2,               // seconds per point of health recovered
   respawnDelay: 2.5,          // seconds on the floor before coming back
+  spawnShield: 3,             // seconds of protection on coming back
+
+  medkits: 2,                 // health packs standing in the arena
+  medkitRespawn: 25,          // seconds before a used one comes back
+  medkitRadius: 1.4,
   seed: null,               // number => deterministic world, null => random
   audio: true,
   shadows: true,
@@ -164,7 +169,7 @@ function createGame(options) {
     kickBack: 0, reloadT: 0, active: false, shotsFired: 0, elapsed: 0,
     lookSpikes: 0, maxLookDelta: 0, zoom: 0, networked: false,
     worldTime: 0, airJumps: 0, standingOn: null,
-    health: 0, maxHealth: 0, dead: false,
+    health: 0, maxHealth: 0, dead: false, shield: 0,
 
     /* Everything worth bragging about. Distance is kept in world units and
      * converted on the way out — the arena is metric, a unit is a metre. */
@@ -173,7 +178,7 @@ function createGame(options) {
       targetsBroken: 0, npcsDown: 0,
       distance: 0, jumps: 0, reloads: 0,
       levelsCleared: 0, timePlayed: 0, timeSighted: 0,
-      bestStreak: 0, streak: 0,
+      bestStreak: 0, streak: 0, kills: 0, deaths: 0,
       longestShot: 0, bestScore: 0,
     },
   };
@@ -210,6 +215,7 @@ function createGame(options) {
   var arenaFingerprint = world.fingerprint;
   var movers = ctx.movers = world.movers;
   var balcony = ctx.balcony = world.balcony;
+  var medkits = ctx.medkits = world.medkits;
   ctx.remoteHitboxes = [];        // net.js fills this as players appear
 
   var fx = ctx.fx = PB.createEffects(ctx);
@@ -615,6 +621,13 @@ function createGame(options) {
     spawnTargets();
     var count = cfg.npcsPerLevel + (level - 1);
     for (var i = 0; i < count; i++) npcs.push(makeNPC(i));
+    /* Put what we just spawned into world space. Shots are raycast against
+     * these meshes, and the first frame is what would otherwise do it — which
+     * is fine in a browser and not fine on a server, where a round can be
+     * adjudicated before any frame has been drawn. applyLevel already did
+     * this; the offline path did not. */
+    scene.updateMatrixWorld(true);
+    if (debugView) debugView.refresh();
     emit('level', {
       level: state.level, npcs: npcsAlive(), targets: aliveCount(), complete: false,
     });
@@ -632,6 +645,15 @@ function createGame(options) {
    * server added exists only as an invisible thing that stops bullets. */
   function applyLevel(desc) {
     clearLevel();
+    /* Online the server decides when a level is done, so checkLevel never runs
+     * here and nothing was counting the levels this player saw through. Moving
+     * up is the same achievement either way — as long as we were already in
+     * the level being left, rather than joining partway through someone
+     * else's match. */
+    if (state.networked && desc.level === state.level + 1) {
+      state.stats.levelsCleared++;
+      emit('levelComplete', { level: state.level, score: state.score });
+    }
     state.level = desc.level;
     for (var i = 0; i < desc.targets.length; i++) {
       var t = desc.targets[i];
@@ -1007,6 +1029,11 @@ function createGame(options) {
     updateReload(dt);
     perkSystem.tickHolder(state, dt);
     perkSystem.update(dt, state.pos);
+    updateMedkits(dt);
+    if (state.shield > 0) {
+      state.shield = Math.max(0, state.shield - dt);
+      if (state.shield === 0) emit('shieldEnd', {});
+    }
     if (!state.networked) updateNPCs(dt);
     updateBullets(dt);
     updateFx(dt);
@@ -1075,9 +1102,11 @@ function createGame(options) {
 
     if (msg.kind === 'player') {
       spawnIndicator(msg.killed ? cfg.scoreKill : 0, point);
+      // recordHit counts the hit; counting it here as well is how accuracy
+      // climbed past 100% — every hit on a player was worth two
       if (mine) {
-        state.stats.shotsHit++;
         recordHit(point);
+        if (msg.killed) state.stats.kills++;
         sfx.hit();
       }
       emit('hit', {
@@ -1123,6 +1152,43 @@ function createGame(options) {
     return mesh;
   }
 
+  /* ------------------------------------------------------- health packs */
+  /* The pack itself is part of the seeded world, so it is already in the same
+   * place on every client. What travels is only whether it is standing there
+   * right now — online the server decides that, offline this does. */
+  function updateMedkits(dt) {
+    // readiness first, then the drawing of it: the other way round shows a
+    // pack as gone for one frame after it has come back
+    if (!state.networked) {
+      for (var i = 0; i < medkits.length; i++) {
+        var kit = medkits[i];
+        if (!kit.ready && state.elapsed >= kit.backAt) kit.ready = true;
+      }
+    }
+    world.updateMedkits(dt);
+    if (state.networked) return;
+    if (!state.active || state.health >= state.maxHealth) return;
+    var got = world.medkitAt(state.pos.x, state.pos.z, state.pos.y - cfg.eye);
+    if (got) takeMedkit(got);
+  }
+
+  function takeMedkit(kit) {
+    kit.ready = false;
+    kit.backAt = state.elapsed + cfg.medkitRespawn;
+    setHealth(state.maxHealth || cfg.playerHealth, state.maxHealth || cfg.playerHealth);
+    emit('medkit', { index: kit.index, mine: true });
+    sfx.wave();
+    return kit;
+  }
+
+  /* Which packs are on the ground, straight from the server. */
+  function applyMedkits(list) {
+    if (!list) return;
+    for (var i = 0; i < medkits.length && i < list.length; i++) {
+      medkits[i].ready = !!list[i];
+    }
+  }
+
   /* Our own health, as the server reports it. Nothing here decides damage —
    * the server does — this is the readout and the effects. */
   function setHealth(health, max) {
@@ -1132,10 +1198,24 @@ function createGame(options) {
     var nowDead = state.health <= 0;
     if (was !== state.health || nowDead !== state.dead) {
       if (state.health < was) emit('hurt', { health: state.health, max: state.maxHealth });
+      if (nowDead && !state.dead) state.stats.deaths++;
       state.dead = nowDead;
       emit('health', { health: state.health, max: state.maxHealth, dead: state.dead });
     }
     return state.health;
+  }
+
+  /* Seconds of protection left. Set on coming back from a death, and by the
+   * shield perk; nothing may hurt us while it runs. */
+  function setShield(seconds) {
+    var was = state.shield;
+    state.shield = Math.max(0, seconds || 0);
+    if (state.shield > 0 && was <= 0) emit('shield', { seconds: state.shield });
+    return state.shield;
+  }
+
+  function shielded() {
+    return state.shield > 0 || perkSystem.held(state, 'shield');
   }
 
   function setScore(n) {
@@ -1177,6 +1257,8 @@ function createGame(options) {
       npcsDown: st.npcsDown,
       bestStreak: st.bestStreak,
       streak: st.streak,
+      kills: st.kills,
+      deaths: st.deaths,
       longestShot: st.longestShot,
       longestShotFeet: st.longestShot * FEET_PER_UNIT,
       distance: st.distance,
@@ -1256,6 +1338,9 @@ function createGame(options) {
     stats: stats, resetStats: resetStats, recordHit: recordHit, FEET_PER_UNIT: FEET_PER_UNIT,
     applyServerHit: applyServerHit, showRemoteShot: showRemoteShot,
     setScore: setScore, setHealth: setHealth, breakTarget: breakTarget,
+    setShield: setShield, shielded: shielded,
+    medkits: medkits, applyMedkits: applyMedkits, takeMedkit: takeMedkit,
+    medkitAt: world.medkitAt,
     applyLook: applyLook, setPitch: setPitch,
     setLookDebug: function (on) { lookDebug = !!on; if (!on) lookLog.length = 0; },
     lookLog: function () { return lookLog.slice(); },
@@ -1313,7 +1398,10 @@ function createGame(options) {
       var ok = perkSystem.grant(state, kind);
       if (ok) {
         var def = perkSystem.kindByName(kind);
-        emit('perk', { kind: kind, label: def.label, mine: true });
+        emit('perk', {
+          kind: kind, label: def.label, mine: true,
+          duration: perkSystem.durationOf(kind),
+        });
       }
       return ok;
     },

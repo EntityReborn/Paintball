@@ -41,7 +41,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const page = await browser.newPage();
     const errors = [];
     page.on('pageerror', e => errors.push(e.message));
-    page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
+    /* This suite serves the page from a plain static server on purpose — the
+     * menus are not supposed to need a game server. The name prompt is shown
+     * before joining one, so reaching it means loading ?mp, and the socket
+     * that cannot connect is the expected outcome, not a fault. */
+    const expected = /WebSocket|ws:\/\/|wss:\/\//;
+    page.on('console', m => {
+      if (m.type() === 'error' && !expected.test(m.text())) errors.push(m.text());
+    });
 
     // Start from a clean slate, but only once: clearing storage on every
     // navigation would also wipe it during the reload this test depends on.
@@ -191,6 +198,124 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
           Math.abs(afterReset.sensitivity - 1) < 0.001 && afterReset.name === 'player' &&
           afterReset.field === 'player',
           `sensitivity ${afterReset.sensitivity}, name ${afterReset.name}`);
+
+    /* ------------------------------------------- opting out of the fight */
+    await page.click('#btn-options');
+    await sleep(150);
+    const pvpDefault = await page.evaluate(() => ({
+      checked: document.getElementById('opt-pvp').checked,
+      stored: options.get('pvp'),
+    }));
+    check('the fight switch is on to start with',
+          pvpDefault.checked === true && pvpDefault.stored === true,
+          `checkbox ${pvpDefault.checked}, stored ${pvpDefault.stored}`);
+
+    await page.click('#opt-pvp');
+    await sleep(200);
+    const pvpOff = await page.evaluate(() => ({
+      stored: options.get('pvp'),
+      written: JSON.parse(localStorage.getItem('paintball.options') || '{}').pvp,
+    }));
+    check('turning it off is remembered',
+          pvpOff.stored === false && pvpOff.written === false,
+          `stored ${pvpOff.stored}, written ${pvpOff.written}`);
+    await page.click('#opt-pvp');
+    await sleep(150);
+    await page.click('#close-options');
+    await sleep(150);
+
+    /* ------------------------------------------ the lifetime figures */
+    const career = await page.evaluate(() => {
+      localStorage.removeItem('paintball.career');
+      window.career.clear();
+      // play a little, then fold it in the way pausing does
+      game.state.stats.shotsFired = 12;
+      game.state.stats.shotsHit = 6;
+      game.state.stats.kills = 2;
+      game.state.score = 750;
+      game.state.stats.bestScore = 750;
+      const totals = window.career.fold(game.stats());
+      return {
+        totals: totals,
+        stored: JSON.parse(localStorage.getItem('paintball.career') || '{}'),
+      };
+    });
+    check('the lifetime figures are written to storage',
+          career.stored.shotsFired === 12 && career.stored.kills === 2,
+          JSON.stringify(career.stored));
+
+    await page.reload({ waitUntil: 'load' });
+    await page.waitForFunction('window.game && window.career');
+    await sleep(300);
+    const carried = await page.evaluate(() => window.career.all());
+    check('and they are still there after a reload',
+          carried.shotsFired === 12 && carried.shotsHit === 6 && carried.bestScore === 750,
+          `${carried.shotsFired} shots, ${carried.shotsHit} hits, best ${carried.bestScore}`);
+
+    // the pause summary shows both columns
+    const summary = await page.evaluate(() => {
+      game.state.stats.shotsFired = 4;
+      game.state.stats.shotsHit = 3;
+      document.dispatchEvent(new Event('pointerlockchange'));
+      const node = document.getElementById('summary');
+      return { html: node.innerHTML, on: node.classList.contains('on') };
+    });
+    check('the pause summary has a session column and a lifetime one',
+          summary.on && /SESSION/.test(summary.html) && /LIFETIME/.test(summary.html),
+          summary.on ? 'headings missing' : 'the summary never opened');
+    check('and the lifetime column carries the earlier session',
+          /class="val life">1[26]</.test(summary.html),
+          'no lifetime shot count in the summary');
+    await page.screenshot({ path: path.join(SHOTS, 'menu-summary.png') });
+
+    /* ------------------------------------- asking a new player their name */
+    await page.evaluate(() => { localStorage.removeItem('paintball.options'); });
+    await page.goto(`${BASE}/index.html?mp`, { waitUntil: 'load' });
+    await sleep(700);
+    const prompt = await page.evaluate(() => ({
+      up: !document.getElementById('ask-name').hidden,
+      connected: !!(window.net && window.net.self && window.net.self.id),
+      built: !!window.game,
+    }));
+    check('a player who has never named themselves is asked before joining',
+          prompt.up && !prompt.connected,
+          `prompt up=${prompt.up}, already joined=${prompt.connected}`);
+    await page.screenshot({ path: path.join(SHOTS, 'menu-ask-name.png') });
+
+    // it refuses a name with nothing usable in it, and keeps asking
+    await page.evaluate(() => {
+      document.getElementById('ask-name-input').value = '!!!';
+      document.getElementById('ask-name-form')
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    await sleep(200);
+    const refused = await page.evaluate(() => ({
+      up: !document.getElementById('ask-name').hidden,
+      err: document.getElementById('ask-name-err').textContent,
+    }));
+    check('a name of nothing usable is refused', refused.up && refused.err.length > 0,
+          `still up=${refused.up}, said "${refused.err}"`);
+
+    await page.evaluate(() => {
+      document.getElementById('ask-name-input').value = 'ana';
+      document.getElementById('ask-name-form')
+        .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+    await sleep(400);
+    const named = await page.evaluate(() => ({
+      up: !document.getElementById('ask-name').hidden,
+      name: options.get('name'),
+      chosen: options.has('name'),
+    }));
+    check('answering it puts the prompt away and keeps the name',
+          !named.up && named.name === 'ana' && named.chosen,
+          `prompt up=${named.up}, name ${named.name}`);
+
+    // and it is not asked a second time
+    await page.goto(`${BASE}/index.html?mp`, { waitUntil: 'load' });
+    await sleep(500);
+    check('and a player who has one is not asked again',
+          await page.evaluate(() => document.getElementById('ask-name').hidden));
 
     check('no console errors while using the menus', errors.length === 0,
           errors.slice(0, 3).join(' | '));

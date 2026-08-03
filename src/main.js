@@ -33,6 +33,12 @@ var options = window.PB.createOptions();
 window.options = options;
 if (params.get('name')) options.set('name', params.get('name'));
 
+/* Totals that outlive the tab. The game keeps the session's own figures and
+ * knows nothing about this; folding happens here, on a slow timer and at every
+ * moment the page might be about to go away. */
+var career = window.PB.createCareer();
+window.career = career;
+
 var ui = null;
 
 function build(seed) {
@@ -69,6 +75,11 @@ var el = {
   healthFill: document.getElementById('health-fill'),
   healthText: document.getElementById('health-text'),
   damage: document.getElementById('damage'),
+  shield: document.getElementById('shield'),
+  shieldTime: document.getElementById('shield-time'),
+  dead: document.getElementById('dead'),
+  deadBy: document.getElementById('dead-by'),
+  deadCount: document.getElementById('dead-count'),
 };
 
 // own health: only worth showing once there is damage to worry about
@@ -91,6 +102,42 @@ function flashDamage() {
   damageTimer = setTimeout(function () { el.damage.classList.remove('on'); }, 90);
 }
 
+/* How long we cannot be hurt for, counted down in the corner. Covers both the
+ * moment after a respawn and the shield perk — from the player's side they are
+ * the same thing, so they read the same way. */
+function renderShield() {
+  if (!el.shield || !game) return;
+  var left = Math.max(game.state.shield || 0,
+                      (game.state.perks && game.state.perks.shield) || 0);
+  el.shield.classList.toggle('on', left > 0);
+  if (left > 0) el.shieldTime.textContent = left.toFixed(1) + 's';
+}
+
+/* The screen you get when somebody puts you down: who did it, and how long
+ * until you are back. Without this a death is just the world going still. */
+var deadUntil = 0;
+var killedBy = '';
+
+function showDeath(by) {
+  if (!el.dead || !game) return;
+  killedBy = by || '';
+  deadUntil = performance.now() + game.cfg.respawnDelay * 1000;
+  el.deadBy.textContent = killedBy ? 'BY ' + killedBy.toUpperCase() : '';
+  el.dead.hidden = false;
+}
+
+function hideDeath() {
+  if (!el.dead) return;
+  el.dead.hidden = true;
+  deadUntil = 0;
+}
+
+function renderDeath() {
+  if (!el.dead || el.dead.hidden) return;
+  var left = Math.max(0, (deadUntil - performance.now()) / 1000);
+  el.deadCount.textContent = left.toFixed(1) + 's';
+}
+
 var PERK_COLOURS = {
   fireRate: '#ffb03a', speed: '#6ee7ff', clip: '#a78bfa', doubleJump: '#8ef2a0',
 };
@@ -109,37 +156,56 @@ function renderPerks() {
   el.perks.innerHTML = rows.join('');
 }
 
-/* The career summary shown while paused. Distance is reported in feet because
- * that is what people ask for; everything internal stays in metres. */
+/* Fold the session into the career. Called on a slow timer and at every point
+ * the page might be about to disappear — folding works on the difference since
+ * last time, so calling it often costs nothing and calling it late loses
+ * whatever happened after the last one. */
+function saveCareer() {
+  if (!game) return null;
+  return career.fold(game.stats());
+}
+
+/* The summary shown while paused, in two columns: this session, and every
+ * session before it. Distance is reported in feet because that is what people
+ * ask for; everything internal stays in metres. */
 function renderSummary() {
   if (!game) return;
+  saveCareer();
   var s = game.stats();
+  var life = career.all();
   var pct = function (n) { return (n * 100).toFixed(1) + '%'; };
+  var feet = function (units) { return (units * game.FEET_PER_UNIT).toFixed(0) + ' ft'; };
   var clock = function (sec) {
     var m = Math.floor(sec / 60), r = Math.round(sec % 60);
+    if (m >= 60) return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
     return m + 'm ' + (r < 10 ? '0' : '') + r + 's';
   };
   var rows = [
-    ['SCORE', s.score, ''],
-    ['BEST SCORE', s.bestScore, ''],
-    ['LEVELS CLEARED', s.levelsCleared, ''],
-    ['ACCURACY', pct(s.accuracy), s.accuracy >= 0.5 ? 'good' : (s.shotsFired > 5 ? 'poor' : '')],
-    ['SHOTS FIRED', s.shotsFired, ''],
-    ['HITS / MISSES', s.shotsHit + ' / ' + s.misses, ''],
-    ['TARGETS BROKEN', s.targetsBroken, ''],
-    ['NPCS DOWN', s.npcsDown, ''],
-    ['BEST STREAK', s.bestStreak, s.bestStreak >= 5 ? 'good' : ''],
-    ['LONGEST SHOT', s.longestShotFeet.toFixed(0) + ' ft', ''],
-    ['DISTANCE WALKED', s.distanceFeet.toFixed(0) + ' ft', ''],
-    ['JUMPS', s.jumps, ''],
-    ['RELOADS', s.reloads, ''],
-    ['TIME PLAYED', clock(s.timePlayed), ''],
-    ['TIME SIGHTED', pct(s.sightedShare), ''],
-    ['POINTS PER SHOT', s.pointsPerShot.toFixed(1), ''],
+    ['SCORE', s.score, life.bestScore + ' best', ''],
+    ['LEVELS CLEARED', s.levelsCleared, life.levelsCleared, ''],
+    ['ACCURACY', pct(s.accuracy), pct(life.accuracy),
+     s.accuracy >= 0.5 ? 'good' : (s.shotsFired > 5 ? 'poor' : '')],
+    ['SHOTS FIRED', s.shotsFired, life.shotsFired, ''],
+    ['HITS / MISSES', s.shotsHit + ' / ' + s.misses, life.shotsHit + ' / ' + life.misses, ''],
+    ['TARGETS BROKEN', s.targetsBroken, life.targetsBroken, ''],
+    ['NPCS DOWN', s.npcsDown, life.npcsDown, ''],
+    ['KILLS / DEATHS', s.kills + ' / ' + s.deaths, life.kills + ' / ' + life.deaths, ''],
+    ['BEST STREAK', s.bestStreak, life.bestStreak, s.bestStreak >= 5 ? 'good' : ''],
+    ['LONGEST SHOT', s.longestShotFeet.toFixed(0) + ' ft', feet(life.longestShot), ''],
+    ['DISTANCE WALKED', s.distanceFeet.toFixed(0) + ' ft', feet(life.distance), ''],
+    ['JUMPS', s.jumps, life.jumps, ''],
+    ['RELOADS', s.reloads, life.reloads, ''],
+    ['TIME PLAYED', clock(s.timePlayed), clock(life.timePlayed), ''],
+    ['TIME SIGHTED', pct(s.sightedShare), '', ''],
+    ['POINTS PER SHOT', s.pointsPerShot.toFixed(1), '', ''],
   ];
-  el.summary.innerHTML = rows.map(function (r) {
+  var head = '<div class="row head"><span class="lbl">&nbsp;</span>' +
+             '<span class="val">SESSION</span>' +
+             '<span class="val life">LIFETIME</span></div>';
+  el.summary.innerHTML = head + rows.map(function (r) {
     return '<div class="row"><span class="lbl">' + r[0] + '</span>' +
-           '<span class="val ' + r[2] + '">' + r[1] + '</span></div>';
+           '<span class="val ' + r[3] + '">' + r[1] + '</span>' +
+           '<span class="val life">' + r[2] + '</span></div>';
   }).join('');
   el.summary.classList.add('on');
 }
@@ -202,17 +268,21 @@ game.on('levelComplete', function (d) {
 game.on('zoom', function (d) {
   el.crosshair.classList.toggle('sighted', d.sighted);
 });
-/* Kills, both ways round. */
-game.on('hit', function (d) {
-  if (d.player && d.killed && d.mine) toast('KILLED  +' + game.cfg.scoreKill);
-});
 game.on('perk', function (d) {
   if (d.mine === false) return;
   toast(d.label || 'PERK');
   renderPerks();
 });
 game.on('perkExpired', renderPerks);
-game.on('frame', renderPerks);
+game.on('frame', function () { renderPerks(); renderShield(); renderDeath(); });
+game.on('medkit', function (d) { if (d.mine) toast('HEALTH RESTORED'); });
+game.on('shield', function () { toast('SHIELDED'); });
+/* Learning it from our own health alone means no killer's name, which happens
+ * if the hit message is lost; better a plain notice than none. */
+game.on('health', function (d) {
+  if (d.dead) { if (el.dead.hidden) showDeath(killedBy); }
+  else hideDeath();
+});
 game.on('reloadStart', function () { el.reloading.textContent = 'RELOADING'; });
 game.on('reloadEnd', function () { el.reloading.textContent = ''; refresh(); });
 
@@ -244,10 +314,19 @@ document.addEventListener('pointerlockchange', function () {
     if (game.state.score > 0 || game.stats().shotsFired > 0) {
       el.menuScore.textContent = 'SCORE ' + game.state.score + '  ·  LEVEL ' + game.state.level;
       renderSummary();
+    } else {
+      saveCareer();
     }
   } else {
     el.summary.classList.remove('on');
   }
+});
+
+// and on the way out, however that happens
+setInterval(saveCareer, 15000);
+window.addEventListener('pagehide', saveCareer);
+document.addEventListener('visibilitychange', function () {
+  if (document.hidden) saveCareer();
 });
 
 game.bindInput(window);
@@ -268,13 +347,50 @@ ui = window.PB.createUI({
   getNet: function () { return net; },
 });
 
+/* ------------------------------------------------- who are you, then */
+/* A name goes over your head for everyone else in the room, so somebody who
+ * has never chosen one is asked before they join rather than being called
+ * "player" by default. Offline nobody sees it, so nobody is stopped. */
+var ask = {
+  root: document.getElementById('ask-name'),
+  form: document.getElementById('ask-name-form'),
+  input: document.getElementById('ask-name-input'),
+  err: document.getElementById('ask-name-err'),
+};
+
+function askForName(then) {
+  if (!ask.root) return then();
+  ask.root.hidden = false;
+  ask.input.value = '';
+  setTimeout(function () { ask.input.focus(); }, 0);
+  ask.form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var typed = ask.input.value;
+    // run it through the same cleaner the option uses, and refuse whatever is
+    // left of a name made entirely of characters we do not keep
+    var kept = window.PB.cleanOption('name', typed);
+    if (!typed.trim() || kept === 'player') {
+      ask.err.textContent = typed.trim()
+        ? 'letters, numbers, spaces, _ and - only'
+        : 'pick something';
+      return;
+    }
+    options.set('name', kept);
+    ask.root.hidden = true;
+    then();
+  });
+}
+
 /* ------------------------------------------------------------- boot */
+function boot() {
 if (!wantsNet) {
   game = build();
   if (game) { window.game = game; wire(); ui.applyAll(); }
 } else {
   // wait for the server's map seed so every client builds the same arena
-  net = window.PB.createNet({ url: netUrl, name: options.get('name') });
+  net = window.PB.createNet({
+    url: netUrl, name: options.get('name'), pvp: options.get('pvp'),
+  });
   window.net = net;
   el.menuScore.textContent = 'CONNECTING…';
 
@@ -310,7 +426,18 @@ if (!wantsNet) {
     die('could not reach the game server at ' + netUrl);
   });
   net.on('respawn', function (msg) {
-    if (net.self && msg.id === net.self.id) toast('RESPAWNED');
+    if (net.self && msg.id === net.self.id) { hideDeath(); toast('RESPAWNED'); }
+  });
+
+  /* The server tells the whole room about every hit; this is the one that
+   * matters to us. Being killed with no idea by whom is the worst version of
+   * it, so the name comes off the same message. */
+  net.on('hit', function (msg) {
+    if (msg.kind !== 'player' || !net.self) return;
+    if (msg.victim === net.self.id && msg.killed) showDeath(msg.killerName);
+    if (msg.by === net.self.id && msg.killed) {
+      toast('KILLED ' + (msg.victimName || '') + '  +' + game.cfg.scoreKill);
+    }
   });
 
   net.on('disconnected', function () {
@@ -319,5 +446,9 @@ if (!wantsNet) {
 
   net.connect();
 }
+}
+
+if (wantsNet && !options.has('name')) askForName(boot);
+else boot();
 
 })();

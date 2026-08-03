@@ -17,6 +17,10 @@ PB.PERK_KINDS = [
   { kind: 'speed', label: 'SPRINTER', color: 0x6ee7ff, speed: 1.45 },
   { kind: 'clip', label: 'BIG CLIP', color: 0xa78bfa, clip: 2 },
   { kind: 'doubleJump', label: 'DOUBLE JUMP', color: 0x8ef2a0, airJumps: 1 },
+  /* Shielded is shielded — there is no partial version of not being hurt, so
+   * this one is deliberately short. Fifteen seconds of it, the length of every
+   * other perk, is most of a firefight. */
+  { kind: 'shield', label: 'SHIELD', color: 0x8ef2ff, shield: 1, duration: 6 },
 ];
 
 PB.createPerks = function (ctx) {
@@ -75,10 +79,16 @@ PB.createPerks = function (ctx) {
     var ring = new THREE.Mesh(geo.ring, mats[def.kind].ring);
     ring.rotation.x = Math.PI / 2;
     group.add(core, ring);
+    // what it is, said out loud: the colours alone do not tell a new player
+    // whether the orange one is worth crossing the arena for
+    // clear of the ring, which is 0.62 across and bobs with the pickup
+    var tag = PB.createNameTag(def.label, '#' + def.color.toString(16).padStart(6, '0'),
+                               { y: 1.35, scale: 1.9, font: 30 });
+    group.add(tag.sprite);
     group.position.set(x, y, z);
     group.name = 'perk';
     scene.add(group);
-    return { group: group, core: core, ring: ring };
+    return { group: group, core: core, ring: ring, tag: tag };
   }
 
   var _spot = new THREE.Vector3();
@@ -132,8 +142,15 @@ PB.createPerks = function (ctx) {
   function remove(perk) {
     var i = perks.indexOf(perk);
     if (i !== -1) perks.splice(i, 1);
-    // the materials are shared between every perk of this kind, so they stay
-    if (perk.view) scene.remove(perk.view.group);
+    // the materials are shared between every perk of this kind, so they stay —
+    // the label is this pickup's own, so it goes
+    if (perk.view) {
+      scene.remove(perk.view.group);
+      if (perk.view.tag) {
+        perk.view.tag.material.dispose();
+        perk.view.tag.texture.dispose();
+      }
+    }
   }
 
   function byId(id) {
@@ -147,8 +164,15 @@ PB.createPerks = function (ctx) {
     var def = kindByName(kind);
     if (!def) return false;
     holder.perks = holder.perks || {};
-    holder.perks[kind] = cfg.perkDuration;
+    // most last the standard time; a kind may ask for its own
+    holder.perks[kind] = def.duration || cfg.perkDuration;
     return true;
+  }
+
+  // How long a kind runs for, so the client can say so when it is picked up.
+  function durationOf(kind) {
+    var def = kindByName(kind);
+    return (def && def.duration) || cfg.perkDuration;
   }
 
   function tickHolder(holder, dt) {
@@ -266,7 +290,7 @@ PB.createPerks = function (ctx) {
   return {
     perks: perks, kinds: PB.PERK_KINDS, kindByName: kindByName,
     spawn: spawn, remove: remove, byId: byId, clear: clear,
-    grant: grant, tickHolder: tickHolder, held: held,
+    grant: grant, tickHolder: tickHolder, held: held, durationOf: durationOf,
     factor: factor, bonus: bonus, pickUpAt: pickUpAt,
     update: update, describe: describe, applyList: applyList,
   };

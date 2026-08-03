@@ -19,6 +19,7 @@ PB.OPTION_SPEC = {
   gunVolume: { type: 'number', def: 0.8, min: 0, max: 1 },
   invertY: { type: 'boolean', def: false },
   showNames: { type: 'boolean', def: true },
+  pvp: { type: 'boolean', def: true },
   hitboxes: { type: 'boolean', def: false },
   colliders: { type: 'boolean', def: false },
 };
@@ -80,6 +81,10 @@ PB.createOptions = function (storage) {
 
   var values = PB.defaultOptions();
   var listeners = [];
+  /* Which keys the player has actually chosen, as opposed to which ones have
+   * a default. A name nobody has picked is not the same as a name of
+   * "player" — the first has to be asked for, the second was asked for. */
+  var chosen = {};
 
   function load() {
     if (!store) return values;
@@ -89,6 +94,12 @@ PB.createOptions = function (storage) {
     var parsed = null;
     try { parsed = JSON.parse(raw); } catch (err) { parsed = null; }
     values = PB.cleanOptions(parsed);
+    chosen = {};
+    if (parsed && typeof parsed === 'object') {
+      for (var k in PB.OPTION_SPEC) {
+        if (Object.prototype.hasOwnProperty.call(parsed, k)) chosen[k] = true;
+      }
+    }
     return values;
   }
 
@@ -110,7 +121,9 @@ PB.createOptions = function (storage) {
   function set(key, value) {
     if (!PB.OPTION_SPEC[key]) return false;
     var cleaned = PB.cleanOption(key, value);
-    if (values[key] === cleaned) return false;
+    var first = !chosen[key];
+    chosen[key] = true;
+    if (values[key] === cleaned && !first) return false;
     values[key] = cleaned;
     save();
     for (var i = 0; i < listeners.length; i++) listeners[i](key, cleaned, all());
@@ -119,6 +132,7 @@ PB.createOptions = function (storage) {
 
   function reset() {
     values = PB.defaultOptions();
+    chosen = {};
     save();
     for (var i = 0; i < listeners.length; i++) listeners[i](null, null, all());
     return all();
@@ -130,7 +144,113 @@ PB.createOptions = function (storage) {
     key: KEY,
     load: load, save: save, reset: reset,
     get: get, set: set, all: all,
+    // has this been chosen, or is it just sitting on its default?
+    has: function (key) { return !!chosen[key]; },
     onChange: function (cb) { listeners.push(cb); return cb; },
+  };
+};
+
+/* ------------------------------------------------------------- career */
+/* Totals that outlive the tab. The game keeps a session's figures in memory
+ * and knows nothing about this; whoever owns the page folds the session into
+ * the career from time to time and on the way out.
+ *
+ * Sums accumulate, bests take the higher of the two. Folding works on the
+ * difference since the last fold, so calling it twice does not double-count.
+ */
+PB.CAREER_SUMS = [
+  'shotsFired', 'shotsHit', 'misses', 'targetsBroken', 'npcsDown',
+  'kills', 'deaths', 'distance', 'jumps', 'reloads', 'levelsCleared',
+  'timePlayed', 'timeSighted',
+];
+PB.CAREER_BESTS = ['bestScore', 'bestStreak', 'longestShot'];
+
+PB.createCareer = function (storage) {
+  var KEY2 = 'paintball.career';
+  var store = storage;
+  if (store === undefined) {
+    try { store = global.localStorage; } catch (err) { store = null; }
+  }
+
+  function blank() {
+    var out = { sessions: 0 };
+    PB.CAREER_SUMS.concat(PB.CAREER_BESTS).forEach(function (k) { out[k] = 0; });
+    return out;
+  }
+
+  function clean(raw) {
+    var out = blank();
+    if (!raw || typeof raw !== 'object') return out;
+    for (var k in out) {
+      if (!Object.prototype.hasOwnProperty.call(out, k)) continue;
+      var n = typeof raw[k] === 'number' ? raw[k] : parseFloat(raw[k]);
+      // storage is editable by hand: anything unusable falls back to nothing
+      out[k] = isFinite(n) && n >= 0 ? n : 0;
+    }
+    return out;
+  }
+
+  var totals = blank();
+  var mark = null;                 // session figures as of the last fold
+
+  function load() {
+    if (!store) return totals;
+    var raw = null;
+    try { raw = store.getItem(KEY2); } catch (err) { return totals; }
+    if (!raw) return totals;
+    var parsed = null;
+    try { parsed = JSON.parse(raw); } catch (err) { parsed = null; }
+    totals = clean(parsed);
+    return totals;
+  }
+
+  function save() {
+    if (!store) return false;
+    try { store.setItem(KEY2, JSON.stringify(totals)); return true; }
+    catch (err) { return false; }
+  }
+
+  /* Take everything that has happened since the last call and add it on. */
+  function fold(session) {
+    if (!session) return totals;
+    if (!mark) {
+      mark = {};
+      totals.sessions++;
+    }
+    PB.CAREER_SUMS.forEach(function (k) {
+      var now = typeof session[k] === 'number' ? session[k] : 0;
+      var since = now - (mark[k] || 0);
+      if (since > 0) totals[k] += since;
+      mark[k] = now;
+    });
+    PB.CAREER_BESTS.forEach(function (k) {
+      var now = typeof session[k] === 'number' ? session[k] : 0;
+      if (now > totals[k]) totals[k] = now;
+    });
+    save();
+    return totals;
+  }
+
+  function clear() {
+    totals = blank();
+    mark = null;
+    save();
+    return totals;
+  }
+
+  load();
+
+  return {
+    key: KEY2,
+    load: load, save: save, fold: fold, clear: clear,
+    all: function () {
+      var copy = {};
+      for (var k in totals) {
+        if (Object.prototype.hasOwnProperty.call(totals, k)) copy[k] = totals[k];
+      }
+      copy.accuracy = totals.shotsFired ? totals.shotsHit / totals.shotsFired : 0;
+      return copy;
+    },
   };
 };
 

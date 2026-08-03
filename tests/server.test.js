@@ -586,7 +586,7 @@ test('a burst does not add up to running faster than anybody can run', () => {
     }, t);
     if (!res.ok) refused++;
   }
-  assert.ok(refused > 30, `only ${refused} of 40 over-speed moves were refused`);
+  assert.ok(refused > 20, `only ${refused} of 40 over-speed moves were refused`);
   const seconds = 40 * 0.033;
   const honest = cfg.sprint * 1.35 * seconds + MOVE_BURST;
   assert.ok(p.x < honest,
@@ -615,27 +615,45 @@ test('a state sent before the respawn landed is refused but not held against the
 });
 
 test('the speed perk widens the movement budget for that player', () => {
+  /* The allowance is a rate now, not a per-message ceiling, so the perk shows
+   * up over a stretch of running rather than in a single step: held flat out
+   * at the boosted speed, the boosted player is never questioned and the
+   * unboosted one runs out of credit and gets pulled up. */
   const room = new Room({ seed: 88 });
   const fast = room.join('fast');      // the first join builds a fresh world
   const slow = room.join('slow');
   const g = room.game;
   g.perkSystem.grant(fast, 'speed');
 
-  const t0 = Date.now();
-  fast.lastStateAt = t0;
-  slow.lastStateAt = t0;
-  // a step past what the plain budget allows in 200ms, but inside the boosted one
-  const dt = 0.2;
-  const plainBudget = g.cfg.sprint * dt * 1.35 + 0.35;
-  const reach = plainBudget + 0.3;
-  const move = who => ({
-    x: who.x + reach, y: g.cfg.eye, z: who.z, yaw: 0, pitch: 0,
-    moving: true, grounded: true, vy: 0,
-  });
-  assert.ok(room.applyState(fast.id, move(fast), t0 + 200).ok,
-            'the boosted player was snapped back');
-  assert.ok(!room.applyState(slow.id, move(slow), t0 + 200).ok,
-            'an unboosted player got away with it');
+  const boost = g.perkSystem.factor(fast, 'speed');
+  assert.ok(boost > 1, 'the speed perk does not actually speed anybody up');
+
+  let t = Date.now();
+  fast.x = 0; fast.z = 0; fast.settleUntil = 0; fast.lastStateAt = t;
+  slow.x = 0; slow.z = 5; slow.settleUntil = 0; slow.lastStateAt = t;
+  const step = g.cfg.sprint * boost * 0.1;          // boosted sprint, per 100ms
+
+  let fastRefused = 0;
+  let slowRefused = 0;
+  let fx = 0;
+  let sx = 0;
+  let dir = 1;
+  for (let i = 0; i < 60; i++) {
+    t += 100;
+    // run back and forth rather than out through the wall: the arena bound is
+    // a different rule, and this test is about the speed one
+    if (Math.abs(fx + step * dir) > 18) dir = -dir;
+    fx += step * dir;
+    sx += step * dir;
+    if (!room.applyState(fast.id, {
+      x: fx, y: g.cfg.eye, z: 0, yaw: 0, pitch: 0, moving: true, grounded: true, vy: 0,
+    }, t).ok) fastRefused++;
+    if (!room.applyState(slow.id, {
+      x: sx, y: g.cfg.eye, z: 5, yaw: 0, pitch: 0, moving: true, grounded: true, vy: 0,
+    }, t).ok) slowRefused++;
+  }
+  assert.equal(fastRefused, 0, `the boosted player was pulled up ${fastRefused} times`);
+  assert.ok(slowRefused > 0, 'an unboosted player kept up with a boosted one');
 });
 
 test('snapshots carry the world clock and whatever perks are out', () => {
@@ -788,6 +806,10 @@ function faceOff(room, shooter, victim, range = 6) {
   const g = room.game;
   victim.x = 0; victim.z = 0; victim.y = g.cfg.eye;
   shooter.x = range; shooter.z = 0; shooter.y = g.cfg.eye;
+  // past the protection everybody arrives with: these are damage tests, and
+  // the shield has tests of its own
+  shooter.shieldUntil = 0;
+  victim.shieldUntil = 0;
   return () => {
     const THREE = globalThis.THREE;
     const o = { x: shooter.x, y: shooter.y, z: shooter.z };
@@ -1038,6 +1060,225 @@ test('a shot at where somebody was still counts', () => {
   assert.ok(res.ok, res.reason);
   assert.equal(res.event.kind, 'player', 'the rewind did not credit the hit');
   assert.equal(bo.health, room.game.cfg.playerHealth - 1, 'no damage was done');
+});
+
+/* -------------------------------------------------- shields and packs */
+test('you arrive, and come back, under a shield', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const cfg = room.game.cfg;
+  const shot = faceOff(room, ana, bo);
+
+  // faceOff cleared it; put the arrival shield back the way joining leaves it
+  const t0 = Date.now();
+  bo.shieldUntil = t0 + cfg.spawnShield * 1000;
+  assert.ok(room.shielded(bo, t0), 'not shielded on arrival');
+
+  const res = room.applyShot(ana.id, shot(), t0);
+  assert.equal(res.event.kind, 'player', 'the round did not reach them');
+  assert.equal(res.event.blocked, 'shield', `blocked as ${res.event.blocked}`);
+  assert.equal(bo.health, cfg.playerHealth, 'a shielded player took damage');
+  assert.equal(ana.stats.shotsHit, 0, 'a blocked round was counted as a hit');
+
+  // and it runs out
+  const after = t0 + cfg.spawnShield * 1000 + 50;
+  assert.ok(!room.shielded(bo, after), 'the shield never expired');
+  const later = room.applyShot(ana.id, shot(), after);
+  assert.equal(later.event.blocked, null, 'still blocking after it expired');
+  assert.equal(bo.health, cfg.playerHealth - 1, 'no damage once it lapsed');
+});
+
+test('the shield perk stops damage for as long as it is held', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  const g = room.game;
+
+  g.perkSystem.grant(bo, 'shield');
+  assert.ok(room.shielded(bo), 'the perk did not shield them');
+  const res = room.applyShot(ana.id, shot());
+  assert.equal(res.event.blocked, 'shield');
+  assert.equal(bo.health, g.cfg.playerHealth, 'took damage through the perk');
+
+  // it is deliberately shorter than the rest
+  const def = g.perkSystem.kindByName('shield');
+  assert.ok(def.duration < g.cfg.perkDuration,
+            `shield lasts ${def.duration}s, the standard ${g.cfg.perkDuration}s`);
+  g.perkSystem.tickHolder(bo, def.duration + 0.1);
+  assert.ok(!room.shielded(bo), 'the perk never wore off');
+});
+
+test('the dead come back with a moment of protection', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  const cfg = room.game.cfg;
+
+  let t = Date.now();
+  for (let i = 0; i < cfg.playerHealth; i++) { room.applyShot(ana.id, shot(), t); t += 200; }
+  const back = t + cfg.respawnDelay * 1000 + 50;
+  room.updateHealth(back);
+  assert.ok(room.shielded(bo, back), 'came back with no protection at all');
+  assert.ok(!room.shielded(bo, back + cfg.spawnShield * 1000 + 50), 'protection never ends');
+});
+
+test('the arena has two health packs, in the same places on both sides', () => {
+  const a = createHeadlessGame({ seed: 321 });
+  const b = createHeadlessGame({ seed: 321 });
+  assert.equal(a.medkits.length, 2, `${a.medkits.length} packs`);
+  for (let i = 0; i < a.medkits.length; i++) {
+    assert.equal(+a.medkits[i].x.toFixed(4), +b.medkits[i].x.toFixed(4), `pack ${i} x`);
+    assert.equal(+a.medkits[i].z.toFixed(4), +b.medkits[i].z.toFixed(4), `pack ${i} z`);
+  }
+  // and no pack buried inside a piece of cover
+  const THREE = globalThis.THREE;
+  for (const kit of a.medkits) {
+    const probe = new THREE.Vector3(kit.x, 0.9, kit.z);
+    assert.ok(!a.obstacleBoxes.some(box => box.distanceToPoint(probe) < 1),
+              'a pack is inside the cover');
+  }
+});
+
+test('walking over a pack puts a hurt player back to full', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  const g = room.game;
+  const cfg = g.cfg;
+
+  let t = Date.now();
+  for (let i = 0; i < 4; i++) { room.applyShot(ana.id, shot(), t); t += 200; }
+  assert.equal(bo.health, cfg.playerHealth - 4, 'wrong damage to start from');
+
+  const kit = g.medkits[0];
+  bo.x = kit.x; bo.z = kit.z; bo.y = cfg.eye;
+  const events = room.updateMedkits(t);
+  assert.equal(events.length, 1, 'nothing was picked up');
+  assert.equal(events[0].t, 'medkit');
+  assert.equal(events[0].by, bo.id);
+  assert.equal(bo.health, cfg.playerHealth, 'not put back to full');
+  assert.equal(kit.ready, false, 'the pack is still standing there');
+
+  // a second player cannot take the same one
+  ana.x = kit.x; ana.z = kit.z; ana.y = cfg.eye;
+  ana.health = 3;
+  assert.equal(room.updateMedkits(t + 10).length, 0, 'took a pack that was gone');
+  assert.equal(ana.health, 3, 'healed off a pack that had been taken');
+
+  // and it comes back
+  room.updateMedkits(t + cfg.medkitRespawn * 1000 + 10);
+  assert.equal(kit.ready, false, 'the pack came back and was not taken again');
+  assert.equal(ana.health, cfg.playerHealth, 'whoever was standing there missed it');
+});
+
+test('a player on full health walks straight over a pack', () => {
+  const room = new Room({ seed: 4242 });
+  const p = room.join('ana');
+  const kit = room.game.medkits[0];
+  p.x = kit.x; p.z = kit.z; p.y = room.game.cfg.eye;
+  assert.equal(room.updateMedkits().length, 0, 'wasted a pack');
+  assert.equal(kit.ready, true, 'the pack was taken for nothing');
+});
+
+test('which packs are standing rides along in the snapshot', () => {
+  const room = new Room({ seed: 4242 });
+  room.join('ana');
+  assert.deepEqual(room.snapshot().kits, [1, 1], 'both packs should be out');
+  room.game.medkits[0].ready = false;
+  assert.deepEqual(room.snapshot().kits, [0, 1], 'a taken pack still reads as out');
+});
+
+/* ------------------------------------------------------------ preferences */
+test('a rename reaches the whole room', () => {
+  const room = new Room({ seed: 4242 });
+  const p = room.join('ana');
+  const out = room.setPrefs(p.id, { name: 'anastasia' });
+  assert.equal(out.t, 'prefs');
+  assert.equal(out.id, p.id);
+  assert.equal(out.name, 'anastasia');
+  assert.equal(p.name, 'anastasia', 'the room still has the old name');
+  assert.equal(room.publicPlayer(p).name, 'anastasia');
+});
+
+test('a name is cleaned the same way on both sides', () => {
+  const room = new Room({ seed: 4242 });
+  const p = room.join('<script>alert(1)</script>');
+  // stripped to the allow-list, then cut to length
+  assert.equal(p.name, 'scriptalert1scri', `joined as ${p.name}`);
+  assert.equal(room.setPrefs(p.id, { name: '  bo  bo  ' }).name, 'bo bo');
+  assert.equal(room.setPrefs(p.id, { name: '!!!' }).name, 'player',
+               'a name of nothing usable should fall back');
+  const long = room.setPrefs(p.id, { name: 'abcdefghijklmnopqrstuvwxyz' }).name;
+  assert.ok(long.length <= 16, `no length limit: got ${long.length}`);
+});
+
+test('a player who is out of the fight neither takes damage nor deals it', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  const cfg = room.game.cfg;
+
+  room.setPrefs(bo.id, { pvp: false });
+  assert.equal(bo.pvp, false);
+  let res = room.applyShot(ana.id, shot());
+  assert.notEqual(res.event.kind, 'player', 'shot somebody who is out of it');
+  assert.equal(bo.health, cfg.playerHealth, 'they took damage anyway');
+
+  // and the other way round: back in, but the shooter is out
+  room.setPrefs(bo.id, { pvp: true });
+  room.setPrefs(ana.id, { pvp: false });
+  res = room.applyShot(ana.id, shot(), Date.now() + 500);
+  assert.notEqual(res.event.kind, 'player', 'a player who is out of it still dealt damage');
+  assert.equal(bo.health, cfg.playerHealth, 'damage was dealt by somebody who opted out');
+
+  // both back in, and it works again
+  room.setPrefs(ana.id, { pvp: true });
+  ana.shieldUntil = 0; bo.shieldUntil = 0;
+  res = room.applyShot(ana.id, shot(), Date.now() + 1000);
+  assert.equal(res.event.kind, 'player', 'nobody could be hit after opting back in');
+  assert.equal(bo.health, cfg.playerHealth - 1);
+});
+
+test('a player out of the fight does not stop other rounds either', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const cid = room.join('cid');
+  const g = room.game;
+
+  // bo stands between ana and cid, and is out of the fight
+  ana.x = 12; ana.z = 0; ana.y = g.cfg.eye;
+  bo.x = 6; bo.z = 0; bo.y = g.cfg.eye;
+  cid.x = 0; cid.z = 0; cid.y = g.cfg.eye;
+  ana.shieldUntil = 0; bo.shieldUntil = 0; cid.shieldUntil = 0;
+  room.setPrefs(bo.id, { pvp: false });
+
+  const THREE = globalThis.THREE;
+  const o = { x: ana.x, y: ana.y, z: ana.z };
+  const d = new THREE.Vector3(cid.x - o.x, (cid.y - 0.8) - o.y, cid.z - o.z).normalize();
+  const res = room.applyShot(ana.id, { t: 'shot', origin: o, dir: { x: d.x, y: d.y, z: d.z } });
+  assert.equal(res.event.kind, 'player', `hit a ${res.event.kind}`);
+  assert.equal(res.event.victim, cid.id, 'the round stopped on the wrong player');
+  assert.equal(bo.health, g.cfg.playerHealth, 'the bystander took the round');
+});
+
+test('the snapshot says who is shielded and who is out of the fight', () => {
+  const room = new Room({ seed: 4242 });
+  const p = room.join('ana');
+  let entry = room.snapshot().players[0];
+  assert.equal(entry[11], 1, 'a player who just arrived should be shielded');
+  assert.equal(entry[12], 1, 'and in the fight');
+
+  p.shieldUntil = 0;
+  room.setPrefs(p.id, { pvp: false });
+  entry = room.snapshot().players[0];
+  assert.equal(entry[11], 0, 'still shielded');
+  assert.equal(entry[12], 0, 'still in the fight');
 });
 
 /* --------------------------------------------------------------- server */

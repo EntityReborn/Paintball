@@ -101,15 +101,17 @@ canvas { display: block; position: fixed; inset: 0; }
 /* career summary on the pause screen */
 #summary {
   display: none;
-  grid-template-columns: repeat(2, auto);
-  gap: 5px 30px;
+  /* label, this session, everything before it — the rows are display:contents
+     so each child lands in its own column of this one grid */
+  grid-template-columns: auto minmax(74px, auto) minmax(74px, auto);
+  gap: 5px 26px;
   font-size: 12.5px;
   color: #9db0c8;
   border: 1px solid #1e2836;
   border-radius: 3px;
   padding: 14px 20px;
   background: rgba(12,18,28,.55);
-  max-width: 460px;
+  max-width: 520px;
 }
 #summary.on { display: grid; }
 #summary .row { display: contents; }
@@ -219,3 +221,64 @@ canvas { display: block; position: fixed; inset: 0; }
   transition: opacity .4s; pointer-events: none;
 }
 #damage.on { opacity: 1; transition: opacity .05s; }
+
+/* protection: on coming back from a death, and while the perk lasts */
+#shield {
+  position: absolute; left: 24px; bottom: 50px;
+  font-size: 12px; letter-spacing: .18em; font-weight: 700;
+  color: #8ef2ff; text-shadow: 0 0 12px rgba(142,242,255,.55);
+  opacity: 0; transition: opacity .18s;
+}
+#shield.on { opacity: 1; }
+#shield .k { opacity: .85; }
+#shield-time { color: #d8faff; }
+
+/* the screen you get when somebody puts you down */
+#dead[hidden] { display: none; }
+#dead {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px;
+  background: rgba(30,6,8,.42); pointer-events: none;
+}
+#dead .big {
+  font-size: 40px; letter-spacing: .16em; font-weight: 700; color: #ff6b6b;
+  text-shadow: 0 3px 26px rgba(0,0,0,.85);
+}
+#dead .by { font-size: 15px; letter-spacing: .14em; color: #ffd2d2; }
+#dead .wait { font-size: 12px; letter-spacing: .22em; color: #9db0c8; margin-top: 6px; }
+#dead-count { color: #e6edf3; font-weight: 700; }
+
+/* asked once, before a player who has never named themselves can join */
+#ask-name[hidden] { display: none; }
+#ask-name {
+  position: absolute; inset: 0; z-index: 40; display: flex;
+  align-items: center; justify-content: center;
+  background: rgba(8,11,16,.94);
+}
+#ask-name form {
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  padding: 34px 40px; border: 1px solid #26344a; border-radius: 6px;
+  background: rgba(14,20,30,.9);
+}
+#ask-name h2 {
+  margin: 0; font-size: 20px; letter-spacing: .16em; color: #e6edf3; font-weight: 700;
+}
+#ask-name p { margin: 0; font-size: 13px; color: #9db0c8; }
+#ask-name input {
+  width: 260px; padding: 10px 12px; text-align: center;
+  font: inherit; font-size: 17px; letter-spacing: .12em;
+  color: #e6edf3; background: rgba(10,16,24,.85);
+  border: 1px solid #35486a; border-radius: 3px; outline: none;
+}
+#ask-name input:focus { border-color: #6ee7ff; }
+#ask-name .err { min-height: 15px; font-size: 12px; color: #ff9f9f; letter-spacing: .08em; }
+#ask-name button {
+  padding: 9px 32px; font: inherit; font-size: 13px; letter-spacing: .2em;
+  color: #0b0e13; background: #6ee7ff; border: 0; border-radius: 3px; cursor: pointer;
+}
+#ask-name button:hover { background: #a5f0ff; }
+
+/* the pause summary, in two columns: this session and everything before it */
+#summary .val.life { color: #8fa3bd; font-weight: 400; }
+#summary .head .val { color: #6ee7ff; font-weight: 700; font-size: 11px;
+                      letter-spacing: .14em; }

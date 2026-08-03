@@ -164,13 +164,34 @@ function standClearOf(point, range) {
 }
 
 // A clear target: alive, and with an unobstructed line from the player's eye.
+/* A target this player can actually shoot from where they stand.
+ *
+ * Line of sight alone is not enough: it says nothing is in the way of the
+ * centre line, while the shot is judged by a raycast from the camera, and the
+ * two disagree around the edges of cover. Aiming at each candidate and asking
+ * where the round would land picks one that can really be hit, which keeps
+ * these tests about what they are testing rather than about the arena the
+ * seed happened to build. */
 function findClearTarget(fromY) {
   var eye = new THREE.Vector3(g.state.pos.x, fromY === undefined ? g.cfg.eye : fromY, g.state.pos.z);
-  for (var i = 0; i < g.targets.length; i++) {
+  var yaw = g.yawObj.rotation.y;
+  var pitch = g.pitchObj.rotation.x;
+  var found = null;
+  for (var i = 0; i < g.targets.length && !found; i++) {
     var t = g.targets[i];
-    if (t.alive && g.hasLineOfSight(eye, t.mesh.position)) return t;
+    if (!t.alive || !g.hasLineOfSight(eye, t.mesh.position)) continue;
+    g.aimAt(t.mesh.position);
+    var hit = g.traceShot(
+      g.camera.getWorldPosition(new THREE.Vector3()),
+      g.camera.getWorldDirection(new THREE.Vector3())
+    );
+    if (hit.target === t) found = t;
   }
-  return null;
+  // leave the camera where we found it, so callers aim for themselves
+  g.yawObj.rotation.y = yaw;
+  g.setPitch(pitch);
+  g.yawObj.updateMatrixWorld(true);
+  return found;
 }
 
 // Stand somewhere with a clear shot at a grounded NPC's chest.
@@ -1364,16 +1385,16 @@ describe('NPCs', function () {
 
   it('stops bullets that hit it', function () {
     freshLevel();
-    var n = g.npcs[2];
-    var p = n.root.position;
-    g.teleport(p.x + 3, g.cfg.eye, p.z);
-    g.aimAt(new THREE.Vector3(p.x, 1.15, p.z));
+    // stand somewhere with a clear line rather than trusting that whichever
+    // body the seed put third is out in the open
+    var n = lineUpOnNPC();
+    assert.ok(n, 'no NPC in the open to shoot at');
     var hit = g.traceShot(
       g.camera.getWorldPosition(new THREE.Vector3()),
       g.camera.getWorldDirection(new THREE.Vector3())
     );
     assert.ok(hit.npc, 'the NPC is not solid to bullets');
-    assert.less(hit.distance, 4, 'bullet stopped behind the NPC');
+    assert.less(hit.distance, 5, 'bullet stopped behind the NPC');
   });
 });
 
@@ -1811,9 +1832,30 @@ describe('Perks', function () {
     g.state.perks = {};
   }
 
-  it('offers the four kinds', function () {
+  it('offers the five kinds', function () {
     var kinds = g.perkSystem.kinds.map(function (k) { return k.kind; }).sort().join(',');
-    assert.equal(kinds, 'clip,doubleJump,fireRate,speed', 'perk kinds');
+    assert.equal(kinds, 'clip,doubleJump,fireRate,shield,speed', 'perk kinds');
+  });
+
+  it('gives the shield a shorter run than the rest', function () {
+    var shield = g.perkSystem.kindByName('shield');
+    assert.ok(shield, 'no shield perk');
+    assert.less(g.perkSystem.durationOf('shield'), g.cfg.perkDuration,
+                'the shield lasts as long as everything else');
+    assert.equal(g.perkSystem.durationOf('speed'), g.cfg.perkDuration,
+                 'the others should be on the standard duration');
+  });
+
+  it('says what each pickup is, above it', function () {
+    freshLevel();
+    clearPerks();
+    var perk = g.perkSystem.spawn({ kind: 'shield', x: 8, y: 1.1, z: 8 });
+    assert.ok(perk && perk.view, 'no pickup was built');
+    assert.ok(perk.view.tag, 'the pickup has no label');
+    assert.equal(perk.view.tag.text, 'SHIELD', 'the label says the wrong thing');
+    assert.greater(perk.view.tag.sprite.position.y, 0.5, 'the label is not above it');
+    assert.ok(perk.view.tag.sprite.material.depthTest,
+              'the label reads through cover');
   });
 
   it('spawns them in the open, away from cover', function () {
@@ -2473,7 +2515,10 @@ describe('Name tags', function () {
     assert.ok(tag.sprite, 'no sprite');
     assert.equal(tag.text, 'ana');
     assert.greater(tag.sprite.position.y, 1.8, 'the tag is not above the head');
-    assert.ok(tag.sprite.material.depthTest === false, 'the tag hides behind cover');
+    assert.ok(tag.sprite.material.depthTest === true,
+              'the tag reads through cover, which is a wallhack');
+    assert.ok(tag.sprite.material.depthWrite === false,
+              'the tag writes depth and will punch through other tags');
   });
 
   it('sits on the figure so it follows them about', function () {
@@ -2856,15 +2901,15 @@ describe('Telling players from NPCs', function () {
     var npc = build('npc');
     assert.ok(player.isPlayer, 'the player variant did not take');
     assert.ok(!npc.isPlayer, 'the NPC came out as a player');
-    assert.greater(player.extras.length, 3, 'a player has no distinguishing parts');
+    assert.greater(player.extras.length, 2, 'a player has no distinguishing parts');
     assert.equal(npc.extras.length, 0, 'an NPC picked up player gear');
   });
 
-  it('marks a player with something visible over their head', function () {
+  it('carries a shield bubble, hidden until it is needed', function () {
     var player = build('player');
-    assert.ok(player.marker, 'no overhead marker');
-    assert.greater(player.marker.position.y, 2, 'the marker is not above the head');
-    assert.ok(!build('npc').marker, 'an NPC has an overhead marker');
+    assert.ok(player.shield, 'a player has no shield to put up');
+    assert.ok(!player.shield.visible, 'the shield is up before anything happened');
+    assert.ok(!build('npc').shield, 'an NPC got a shield');
   });
 
   it('makes the two silhouettes different', function () {
@@ -2883,19 +2928,19 @@ describe('Telling players from NPCs', function () {
     }
     var pBox = visibleBox(player.root);
     var nBox = visibleBox(npc.root);
-    assert.greater(pBox.max.y - nBox.max.y, 0.2,
-                   'a player is no taller than an NPC, marker included');
     assert.greater(pBox.max.z - nBox.max.z, 0.05, 'a player has no pack on their back');
+    assert.greater(pBox.min.z - nBox.min.z, -0.9, 'the two are the same depth front to back');
+    assert.greater(player.extras.length, 2, 'a player carries no gear an NPC does not');
+    assert.equal(npc.extras.length, 0, 'an NPC picked up player gear');
   });
 
-  it('animates the marker so it catches the eye', function () {
+  it('turns the shield so it reads as a field, not a decal', function () {
     var player = build('player');
+    player.shield.visible = true;
     PB.poseFigure(player, { phase: 0, grounded: true, moving: true });
-    var y0 = player.marker.position.y;
-    var r0 = player.marker.rotation.y;
-    PB.poseFigure(player, { phase: 2, grounded: true, moving: true });
-    assert.ok(Math.abs(player.marker.position.y - y0) > 0.001, 'the marker does not bob');
-    assert.ok(Math.abs(player.marker.rotation.y - r0) > 0.001, 'the marker does not turn');
+    var r0 = player.shield.rotation.y;
+    PB.poseFigure(player, { phase: 6, grounded: true, moving: true });
+    assert.ok(Math.abs(player.shield.rotation.y - r0) > 0.001, 'the shield does not turn');
   });
 
   it('keeps NPC colours out of the band players use', function () {
@@ -3310,6 +3355,235 @@ describe('Performance', function () {
 });
 
 var _npcPoint = new THREE.Vector3();
+
+describe('Health packs', function () {
+  it('stands two of them in the arena, out of the cover', function () {
+    freshLevel();
+    assert.equal(g.medkits.length, 2, 'wrong number of packs');
+    var probe = new THREE.Vector3();
+    g.medkits.forEach(function (kit, i) {
+      probe.set(kit.x, 0.9, kit.z);
+      var buried = g.obstacleBoxes.some(function (b) { return b.distanceToPoint(probe) < 1; });
+      assert.ok(!buried, 'pack ' + i + ' is inside the cover');
+      assert.ok(Math.hypot(kit.x, kit.z) > 6, 'pack ' + i + ' is on top of the spawn');
+      assert.ok(kit.ready, 'pack ' + i + ' is not out');
+    });
+  });
+
+  it('draws one with a label over it', function () {
+    freshLevel();
+    var kit = g.medkits[0];
+    assert.ok(kit.view, 'the pack was never built');
+    assert.ok(kit.view.tag, 'the pack has no label');
+    assert.equal(kit.view.tag.text, 'HEALTH');
+    assert.ok(kit.view.tag.sprite.material.depthTest, 'the label reads through cover');
+    var inScene = false;
+    g.scene.traverse(function (o) { if (o === kit.view.group) inScene = true; });
+    assert.ok(inScene, 'the pack is not in the world');
+  });
+
+  it('puts a hurt player back to full when they walk over one', function () {
+    freshLevel();
+    g.setActive(true);
+    g.applyMedkits([1, 1]);
+    g.setHealth(3, 10);
+    var kit = g.medkits[0];
+    g.teleport(kit.x, g.cfg.eye, kit.z);
+    step(0.1);
+    assert.equal(g.state.health, 10, 'not put back to full');
+    assert.ok(!kit.ready, 'the pack is still standing there');
+    assert.ok(!kit.view.group.visible, 'a pack that has been taken is still drawn');
+  });
+
+  it('leaves the pack alone for somebody on full health', function () {
+    freshLevel();
+    g.setActive(true);
+    g.applyMedkits([1, 1]);
+    g.setHealth(10, 10);
+    var kit = g.medkits[1];
+    g.teleport(kit.x, g.cfg.eye, kit.z);
+    step(0.1);
+    assert.ok(kit.ready, 'a pack was taken for nothing');
+  });
+
+  it('brings a used one back after a while', function () {
+    freshLevel();
+    g.setActive(true);
+    g.applyMedkits([1, 1]);              // both out, whatever earlier tests did
+    g.setHealth(4, 10);
+    var kit = g.medkits[0];
+    g.teleport(kit.x, g.cfg.eye, kit.z);
+    step(0.1);
+    assert.ok(!kit.ready, 'never taken');
+    g.state.elapsed = kit.backAt + 0.1;
+    step(1 / 60);
+    assert.ok(kit.ready, 'the pack never came back');
+    assert.ok(kit.view.group.visible, 'it came back invisible');
+  });
+
+  it('takes the server word for which packs are out', function () {
+    freshLevel();
+    g.applyMedkits([0, 1]);
+    assert.ok(!g.medkits[0].ready, 'the first pack should be gone');
+    assert.ok(g.medkits[1].ready, 'the second should be out');
+    g.applyMedkits([1, 1]);
+    assert.ok(g.medkits[0].ready, 'the first never came back');
+  });
+});
+
+describe('Shields', function () {
+  it('counts down and says so', function () {
+    freshLevel();
+    var seen = 0;
+    g.on('shield', function () { seen++; });
+    g.setShield(3);
+    assert.equal(seen, 1, 'nothing was said about the shield going up');
+    assert.ok(g.shielded(), 'not shielded');
+    step(1);
+    assert.close(g.state.shield, 2, 0.1, 'the shield did not run down');
+    step(2.2);
+    assert.equal(g.state.shield, 0, 'the shield never ran out');
+    assert.ok(!g.shielded(), 'still shielded after it ran out');
+  });
+
+  it('counts the shield perk as protection too', function () {
+    freshLevel();
+    g.setShield(0);
+    assert.ok(!g.shielded(), 'shielded with nothing running');
+    g.grantPerk('shield');
+    assert.ok(g.shielded(), 'the perk does not protect');
+  });
+
+  it('hangs a bubble on a figure, hidden until it is up', function () {
+    var fig = PB.buildFigure({
+      geo: PB.figureGeometry(), shadows: false, variant: 'player',
+      color: new THREE.Color(0.3, 0.6, 0.9), trim: new THREE.Color(0.2, 0.3, 0.5),
+      accent: new THREE.Color(0, 0.8, 1),
+    });
+    assert.ok(fig.shield, 'no bubble');
+    assert.ok(!fig.shield.visible, 'the bubble is up from the start');
+    assert.ok(fig.shield.material.transparent, 'the bubble is solid');
+  });
+});
+
+describe('Lifetime statistics', function () {
+  function store() {
+    var data = {};
+    return {
+      getItem: function (k) { return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null; },
+      setItem: function (k, v) { data[k] = String(v); },
+      removeItem: function (k) { delete data[k]; },
+      raw: data,
+    };
+  }
+
+  it('starts empty', function () {
+    var career = PB.createCareer(store());
+    var all = career.all();
+    assert.equal(all.shotsFired, 0);
+    assert.equal(all.accuracy, 0);
+    assert.equal(all.sessions, 0);
+  });
+
+  it('adds up what happened since the last fold, and no more', function () {
+    var career = PB.createCareer(store());
+    career.fold({ shotsFired: 10, shotsHit: 6, bestScore: 400 });
+    assert.equal(career.all().shotsFired, 10);
+    career.fold({ shotsFired: 10, shotsHit: 6, bestScore: 400 });
+    assert.equal(career.all().shotsFired, 10, 'the same session was counted twice');
+    career.fold({ shotsFired: 14, shotsHit: 9, bestScore: 900 });
+    assert.equal(career.all().shotsFired, 14, 'the difference was not added on');
+    assert.equal(career.all().shotsHit, 9);
+    assert.close(career.all().accuracy, 9 / 14, 0.001, 'accuracy off the totals');
+  });
+
+  it('keeps the best of the bests rather than the latest', function () {
+    var career = PB.createCareer(store());
+    career.fold({ bestScore: 900, bestStreak: 7, longestShot: 22 });
+    career.fold({ bestScore: 300, bestStreak: 2, longestShot: 4 });
+    var all = career.all();
+    assert.equal(all.bestScore, 900, 'a worse score overwrote the best');
+    assert.equal(all.bestStreak, 7);
+    assert.equal(all.longestShot, 22);
+  });
+
+  it('survives a reload', function () {
+    var shared = store();
+    var first = PB.createCareer(shared);
+    first.fold({ shotsFired: 30, shotsHit: 20, kills: 3, deaths: 1 });
+    var second = PB.createCareer(shared);
+    var all = second.all();
+    assert.equal(all.shotsFired, 30, 'nothing came back from storage');
+    assert.equal(all.kills, 3);
+    assert.equal(all.deaths, 1);
+  });
+
+  it('counts a fresh page as one more session', function () {
+    var shared = store();
+    PB.createCareer(shared).fold({ shotsFired: 1 });
+    PB.createCareer(shared).fold({ shotsFired: 1 });
+    assert.equal(PB.createCareer(shared).all().sessions, 2, 'sessions not counted');
+  });
+
+  it('shrugs off rubbish in storage', function () {
+    var shared = store();
+    shared.setItem('paintball.career', '{"shotsFired":"lots","kills":-4,"bestScore":null}');
+    var all = PB.createCareer(shared).all();
+    assert.equal(all.shotsFired, 0, 'a nonsense total was kept');
+    assert.equal(all.kills, 0, 'a negative total was kept');
+    assert.equal(all.bestScore, 0);
+  });
+
+  it('never lets a session fold in a number that went backwards', function () {
+    // a reset mid-session must not subtract from the career
+    var career = PB.createCareer(store());
+    career.fold({ shotsFired: 40 });
+    career.fold({ shotsFired: 0 });
+    assert.equal(career.all().shotsFired, 40, 'the career went down');
+  });
+});
+
+describe('Settings that were actually chosen', function () {
+  function store(seed) {
+    var data = seed || {};
+    return {
+      getItem: function (k) { return Object.prototype.hasOwnProperty.call(data, k) ? data[k] : null; },
+      setItem: function (k, v) { data[k] = String(v); },
+      raw: data,
+    };
+  }
+
+  it('knows a default from a choice', function () {
+    var opts = PB.createOptions(store());
+    assert.equal(opts.get('name'), 'player', 'no default name');
+    assert.ok(!opts.has('name'), 'a name nobody picked reads as chosen');
+    opts.set('name', 'player');
+    assert.ok(opts.has('name'), 'picking the same as the default did not count');
+  });
+
+  it('remembers the choice across a reload', function () {
+    var shared = store();
+    PB.createOptions(shared).set('name', 'ana');
+    var back = PB.createOptions(shared);
+    assert.ok(back.has('name'), 'the choice did not survive');
+    assert.equal(back.get('name'), 'ana');
+  });
+
+  it('forgets the choices on a reset', function () {
+    var opts = PB.createOptions(store());
+    opts.set('name', 'ana');
+    opts.reset();
+    assert.ok(!opts.has('name'), 'a reset left the name looking chosen');
+    assert.equal(opts.get('name'), 'player');
+  });
+
+  it('carries a fight-other-players switch, on by default', function () {
+    var opts = PB.createOptions(store());
+    assert.equal(opts.get('pvp'), true, 'players start out of the fight');
+    opts.set('pvp', false);
+    assert.equal(opts.get('pvp'), false);
+  });
+});
 
 describe('HUD wiring', function () {
   it('emits ammo events that a HUD can render', function () {

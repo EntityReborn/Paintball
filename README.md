@@ -40,21 +40,33 @@ along one wall — walk up the stairs, shoot from the
 rail, or drop through the gap in the middle. A few pieces of cover **slide back
 and forth**, and a standing jump clears the low cover.
 
-**Perks** appear from time to time and last 15 seconds each:
+**Perks** appear from time to time, each wearing its name so you know what you
+are running for:
 
-| Perk | Effect |
-| --- | --- |
-| RAPID FIRE | twice the rate of fire |
-| SPRINTER | around half again as fast |
-| BIG CLIP | double the magazine |
-| DOUBLE JUMP | one extra jump in the air |
+| Perk | Effect | Lasts |
+| --- | --- | --- |
+| RAPID FIRE | twice the rate of fire | 15s |
+| SPRINTER | around half again as fast | 15s |
+| BIG CLIP | double the magazine | 15s |
+| DOUBLE JUMP | one extra jump in the air | 15s |
+| SHIELD | nothing can hurt you | 6s |
 
 Walk over one to collect it; what you are holding is listed above the ammo
-readout with the time left.
+readout with the time left. The shield is deliberately the short one — there is
+no partial version of not being hurt, and fifteen seconds of it is most of a
+firefight.
 
-Pausing shows a career summary: accuracy, shots fired, hits and misses, targets
-broken, NPCs down, best streak, longest shot and distance walked (both in feet),
-jumps, reloads, time played, share of time sighted, and points per shot.
+**Two health packs** stand in the arena, in the same two spots for everyone.
+Walk over one while hurt and it puts you straight back to full; it is gone for
+twenty-five seconds after that, and then it is back.
+
+Pausing shows the figures in two columns — this session, and every session
+before it: accuracy, shots fired, hits and misses, targets broken, NPCs down,
+kills and deaths, best streak, longest shot and distance walked (both in feet),
+jumps, reloads, time played, share of time sighted, and points per shot. The
+lifetime column lives in this browser's local storage and is folded in while you
+play, when you pause, and on the way out, so closing the tab does not lose the
+last few minutes.
 
 ## Multiplayer
 
@@ -63,8 +75,8 @@ plain `index.html` still boots offline with its own random map and no server at
 all.
 
 Other players are easy to pick out: they carry a visor, a pack and a weapon,
-wear a floating marker overhead with their name above it, and are coloured from
-the cool half of the wheel. NPCs get the warm half and none of the gear.
+wear their name over their head, and are coloured from the cool half of the
+wheel. NPCs get the warm half and none of the gear.
 
 **Other players can be shot, and shoot back.** It takes ten hits to put someone
 down and the kill is worth 1000. A hurt player wears a health bar over their
@@ -72,17 +84,38 @@ head — green, then amber, then red — which appears only once they have taken
 hit, so a full-health player is not advertising anything. Your own health sits
 in the bottom-left corner and the screen flashes red when you are hit. Health
 comes back on its own at a point every two seconds, and being hit restarts that
-wait, so a firefight cannot be won by standing still. The dead spend two and a
-half seconds on the floor — no shooting, no moving, no body in the world for
-anyone else to shoot — and come back whole, somewhere clear and well away from
-whoever is still standing. Players arrive the same way, so nobody spawns inside
-anybody else.
+wait, so a firefight cannot be won by standing still. The dead get a screen
+saying who did it and how long until they are back; they spend two and a half
+seconds on the floor — no shooting, no moving, no body in the world for anyone
+else to shoot — and come back whole, somewhere clear and well away from whoever
+is still standing. Players arrive the same way, so nobody spawns inside anybody
+else.
+
+**Three seconds of protection** come with every arrival and every respawn, drawn
+as a bubble around the figure. Without it the player who killed you is still
+standing where they were, looking at the spot you are about to appear in, and a
+respawn is a free second kill.
+
+**Nobody has to fight.** There is a switch in the options: turn it off and you
+can neither hurt other players nor be hurt by them, and rounds carry on through
+you rather than stopping on you. Everyone else sees you see-through, so it is
+obvious at a glance that shooting you is a waste of a round. It takes effect
+across the room at once, as does changing your name.
+
+Names and health bars are drawn behind whatever is in front of them. Floating
+them over the world regardless would be a wallhack: you could read where
+somebody was through solid cover.
 
 ```bash
 npm start                       # server + client on :8080
 ```
 
 then open `http://localhost:8080/?mp` in two windows.
+
+A player who has never chosen a name is asked for one before they join — it goes
+over their head for everyone else in the room, so it is worth asking for rather
+than putting "player" there and hoping. Offline nobody sees it, so nobody is
+stopped.
 
 **Each session gets its own map.** When the first player joins an empty room
 the world is rebuilt: a new arena, level one, no bodies and nothing left on the
@@ -213,12 +246,12 @@ a web server.
 
 Two layers, both driving the real engine in a real WebGL context.
 
-**Browser suite** (`tests/tests.html`) — 221 tests over bootstrap, world
+**Browser suite** (`tests/tests.html`) — 243 tests over bootstrap, world
 generation, targets, rendering, movement, collision, shooting, breaking, levels,
 input, the reload animation, NPCs, view angles, zoom, drifting targets, scoring,
 score indicators, player statistics, telling players from NPCs, the balcony,
 moving cover, perks, jumping onto cover, settings, the debug overlays, name
-tags, performance, and HUD wiring. Rendering is
+tags, health packs, shields, lifetime statistics, performance, and HUD wiring. Rendering is
 checked by reading pixels back off the canvas; input by dispatching real
 `KeyboardEvent` / `MouseEvent` objects. Open it in a browser to watch it run, or
 let the driver do it.
@@ -227,15 +260,17 @@ let the driver do it.
 plays the game through Chrome's own input pipeline (trusted keyboard and mouse
 events, real pointer lock) and writes screenshots to `tests/shots/`.
 
-**Server tests** (`tests/server.test.js`) — 58 node tests over the headless
+**Server tests** (`tests/server.test.js`) — 70 node tests over the headless
 engine, seed determinism, the room's plausibility rules, spawn placement,
 server-side shot validation and lag compensation, the player-versus-player rules
-(ten hits to kill, healing, respawning, no shooting yourself or the dead),
+(ten hits to kill, healing, respawning, spawn protection, the shield, health
+packs, opting out of the fight, no shooting yourself or the dead), renaming,
 snapshot cadence and size, and the static file server's path handling.
 
 **Menus** (`tests/ui.js`) — drives the pause-screen panels in a real browser:
 the buttons open their panels without starting the game, the debug toggles put
-real geometry in the scene, and settings survive a reload.
+real geometry in the scene, settings survive a reload, the lifetime figures
+outlive the page, and a player with no name is asked for one before joining.
 
 **Multiplayer** (`tests/multiplayer.js`) — starts the server, opens two real
 Chrome windows against it, walks one player with genuine key presses and checks
@@ -244,7 +279,9 @@ both built the same arena, and that a teleport gets rejected and corrected. It
 also runs one player at the other and kills them: the health drops on the
 victim's own screen, the bar appears over their head on the shooter's, a point
 comes back on its own, the tenth hit pays 1000 and takes the body out of the
-world, and they return on full health somewhere else.
+world, the victim is told who did it, and they return on full health somewhere
+else. Then a rename crossing the room, a health pack collected by one player and
+gone for both, and somebody stepping out of the fight and back into it.
 
 ```bash
 npm run test:server   # node tests
@@ -313,6 +350,26 @@ re-entering the window rather than a real flick.
   against the static obstacles but never against the other sliders, so two
   could share ground — and a player riding one got handed to the other as it
   crossed underneath.
+- **A shot could pass straight through a target dead ahead.** The targets are
+  icosahedra, and they sat square to the world, so whole edges lay in the planes
+  x=0 and z=0 through the centre. A round fired exactly down one of those axes —
+  a player walking a wall does it constantly — met the seam between two
+  triangles, and the intersection test dropped both and reported a clean miss.
+  One in twelve dead-centre rays missed. The targets are tilted a few degrees
+  now, which is invisible and makes it none in five hundred.
+- **Honest running was being called a teleport.** State messages do not arrive
+  evenly: a hiccup anywhere along the way delivers three or four of them in the
+  same millisecond, and the speed check judged each against the gap since the
+  last one — finding a player who had moved 0.85u "in 0.001s" and snapping them
+  back mid-stride. It is a running allowance now: it fills at sprint speed and
+  holds about a third of a second of it, matching the rewind window, so a burst
+  spends what the quiet moment before it earned.
+- **A shot on a fresh level could miss everything.** `startLevel` spawned the
+  targets and NPCs but never put them into world space — the first frame did
+  that, which is fine in a browser and wrong on a server, where a round can be
+  adjudicated before any frame is drawn.
+- **Accuracy climbed past 100%.** A hit on another player was counted twice,
+  once where the outcome was applied and once inside the shared `recordHit`.
 - **A level could not be finished because one target was invisible.** The
   client only ever synced targets one way — it broke what the server said was
   gone, but had no way to put back one it had destroyed by mistake. A hit

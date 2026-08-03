@@ -60,10 +60,11 @@ PB.buildFigure = function (opts) {
 
   var materials = [body, trim];
   var extras = [];
+  var shield = null;
 
   /* A player has to be readable as a player at a glance — the same box body in
    * a different colour is not enough when NPCs come in every hue. Players get
-   * a visor, a pack on the back, a weapon in hand and a marker overhead. */
+   * a visor, a pack on the back and a weapon in hand. */
   if (isPlayer) {
     var visorMat = new THREE.MeshStandardMaterial({
       color: 0x101820, roughness: 0.25, metalness: 0.6,
@@ -91,60 +92,78 @@ PB.buildFigure = function (opts) {
     armR.add(held);
     extras.push(held);
 
-    // a floating marker so a player reads as one across the arena
-    var markMat = new THREE.MeshBasicMaterial({
-      color: opts.accent || 0x39d0ff, transparent: true, opacity: 0.85,
-      depthTest: false,
+    /* A bubble that goes up while they cannot be hurt — just after they
+     * respawn, or while they are holding the shield. Additive and unlit so it
+     * reads as a field rather than another piece of kit. */
+    var shieldMat = new THREE.MeshBasicMaterial({
+      color: 0x8ef2ff, transparent: true, opacity: 0.22,
+      depthWrite: false, side: THREE.DoubleSide,
     });
-    materials.push(markMat);
-    var mark = new THREE.Mesh(geo.marker, markMat);
-    mark.position.y = 2.25;
-    mark.renderOrder = 4;
-    root.add(mark);
-    extras.push(mark);
-
-    root.userData.marker = mark;
+    shieldMat.name = 'shieldMat';       // never restyled with the body
+    materials.push(shieldMat);
+    shield = new THREE.Mesh(geo.shield, shieldMat);
+    shield.position.y = 0.95;
+    shield.visible = false;
+    shield.name = 'shield';
+    root.add(shield);
   }
 
   return {
     root: root, torso: torso, head: head,
     armL: armL, armR: armR, legL: legL, legR: legR, hitbox: hitbox,
-    marker: root.userData.marker || null,
+    shield: shield,
     isPlayer: isPlayer,
     extras: extras,
     materials: materials,
   };
 };
 
-/* A name that floats over a figure. Drawn once into a canvas: the text never
- * changes for the life of a player, so there is nothing to update per frame
- * beyond keeping it upright. */
-PB.createNameTag = function (text, colour) {
+/* A name that floats over a figure or a pickup. Drawn into a canvas and
+ * redrawn only when the text changes, which is rare — a player renaming
+ * themselves, and nothing else. */
+PB.createNameTag = function (text, colour, opts) {
   var THREE = global.THREE;
+  var o = opts || {};
   var canvas = document.createElement('canvas');
   canvas.width = 256;
   canvas.height = 64;
-  var c = canvas.getContext('2d');
-  c.font = 'bold 34px ui-monospace, Menlo, Consolas, monospace';
-  c.textAlign = 'center';
-  c.textBaseline = 'middle';
-  c.lineWidth = 8;
-  c.lineJoin = 'round';
-  c.strokeStyle = 'rgba(0,0,0,0.85)';
-  c.strokeText(text, 128, 34);
-  c.fillStyle = colour || '#e6edf3';
-  c.fillText(text, 128, 34);
-
   var tex = new THREE.CanvasTexture(canvas);
+  /* Depth-tested, so a name is hidden by whatever the player is hidden by.
+   * Drawn without writing depth, so two tags never punch holes in each other.
+   * These used to ignore depth entirely, which turned every tag into a
+   * wallhack: you could read where somebody was through solid cover. */
   var mat = new THREE.SpriteMaterial({
-    map: tex, transparent: true, depthTest: false, depthWrite: false,
+    map: tex, transparent: true, depthTest: true, depthWrite: false,
   });
   var sprite = new THREE.Sprite(mat);
-  sprite.scale.set(2.2, 0.55, 1);
-  sprite.position.y = 2.05;
+  sprite.scale.set(o.scale || 2.2, (o.scale || 2.2) / 4, 1);
+  sprite.position.y = o.y === undefined ? 2.05 : o.y;
   sprite.renderOrder = 7;
   sprite.name = 'nameTag';
-  return { sprite: sprite, texture: tex, material: mat, text: text };
+
+  var tag = { sprite: sprite, texture: tex, material: mat, text: '' };
+
+  tag.set = function (next) {
+    var s = (next === undefined || next === null ? '' : String(next));
+    if (s === tag.text) return tag;
+    tag.text = s;
+    var c = canvas.getContext('2d');
+    c.clearRect(0, 0, 256, 64);
+    c.font = 'bold ' + (o.font || 34) + 'px ui-monospace, Menlo, Consolas, monospace';
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.lineWidth = 8;
+    c.lineJoin = 'round';
+    c.strokeStyle = 'rgba(0,0,0,0.85)';
+    c.strokeText(s, 128, 34);
+    c.fillStyle = colour || '#e6edf3';
+    c.fillText(s, 128, 34);
+    tex.needsUpdate = true;
+    return tag;
+  };
+
+  tag.set(text);
+  return tag;
 };
 
 /* A health bar to float over somebody's head. Redrawn only when the number
@@ -155,8 +174,10 @@ PB.createHealthBar = function () {
   canvas.width = 128;
   canvas.height = 20;
   var tex = new THREE.CanvasTexture(canvas);
+  // depth-tested for the same reason the name is: no reading somebody's
+  // health through the crate they are hiding behind
   var mat = new THREE.SpriteMaterial({
-    map: tex, transparent: true, depthTest: false, depthWrite: false,
+    map: tex, transparent: true, depthTest: true, depthWrite: false,
   });
   var sprite = new THREE.Sprite(mat);
   sprite.scale.set(1.5, 0.23, 1);
@@ -205,7 +226,7 @@ PB.figureGeometry = function () {
     visor: new THREE.BoxGeometry(0.30, 0.10, 0.04),
     pack: new THREE.BoxGeometry(0.34, 0.38, 0.16),
     weapon: new THREE.BoxGeometry(0.09, 0.09, 0.46),
-    marker: new THREE.OctahedronGeometry(0.13, 0),
+    shield: new THREE.SphereGeometry(1.05, 14, 10),
   };
 };
 
@@ -213,10 +234,9 @@ PB.figureGeometry = function () {
  * step with the ground whether the figure is an NPC deciding its own path or a
  * remote player being interpolated between snapshots. */
 PB.poseFigure = function (fig, o) {
-  // the overhead marker bobs and spins so it catches the eye
-  if (fig.marker) {
-    fig.marker.rotation.y = (o.phase || 0) * 0.5;
-    fig.marker.position.y = 2.25 + Math.sin((o.phase || 0) * 0.8) * 0.06;
+  // the shield turns slowly so it reads as a field rather than a decal
+  if (fig.shield && fig.shield.visible) {
+    fig.shield.rotation.y = (o.phase || 0) * 0.25;
   }
   if (o.grounded) {
     var swing = Math.sin(o.phase);

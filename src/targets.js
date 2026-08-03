@@ -25,6 +25,17 @@ PB.createTargets = function (ctx) {
     });
     var mesh = new THREE.Mesh(targetGeo, mat);
     mesh.position.set(x, y, z);
+    /* Tilted off the axes, and by the same fixed amount everywhere so both
+     * sides of a networked game still agree exactly.
+     *
+     * An icosahedron sitting square to the world has whole edges lying in the
+     * planes x=0 and z=0 through its centre. A shot straight down one of those
+     * axes — a player walking a wall, which is common — meets the seam between
+     * two triangles, and the intersection test can drop both and report a
+     * clean miss on a target dead ahead. A few degrees of tilt means no shot
+     * ever runs along a seam.
+     */
+    mesh.rotation.set(0.21, 0.37, 0.13);
     mesh.castShadow = true;
     mesh.name = 'target';
     scene.add(mesh);

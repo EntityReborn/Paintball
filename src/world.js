@@ -307,6 +307,109 @@ PB.createWorld = function (ctx) {
     }
   })();
 
+  /* ---------------------------------------------------------- health packs */
+  /* Fixed spots, seeded like everything else, so both sides of a networked
+   * game know where they are without a word being sent about it. Only whether
+   * one is on the ground right now has to travel. */
+  var medkits = [];
+
+  var kitMats = cfg.headless ? null : {
+    box: new THREE.MeshStandardMaterial({
+      color: 0xf2f5f7, roughness: 0.5, flatShading: true,
+    }),
+    cross: new THREE.MeshStandardMaterial({
+      color: 0xff5a5f, emissive: 0xff2d33, emissiveIntensity: 0.55, roughness: 0.4,
+    }),
+  };
+  var kitGeo = cfg.headless ? null : {
+    box: new THREE.BoxGeometry(0.8, 0.5, 0.8),
+    bar: new THREE.BoxGeometry(0.5, 0.12, 0.14),
+  };
+
+  function buildKit(x, y, z) {
+    if (cfg.headless) return null;
+    var group = new THREE.Group();
+    var box = new THREE.Mesh(kitGeo.box, kitMats.box);
+    box.castShadow = true;
+    group.add(box);
+    // a red cross on the lid, two bars of the same geometry
+    var barA = new THREE.Mesh(kitGeo.bar, kitMats.cross);
+    barA.position.y = 0.26;
+    var barB = new THREE.Mesh(kitGeo.bar, kitMats.cross);
+    barB.position.y = 0.26;
+    barB.rotation.y = Math.PI / 2;
+    group.add(barA, barB);
+    var tag = PB.createNameTag('HEALTH', '#ff8b8f', { y: 0.95, scale: 1.9, font: 30 });
+    group.add(tag.sprite);
+    group.position.set(x, y, z);
+    group.name = 'medkit';
+    scene.add(group);
+    return { group: group, tag: tag };
+  }
+
+  (function buildMedkits() {
+    var guard = 0;
+    while (medkits.length < cfg.medkits && guard++ < 3000) {
+      var x = (rand() - 0.5) * (cfg.arena - 12);
+      var z = (rand() - 0.5) * (cfg.arena - 12);
+      if (Math.hypot(x, z) < 8) continue;                  // not on the spawn
+      if (!isClearOfKeepOuts(x, z, 2)) continue;           // not on the stairs
+      var probe = new THREE.Vector3(x, 0.9, z);
+      var clash = false;
+      for (var i = 0; i < obstacleBoxes.length; i++) {
+        if (obstacleBoxes[i].distanceToPoint(probe) < 2) { clash = true; break; }
+      }
+      if (clash) continue;
+      for (var m = 0; m < movers.length; m++) {
+        // nothing under a slider: it would be run over and hidden
+        if (Math.hypot(movers[m].base.x - x, movers[m].base.z - z) < movers[m].amp + 3) {
+          clash = true; break;
+        }
+      }
+      if (clash) continue;
+      for (var k = 0; k < medkits.length; k++) {
+        if (Math.hypot(medkits[k].x - x, medkits[k].z - z) < cfg.arena / 3) {
+          clash = true; break;                             // keep the two apart
+        }
+      }
+      if (clash) continue;
+
+      medkits.push({
+        index: medkits.length,
+        x: x, y: 0.45, z: z,
+        ready: true,
+        phase: rand() * 6.28,
+        view: buildKit(x, 0.45, z),
+      });
+    }
+  })();
+
+  // Bob them, and show or hide one that has just been taken or come back.
+  function updateMedkits(dt) {
+    for (var i = 0; i < medkits.length; i++) {
+      var kit = medkits[i];
+      kit.phase += dt;
+      if (!kit.view) continue;
+      kit.view.group.visible = kit.ready;
+      if (!kit.ready) continue;
+      kit.view.group.rotation.y += dt * 0.9;
+      kit.view.group.position.y = kit.y + Math.sin(kit.phase * 2) * 0.12;
+      kit.view.group.updateMatrixWorld(true);
+    }
+  }
+
+  // Whichever pack is on the ground within reach of this spot.
+  function medkitAt(x, z, feetY) {
+    for (var i = 0; i < medkits.length; i++) {
+      var kit = medkits[i];
+      if (!kit.ready) continue;
+      if (Math.hypot(kit.x - x, kit.z - z) > cfg.medkitRadius) continue;
+      if (typeof feetY === 'number' && Math.abs(feetY - (kit.y - 0.45)) > 2.2) continue;
+      return kit;
+    }
+    return null;
+  }
+
   var _moverPos = new THREE.Vector3();
 
   // Position every slider for world time `t`, and refresh its collider.
@@ -351,6 +454,9 @@ PB.createWorld = function (ctx) {
       var pb = balconyParts[p].box;
       mix([pb.min.x, pb.min.y, pb.min.z, pb.max.x, pb.max.y, pb.max.z]);
     }
+    // the health packs are part of the layout too, and a disagreement about
+    // where they are is a disagreement about where healing happens
+    for (var k = 0; k < medkits.length; k++) mix([medkits[k].x, medkits[k].z]);
     return (acc >>> 0).toString(16) + ':' + obstacleBoxes.length + ':' + movers.length;
   }
 
@@ -360,6 +466,9 @@ PB.createWorld = function (ctx) {
     balconyParts: balconyParts,
     movers: movers,
     updateMovers: updateMovers,
+    medkits: medkits,
+    updateMedkits: updateMedkits,
+    medkitAt: medkitAt,
     colliders: colliders,
     solidMeshes: solidMeshes,
     obstacleBoxes: obstacleBoxes,

@@ -23,9 +23,14 @@ const REWIND_MS = 350;
 const MAX_REWIND_MS = 700;
 
 /* Most a player may move in one go having stood still long enough to earn it.
- * Roughly a third of a second of running: enough to swallow a bunch of state
- * messages arriving together, far too little to cross the map with. */
-const MOVE_BURST = 2.5;
+ *
+ * Sized to match the rewind window: the server is already willing to believe a
+ * client is 350ms behind when it shoots, so it has to be willing to believe
+ * the same client's movement arrived 350ms late. At a sprint that is about
+ * four units. Tighter than this and a client that stalls for a couple of
+ * frames — which a busy machine does — gets snapped back mid-stride. It is
+ * still nowhere near enough to cross a sixty-unit arena with. */
+const MOVE_BURST = 4;
 
 class Room {
   constructor(opts = {}) {
@@ -74,7 +79,7 @@ class Room {
     const id = this.nextId++;
     const player = {
       id,
-      name: (name || 'player').toString().slice(0, 16),
+      name: cleanName(name),
       x: 0, y: this.game.cfg.eye, z: 0,
       yaw: 0, pitch: 0,
       moving: false, grounded: true, vy: 0,
@@ -85,8 +90,10 @@ class Room {
       violations: 0,
       joinedAt: Date.now(),
       score: 0,
+      pvp: true,                 // players may opt out of hurting or being hurt
       health: 0,                 // set from the world's config just below
       deadUntil: 0,              // waiting to respawn
+      shieldUntil: 0,            // no damage until this passes
       healAt: 0,                 // when the next point of health is due
       kills: 0,
       deaths: 0,
@@ -95,6 +102,9 @@ class Room {
     };
     player.health = this.game.cfg.playerHealth;
     player.healAt = Date.now() + this.game.cfg.healEvery * 1000;
+    // the same protection the dead come back with: nobody arrives in a room
+    // they cannot see yet and gets shot before the first frame is drawn
+    player.shieldUntil = Date.now() + this.game.cfg.spawnShield * 1000;
     this.players.set(id, player);
     // arrive somewhere of your own; `hello` carries it back to the client
     const at = this.clearSpot(player);
@@ -145,7 +155,34 @@ class Room {
     return {
       id: p.id, name: p.name, x: p.x, y: p.y, z: p.z, yaw: p.yaw,
       score: p.score, health: p.health, maxHealth: this.game.cfg.playerHealth,
+      pvp: p.pvp,
     };
+  }
+
+  /* What a player calls themselves, and whether they are in the fight. Both
+   * change mid-match, and everyone else has to be told at once — a name over
+   * somebody's head that is a match out of date is worse than none. */
+  setPrefs(id, prefs) {
+    const player = this.players.get(id);
+    if (!player) return null;
+    if (prefs && typeof prefs.name === 'string') {
+      player.name = cleanName(prefs.name);
+    }
+    if (prefs && typeof prefs.pvp === 'boolean') {
+      player.pvp = prefs.pvp;
+    }
+    return { t: 'prefs', id: player.id, name: player.name, pvp: player.pvp };
+  }
+
+  // Can `shooter` hurt `victim` at all? Either one opting out is enough.
+  canHurt(shooter, victim) {
+    if (!shooter || !victim || shooter === victim) return false;
+    return shooter.pvp !== false && victim.pvp !== false;
+  }
+
+  shielded(player, now = Date.now()) {
+    return now < player.shieldUntil ||
+           this.game.perkSystem.held(player, 'shield');
   }
 
   /* ---------------------------------------------------------- being shot */
@@ -165,9 +202,13 @@ class Room {
     const ray = new THREE.Ray(origin, dir);
     const box = new THREE.Box3();
     const point = new THREE.Vector3();
+    const shooter = this.players.get(exceptId);
     let best = null;
     for (const p of this.players.values()) {
       if (p.id === exceptId || p.deadUntil) continue;
+      // somebody out of the fight is not in the way of it either: the round
+      // carries on to whatever is behind them
+      if (!this.canHurt(shooter, p)) continue;
       this.playerBox(p, box);
       if (!ray.intersectBox(box, point)) continue;
       const d = origin.distanceTo(point);
@@ -181,6 +222,10 @@ class Room {
   /* Take a hit off somebody, and hand out the kill if that was the last one. */
   damage(victim, shooter, now = Date.now()) {
     if (victim.deadUntil) return null;
+    if (!this.canHurt(shooter, victim)) return { blocked: 'pvp', killed: false, health: victim.health };
+    if (this.shielded(victim, now)) {
+      return { blocked: 'shield', killed: false, health: victim.health };
+    }
     victim.health -= 1;
     victim.healAt = now + this.game.cfg.healEvery * 1000;
 
@@ -223,7 +268,7 @@ class Room {
     return best || { x: 0, z: 0 };
   }
 
-  respawn(player) {
+  respawn(player, now = Date.now()) {
     const g = this.game;
     const at = this.clearSpot(player);
     player.x = at.x;
@@ -231,7 +276,11 @@ class Room {
     player.z = at.z;
     player.health = g.cfg.playerHealth;
     player.deadUntil = 0;
-    player.lastStateAt = Date.now();
+    player.lastStateAt = now;
+    /* A moment of protection on the way back in. Without it the player who
+     * killed you is still standing where they were, looking at the spot you
+     * are about to appear in, and a respawn is a free second kill. */
+    player.shieldUntil = player.lastStateAt + g.cfg.spawnShield * 1000;
     player.moveCredit = MOVE_BURST;
     /* States sent before the client heard about the respawn still describe the
      * spot they died on. Those are refused — the server owns where they came
@@ -241,6 +290,28 @@ class Room {
     return at;
   }
 
+  /* Health packs. The arena is seeded, so every client already knows where the
+   * two of them stand; the server owns whether one is there to be taken and
+   * who took it. */
+  updateMedkits(now = Date.now()) {
+    const g = this.game;
+    const events = [];
+    for (const kit of g.medkits) {
+      if (!kit.ready && now >= kit.backAt) kit.ready = true;
+    }
+    for (const p of this.players.values()) {
+      if (p.deadUntil || p.health >= g.cfg.playerHealth) continue;
+      const kit = g.medkitAt(p.x, p.z, p.y - g.cfg.eye);
+      if (!kit) continue;
+      kit.ready = false;
+      kit.backAt = now + g.cfg.medkitRespawn * 1000;
+      p.health = g.cfg.playerHealth;
+      p.healAt = now + g.cfg.healEvery * 1000;
+      events.push({ t: 'medkit', by: p.id, index: kit.index, health: p.health });
+    }
+    return events;
+  }
+
   /* Health comes back a point at a time, and the dead come back whole. */
   updateHealth(now = Date.now()) {
     const events = [];
@@ -248,7 +319,7 @@ class Room {
     for (const p of this.players.values()) {
       if (p.deadUntil) {
         if (now >= p.deadUntil) {
-          const at = this.respawn(p);
+          const at = this.respawn(p, now);
           events.push({ t: 'respawn', id: p.id, x: r3(at.x), y: r3(cfg.eye), z: r3(at.z),
                         health: p.health });
         }
@@ -367,7 +438,7 @@ class Room {
       g.perkSystem.remove(perk);
       picked.push({
         t: 'perk', by: player.id, kind: perk.kind, id: perk.id,
-        label: perk.def.label, duration: g.cfg.perkDuration,
+        label: perk.def.label, duration: g.perkSystem.durationOf(perk.kind),
       });
     }
     return picked;
@@ -467,13 +538,13 @@ class Room {
       const outcome = this.damage(victim, player, now);
       event.kind = 'player';
       event.victim = victim.id;
+      event.victimName = victim.name;
+      event.killerName = player.name;
       event.victimHealth = victim.health;
       event.killed = !!(outcome && outcome.killed);
-      player.stats.shotsHit++;
-      if (event.killed) {
-        event.victimName = victim.name;
-        event.killerName = player.name;
-      }
+      // a round that hit a shield landed, but it did nothing
+      event.blocked = (outcome && outcome.blocked) || null;
+      if (!event.blocked) player.stats.shotsHit++;
     } else if (hit.npc && hit.npc.alive) {
       event.kind = 'npc';
       event.index = g.npcs.indexOf(hit.npc);
@@ -614,6 +685,7 @@ class Room {
         round(p.x), round(p.y), round(p.z),
         round(p.yaw), p.moving ? 1 : 0, p.grounded ? 1 : 0, round(p.vy),
         p.score, p.health, p.deadUntil ? 1 : 0,
+        this.shielded(p) ? 1 : 0, p.pvp === false ? 0 : 1,
       ])),
       npcs: g.npcs.map(n => ([
         round(n.root.position.x), round(n.root.position.y), round(n.root.position.z),
@@ -628,6 +700,8 @@ class Room {
       // has to travel for every client to have them in the same place
       wt: round(g.state.worldTime),
       perks: g.perkSystem.describe(),
+      // where the packs are is seeded; only whether they are there travels
+      kits: g.medkits.map(k => (k.ready ? 1 : 0)),
     };
   }
 
@@ -641,6 +715,7 @@ class Room {
       this.game.perkSystem.tickHolder(player, dt);
     }
     for (const msg of this.collectPerks(now)) this.onBroadcast(msg);
+    for (const msg of this.updateMedkits(now)) this.onBroadcast(msg);
     for (const msg of this.updateHealth(now)) this.onBroadcast(msg);
 
     this.sinceSnapshot += dtMs;
@@ -676,5 +751,14 @@ function round(n) {
   return Math.round(n * 1000) / 1000;
 }
 const r3 = round;
+
+/* The client's own sanitiser, run again here. Never trust the name a socket
+ * sends: it goes over every other player's head, and the rule for what may be
+ * in one lives in exactly one place. */
+function cleanName(raw) {
+  const PB = globalThis.PB;
+  if (PB && PB.cleanOption) return PB.cleanOption('name', raw);
+  return String(raw || 'player').replace(/[^A-Za-z0-9 _-]/g, '').trim().slice(0, 16) || 'player';
+}
 
 module.exports = { Room, SIM_HZ, SNAPSHOT_HZ, REWIND_MS, MAX_REWIND_MS, MOVE_BURST };
