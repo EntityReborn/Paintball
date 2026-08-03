@@ -8,7 +8,8 @@ const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
 const { createHeadlessGame } = require('../server/engine.js');
-const { Room, REWIND_MS, MAX_REWIND_MS, MOVE_BURST } = require('../server/room.js');
+const { Room, SIM_HZ, SNAPSHOT_HZ, REWIND_MS, MAX_REWIND_MS, MOVE_BURST } =
+  require('../server/room.js');
 
 /* ------------------------------------------------------------- headless */
 test('the browser engine runs in node with no renderer or DOM', () => {
@@ -152,9 +153,27 @@ test('the room ticks and emits snapshots at the snapshot rate', () => {
   room.join('ana');
   for (let i = 0; i < 30; i++) room.step(1000 / 30);   // one second of ticks
   assert.equal(room.tick, 30, 'tick count');
-  assert.ok(sent.length >= 18 && sent.length <= 22, `expected ~20 snapshots, got ${sent.length}`);
+  const snaps = sent.filter(m => m.t === 'snapshot');
+  assert.ok(snaps.length >= SNAPSHOT_HZ - 2 && snaps.length <= SNAPSHOT_HZ + 2,
+            `expected ~${SNAPSHOT_HZ} snapshots, got ${snaps.length}`);
   assert.equal(sent[0].t, 'snapshot');
   assert.ok(sent[0].players.length === 1);
+});
+
+test('snapshots leave the server evenly spaced', () => {
+  /* They used to come 33ms apart, then 67ms, then 33ms: a 20Hz snapshot rate
+   * does not divide into a 30Hz tick, so the accumulator fired on alternate
+   * ticks. Clients size their buffer on the gap between snapshots, and that
+   * wobble was enough to empty it — the other player froze and then jumped. */
+  const at = [];
+  let clock = 0;
+  const room = new Room({ seed: 1, onBroadcast: m => { if (m.t === 'snapshot') at.push(clock); } });
+  room.join('ana');
+  for (let i = 0; i < 60; i++) { clock += 1000 / SIM_HZ; room.step(1000 / SIM_HZ); }
+
+  const gaps = at.slice(1).map((v, i) => v - at[i]);
+  const worst = Math.max(...gaps) - Math.min(...gaps);
+  assert.ok(worst < 5, `snapshot spacing wanders by ${worst.toFixed(1)}ms: ${gaps.join(', ')}`);
 });
 
 test('snapshots stay small enough to send 20 times a second', () => {

@@ -11,8 +11,20 @@
 
 var PB = global.PB = global.PB || {};
 
-var SEND_HZ = 30;
-var INTERP_MS = 110;          // render remote motion this far behind arrival
+var SEND_HZ = 60;             // our own position, upstream
+
+/* How far behind the newest snapshot everyone else is drawn.
+ *
+ * This has to cover the gap between snapshots plus however unevenly they turn
+ * up, or the buffer runs dry and a remote player freezes until the next one
+ * lands. It used to be a flat 110ms, picked for the worst case and paid for by
+ * everybody all the time. Now it is measured: the floor is one snapshot
+ * interval, and the rest is whatever jitter the connection is actually
+ * showing. On a quiet local network that settles near the floor. */
+var MIN_DELAY_MS = 45;
+var MAX_DELAY_MS = 180;
+var JITTER_MARGIN = 2.5;      // multiples of measured jitter to keep in hand
+
 var BUFFER_MS = 1200;
 
 /* Radians of run cycle per unit travelled. An NPC deciding its own path uses
@@ -37,13 +49,18 @@ PB.createNet = function (opts) {
   var names = new Map();        // id -> display name, for the tags over their heads
   var showNames = true;
   var maxHealth = 10;
+  var lastArrival = 0;          // when the last snapshot turned up
+  var arrivalGap = 33;          // and how far apart they have been coming
+  var arrivalJitter = 6;        // and how much that wanders
+  var renderClock = null;       // the time we draw everyone else at
   var game = null;
   var sendTimer = null;
   var statsTimer = null;
   var lastUpdateAt = 0;
   var figureGeo = null;
   var stats = { sent: 0, received: 0, corrections: 0, lastCorrection: null,
-                lastLatency: 0, hits: 0, shots: 0, rejected: 0, lastRejection: null };
+                lastLatency: 0, transit: 0, frames: 0,
+                hits: 0, shots: 0, rejected: 0, lastRejection: null };
 
   function on(evt, cb) { (listeners[evt] || (listeners[evt] = [])).push(cb); return api; }
   function emit(evt, data) {
@@ -124,6 +141,19 @@ PB.createNet = function (opts) {
       // keep every field the interpolation reads: picking out a few by hand is
       // how the world clock and the perk list went missing on the way in
       msg.at = now();
+      /* How long the snapshot took to reach us and be picked up. The server
+       * stamps it with Date.now(); on one machine that is directly
+       * comparable, and across machines the clock offset is constant so the
+       * variation is still meaningful. Worth watching: a client that is busy
+       * drawing takes its own sweet time getting round to the socket, and
+       * that shows up here rather than in any of the rates. */
+      if (typeof msg.time === 'number') {
+        var transit = Date.now() - msg.time;
+        stats.transit = stats.transit
+          ? stats.transit + (transit - stats.transit) * 0.1
+          : transit;
+      }
+      noteArrival(msg.at);
       snapshots.push(msg);
       var cutoff = now() - BUFFER_MS;
       while (snapshots.length > 2 && snapshots[0].at < cutoff) snapshots.shift();
@@ -219,7 +249,11 @@ PB.createNet = function (opts) {
      * so a slow client is judged against the world it actually saw. */
     game.on('shotFired', function (d) {
       stats.shots++;
-      var behind = INTERP_MS + Math.min(400, now() - lastUpdateAt);
+      /* However far behind we were actually drawing when we aimed — the
+       * measured delay, not a constant. Now that it moves with the connection,
+       * quoting a fixed number here would ask the server to rewind to a moment
+       * we were not looking at. */
+      var behind = targetDelay() + Math.min(400, now() - lastUpdateAt);
       stats.lastLag = Math.round(behind);
       send({ t: 'shot', origin: d.origin, dir: d.dir, lag: Math.round(behind) });
     });
@@ -258,6 +292,48 @@ PB.createNet = function (opts) {
   function round(n) { return Math.round(n * 1000) / 1000; }
 
   /* ------------------------------------------------------- interpolation */
+  /* Everyone else is drawn at a time of our own keeping, a little way behind
+   * the newest snapshot we hold. Two things are measured to decide how far:
+   * how often snapshots arrive, and how unevenly. */
+  function noteArrival(at) {
+    if (lastArrival) {
+      var gap = at - lastArrival;
+      if (gap > 0 && gap < 1000) {
+        // exponential averages: recent behaviour matters, old behaviour fades
+        arrivalGap += (gap - arrivalGap) * 0.12;
+        arrivalJitter += (Math.abs(gap - arrivalGap) - arrivalJitter) * 0.12;
+      }
+    }
+    lastArrival = at;
+  }
+
+  function targetDelay() {
+    var want = arrivalGap + arrivalJitter * JITTER_MARGIN;
+    return Math.max(MIN_DELAY_MS, Math.min(MAX_DELAY_MS, want));
+  }
+
+  /* The clock we draw other people at. It runs at wall speed and is steered
+   * gently towards where it ought to be, rather than being recomputed from the
+   * newest arrival every frame: doing that hands every hitch in the network,
+   * and every late packet, straight to the viewer as a stutter. */
+  function advanceClock(dt) {
+    var newest = snapshots[snapshots.length - 1].at;
+    var want = newest - targetDelay();
+    if (renderClock === null || Math.abs(want - renderClock) > 500) {
+      renderClock = want;                 // first snapshot, or a real stall
+      return renderClock;
+    }
+    renderClock += dt * 1000;
+    // ease out any difference rather than snapping to it
+    renderClock += (want - renderClock) * 0.1;
+    // never draw ahead of what we hold, and never fall so far behind that the
+    // buffer we are reading from has already been thrown away
+    if (renderClock > newest) renderClock = newest;
+    var oldest = snapshots[0].at;
+    if (renderClock < oldest) renderClock = oldest;
+    return renderClock;
+  }
+
   // the pair of snapshots bracketing the render time, plus the blend between
   function bracket(renderAt) {
     if (snapshots.length === 0) return null;
@@ -353,7 +429,7 @@ PB.createNet = function (opts) {
   function update(dt) {
     if (!game || snapshots.length === 0) return;
     lastUpdateAt = now();
-    var pair = bracket(now() - INTERP_MS);
+    var pair = bracket(advanceClock(dt));
     if (!pair) return;
 
     var seen = new Set();
@@ -489,6 +565,10 @@ PB.createNet = function (opts) {
     update: update,
     bracket: bracket,
     ping: function () { send({ t: 'ping', c: now() }); },
+    // what the interpolation is currently costing, for the HUD and the tests
+    delay: function () {
+      return { target: targetDelay(), gap: arrivalGap, jitter: arrivalJitter };
+    },
     close: function () { stopSending(); if (socket) socket.close(); },
     remoteCount: function () { return remotes.size; },
     names: names,

@@ -11,7 +11,9 @@
     "test:browser": "node tests/verify.js",
     "test:mp": "node tests/multiplayer.js",
     "test:headful": "node tests/verify.js --headful",
-    "test:ui": "node tests/ui.js"
+    "test:ui": "node tests/ui.js",
+    "test:lag": "node tests/latency.js",
+    "test:pipeline": "node tests/pipeline.js"
   },
   "devDependencies": {
     "puppeteer-core": "^25.4.0"

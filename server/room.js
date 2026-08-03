@@ -10,7 +10,16 @@
 const { createHeadlessGame } = require('./engine.js');
 
 const SIM_HZ = 30;
-const SNAPSHOT_HZ = 20;
+
+/* One snapshot per simulation tick.
+ *
+ * It used to be 20Hz, which does not divide into a 30Hz tick: the accumulator
+ * fired on alternate ticks and snapshots left here 33ms apart, then 67ms, then
+ * 33ms. Clients hold a buffer sized for the gap between snapshots, and that
+ * built-in wobble was enough to empty it — the other player froze for a frame
+ * or two and then jumped. Matching the tick makes the spacing exactly even,
+ * which is worth more than the bandwidth it costs. */
+const SNAPSHOT_HZ = SIM_HZ;
 
 /* How far back a shot may be judged. Covers the client's interpolation window
  * plus a normal round trip; anything beyond this is not a late packet, it is

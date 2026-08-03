@@ -167,9 +167,39 @@ arriving in 20Hz steps.
 | | |
 | --- | --- |
 | simulation | 30Hz |
-| snapshots | 20Hz |
-| client → server | 30Hz position |
+| snapshots | 30Hz, one per tick |
+| client → server | 60Hz position |
+| drawn behind | 45–180ms, measured |
 | transport | WebSocket, same origin as the page |
+
+**How far behind you see somebody else.** Two things used to make that worse
+than it needed to be. Snapshots went out at 20Hz off a 30Hz tick, which does
+not divide: they left 33ms apart, then 67ms, then 33ms. And every client held
+a flat 110ms buffer, sized for the worst connection and paid for by all of
+them — but 110ms was not always enough for that wobble, so a remote player
+would freeze for a frame or two and then jump.
+
+Snapshots now go out once per tick, exactly evenly. The buffer is measured
+rather than assumed: a client watches how often snapshots arrive and how
+unevenly, and holds one interval plus the jitter it is actually seeing, with a
+45ms floor. On a local server that settles near 50ms. The clock everyone else
+is drawn at runs at wall speed and is eased towards where it should be, rather
+than recomputed from the newest arrival every frame — that way one late packet
+is a small correction rather than a visible stutter.
+
+Two tools measure it, both under `npm run`:
+
+```bash
+npm run test:pipeline   # the server alone, no browser: ~10ms
+npm run test:lag        # two real browsers, end to end
+```
+
+`test:pipeline` opens two raw sockets, walks one along a known line and reads
+the other's snapshots, so it measures exactly what the server adds. `test:lag`
+runs two browsers and slides the watcher's trace against the runner's to find
+the offset that lines them up. Sampling the two pages "at the same time" from
+the driver does not work — each sample is a round trip to a different browser,
+and the difference between those two round trips lands straight in the answer.
 
 ```
 server/index.js   http + websocket on one port, static client, /healthz

@@ -293,6 +293,55 @@ async function advance(page, seconds, timeout = 60000) {
     check('the remote body was animated by the movement', boSees.phase > 1,
           `run phase ${boSees.phase.toFixed(1)}`);
 
+    /* ------------------------------------------------ how far behind */
+    /* The delay everyone else is drawn at used to be a flat 110ms, sized for
+     * the worst connection and paid for by every connection. It is measured
+     * now, so on a local server it should settle well under that. */
+    const delay = await bo.evaluate(() => net.delay());
+    check('the interpolation delay follows the connection rather than a constant',
+          delay.target < 90 && delay.target >= 40,
+          `${delay.target.toFixed(0)}ms, off a ${delay.gap.toFixed(0)}ms ` +
+          `snapshot gap and ${delay.jitter.toFixed(0)}ms of jitter`);
+
+    const carriage = await bo.evaluate(() => ({
+      transit: net.stats.transit, received: net.stats.received,
+    }));
+    check('snapshots are not queueing up on the way in', carriage.transit < 120,
+          `${carriage.transit.toFixed(0)}ms from the server stamping one to us reading it`);
+
+    /* And it has to keep moving. The old build froze the body between
+     * snapshots and then jumped it, because a 20Hz snapshot rate off a 30Hz
+     * tick arrived 33ms apart and then 67ms, emptying the buffer. */
+    const motion = await (async () => {
+      const watching = bo.evaluate(async () => {
+        const r = [...net.remotes.values()][0];
+        const steps = [];
+        let prev = null;
+        const t0 = performance.now();
+        while (performance.now() - t0 < 2000) {
+          await new Promise(res => requestAnimationFrame(res));
+          const p = r.fig.root.position;
+          if (prev) steps.push(Math.hypot(p.x - prev.x, p.z - prev.z));
+          prev = { x: p.x, z: p.z };
+        }
+        return {
+          frames: steps.length,
+          still: steps.filter(v => v < 0.0005).length,
+          worst: Math.max.apply(null, steps),
+        };
+      });
+      await sleep(150);
+      await ana.keyboard.down('KeyW');
+      await advance(ana, 1.4);
+      await ana.keyboard.up('KeyW');
+      return watching;
+    })();
+    check('a running player keeps moving on the other screen',
+          motion.frames > 20 && motion.still / motion.frames < 0.4,
+          `${motion.still} of ${motion.frames} frames drew them standing still`);
+    check('and never lurches', motion.worst < 2.5,
+          `largest single-frame jump ${motion.worst.toFixed(2)}u`);
+
     /* ------------------------------------------- entities agree as well */
     const npcAgreement = await Promise.all([ana, bo].map(p => p.evaluate(() =>
       game.npcs.map(n => [+n.root.position.x.toFixed(1), +n.root.position.z.toFixed(1)]))));
