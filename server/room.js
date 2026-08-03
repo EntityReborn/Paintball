@@ -195,14 +195,12 @@ class Room {
   }
 
   /* ---------------------------------------------------------- being shot */
-  /* A player is a box standing on their feet. Square in plan on purpose: the
-   * figure turns with its owner, and a box that turned with it would make you
-   * easier or harder to hit depending on which way you happened to be facing. */
+  /* A player is a box standing on their feet, the same box the client hangs on
+   * the figure it draws — PB.HIT is where both of them get it from, so the two
+   * cannot drift apart. */
   playerBox(p, out) {
     const feet = p.y - this.game.cfg.eye;
-    out.min.set(p.x - 0.36, feet, p.z - 0.36);
-    out.max.set(p.x + 0.36, feet + 1.8, p.z + 0.36);
-    return out;
+    return hitBoxAt(p.x, feet, p.z, out);
   }
 
   // Nearest player the shot would hit right now, ignoring whoever fired it.
@@ -383,12 +381,10 @@ class Room {
         const p = frame.npcs[i];
         const npc = this.game.npcs[i];
         if (!p || !npc || !npc.alive) continue;
-        // Sweep from the previous sample to this one. Testing the samples
-        // alone leaves gaps a running figure slips through: at 5u/s a 50ms
-        // snapshot step moves it a quarter of its own width.
+        // Swept from the previous sample to this one: testing the samples
+        // alone leaves gaps a running figure slips through.
         const q = (older && older.npcs[i]) || p;
-        box.min.set(Math.min(p[0], q[0]) - 0.36, Math.min(p[1], q[1]), Math.min(p[2], q[2]) - 0.36);
-        box.max.set(Math.max(p[0], q[0]) + 0.36, Math.max(p[1], q[1]) + 1.8, Math.max(p[2], q[2]) + 0.36);
+        sweptHitBox(p[0], p[1], p[2], q[0], q[1], q[2], box);
         if (!ray.intersectBox(box, point)) continue;
         const d = origin.distanceTo(point);
         if (d <= maxDistance && (!best || d < best.distance)) {
@@ -402,14 +398,12 @@ class Room {
         const player = this.players.get(rec[0]);
         if (!player || player.deadUntil || rec[0] === exceptId) continue;
         // swept the same way the NPCs are — a sprinting player covers most of
-        // their own width between two samples
+        // their own width between two samples. Their y is an eye height, so it
+        // comes down to the feet the box is built from.
         const was = (older && older.players
           && older.players.find(o => o && o[0] === rec[0])) || rec;
-        const feet = Math.min(rec[2], was[2]) - this.game.cfg.eye;
-        box.min.set(Math.min(rec[1], was[1]) - 0.36, feet, Math.min(rec[3], was[3]) - 0.36);
-        box.max.set(Math.max(rec[1], was[1]) + 0.36,
-                    Math.max(rec[2], was[2]) - this.game.cfg.eye + 1.8,
-                    Math.max(rec[3], was[3]) + 0.36);
+        const eye = this.game.cfg.eye;
+        sweptHitBox(rec[1], rec[2] - eye, rec[3], was[1], was[2] - eye, was[3], box);
         if (!ray.intersectBox(box, point)) continue;
         const d = origin.distanceTo(point);
         if (d <= maxDistance && (!best || d < best.distance)) {
@@ -760,6 +754,29 @@ function round(n) {
   return Math.round(n * 1000) / 1000;
 }
 const r3 = round;
+
+/* The one hit volume, straight off the client's own definition. Both a live
+ * box and a rewound one are built through here, so neither can wander. */
+function hitBoxAt(x, feetY, z, out) {
+  const H = globalThis.PB.HIT;
+  out.min.set(x - H.half, feetY + H.bottom, z - H.half);
+  out.max.set(x + H.half, feetY + H.top, z + H.half);
+  return out;
+}
+
+/* Swept between two samples: a figure at a run covers most of its own width
+ * between snapshots, and testing the samples alone leaves gaps to slip
+ * through. */
+function sweptHitBox(ax, ay, az, bx, by, bz, out) {
+  const H = globalThis.PB.HIT;
+  out.min.set(Math.min(ax, bx) - H.half,
+              Math.min(ay, by) + H.bottom,
+              Math.min(az, bz) - H.half);
+  out.max.set(Math.max(ax, bx) + H.half,
+              Math.max(ay, by) + H.top,
+              Math.max(az, bz) + H.half);
+  return out;
+}
 
 /* The client's own sanitiser, run again here. Never trust the name a socket
  * sends: it goes over every other player's head, and the rule for what may be

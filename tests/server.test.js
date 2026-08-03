@@ -1081,6 +1081,88 @@ test('a shot at where somebody was still counts', () => {
   assert.equal(bo.health, room.game.cfg.playerHealth - 1, 'no damage was done');
 });
 
+/* ------------------------------------------------------------ hit volume */
+test('the box a shot is tested against is the box on the figure', () => {
+  /* The client raycasts the mesh hung on the figure; the server builds its own
+   * for a player. Written out separately they drift, and a drifted hitbox is a
+   * shot that lands on one screen and not the other. */
+  const room = new Room({ seed: 4242 });
+  const g = room.game;
+  const THREE = globalThis.THREE;
+  const H = globalThis.PB.HIT;
+
+  const npc = g.npcs[0];
+  npc.root.position.set(4, 0, -3);
+  npc.root.rotation.set(0, 0, 0);
+  npc.root.updateMatrixWorld(true);
+  const onFigure = new THREE.Box3().setFromObject(npc.hitbox);
+
+  const player = room.join('ana');
+  player.x = 4; player.z = -3; player.y = g.cfg.eye;      // same spot, feet at 0
+  const onServer = room.playerBox(player, new THREE.Box3());
+
+  for (const axis of ['x', 'y', 'z']) {
+    assert.ok(Math.abs(onFigure.min[axis] - onServer.min[axis]) < 0.001,
+              `${axis} min: figure ${onFigure.min[axis].toFixed(3)}, ` +
+              `server ${onServer.min[axis].toFixed(3)}`);
+    assert.ok(Math.abs(onFigure.max[axis] - onServer.max[axis]) < 0.001,
+              `${axis} max: figure ${onFigure.max[axis].toFixed(3)}, ` +
+              `server ${onServer.max[axis].toFixed(3)}`);
+  }
+  assert.ok(Math.abs(H.half * 2 - (onServer.max.x - onServer.min.x)) < 0.001,
+            'the server box is not the width PB.HIT asks for');
+});
+
+test('the hit volume hugs the body rather than the pose', () => {
+  const g = createHeadlessGame({ seed: 7 });
+  const THREE = globalThis.THREE;
+  const PB = globalThis.PB;
+  const H = PB.HIT;
+
+  const fig = PB.buildFigure({
+    geo: PB.figureGeometry(), shadows: false, variant: 'player',
+    color: new THREE.Color(1, 1, 1), trim: new THREE.Color(1, 1, 1),
+    accent: new THREE.Color(1, 1, 1),
+  });
+  PB.poseFigure(fig, { phase: 0, grounded: true, moving: false });
+  fig.root.updateMatrixWorld(true);
+
+  // the torso and head are what a player aims at; both must be inside
+  for (const part of [fig.torso, fig.head]) {
+    const box = new THREE.Box3().setFromObject(part);
+    assert.ok(box.min.x > -H.half && box.max.x < H.half,
+              `${part.name || 'part'} sticks out sideways: ` +
+              `${box.min.x.toFixed(2)}..${box.max.x.toFixed(2)} against ±${H.half}`);
+    assert.ok(box.min.y > H.bottom && box.max.y < H.top,
+              `${part.name || 'part'} sticks out vertically`);
+  }
+
+  // and no wasted air: the soles and the crown should be close to the edges
+  const body = new THREE.Box3();
+  fig.root.traverse(o => { if (o.isMesh && o.visible && o !== fig.hitbox) body.expandByObject(o); });
+  assert.ok(H.bottom <= body.min.y + 0.03 && H.bottom > body.min.y - 0.06,
+            `the floor of the box is at ${H.bottom}, the soles at ${body.min.y.toFixed(2)}`);
+  assert.ok(H.top >= body.max.y - 0.03 && H.top < body.max.y + 0.08,
+            `the roof of the box is at ${H.top}, the crown at ${body.max.y.toFixed(2)}`);
+  assert.ok(g.npcs.length > 0, 'no NPCs to have built one for');
+});
+
+test('it is square in plan, so facing does not change how easy you are to hit', () => {
+  const H = globalThis.PB.HIT;
+  // the server's box does not turn with the figure; anything but square would
+  // make a player broader from the side than from the front
+  const room = new Room({ seed: 4242 });
+  const THREE = globalThis.THREE;
+  const p = room.join('ana');
+  p.x = 0; p.z = 0; p.y = room.game.cfg.eye;
+  const box = room.playerBox(p, new THREE.Box3());
+  const width = box.max.x - box.min.x;
+  const depth = box.max.z - box.min.z;
+  assert.ok(Math.abs(width - depth) < 0.001, `${width.toFixed(2)} across, ${depth.toFixed(2)} deep`);
+  assert.ok(width < 0.6, `${width.toFixed(2)} across is not what anyone would call tight`);
+  assert.ok(H.height < 1.75 && H.height > 1.5, `${H.height.toFixed(2)} tall`);
+});
+
 /* -------------------------------------------------- shields and packs */
 test('you arrive, and come back, under a shield', () => {
   const room = new Room({ seed: 4242 });

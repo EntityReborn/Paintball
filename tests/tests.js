@@ -3356,6 +3356,90 @@ describe('Performance', function () {
 
 var _npcPoint = new THREE.Vector3();
 
+describe('What a shot is tested against', function () {
+  function build(variant) {
+    return PB.buildFigure({
+      geo: PB.figureGeometry(), shadows: false, variant: variant,
+      color: new THREE.Color(0.3, 0.6, 0.9), trim: new THREE.Color(0.2, 0.3, 0.5),
+      accent: new THREE.Color(0, 0.8, 1),
+    });
+  }
+  function visibleBox(fig) {
+    var box = new THREE.Box3();
+    fig.root.traverse(function (o) {
+      if (o.isMesh && o.visible && o !== fig.hitbox) box.expandByObject(o);
+    });
+    return box;
+  }
+
+  it('is one definition, not a number written out in several places', function () {
+    assert.ok(PB.HIT, 'no shared hit volume');
+    assert.close(PB.HIT.height, PB.HIT.top - PB.HIT.bottom, 1e-6, 'height');
+    assert.close(PB.HIT.midY, (PB.HIT.top + PB.HIT.bottom) / 2, 1e-6, 'middle');
+  });
+
+  it('sits on the figure exactly where the definition says', function () {
+    var fig = build('player');
+    fig.root.updateMatrixWorld(true);
+    var box = new THREE.Box3().setFromObject(fig.hitbox);
+    assert.close(box.min.y, PB.HIT.bottom, 0.001, 'floor of the box');
+    assert.close(box.max.y, PB.HIT.top, 0.001, 'roof of the box');
+    assert.close(box.max.x - box.min.x, PB.HIT.half * 2, 0.001, 'width');
+    assert.close(box.max.z - box.min.z, PB.HIT.half * 2, 0.001, 'depth');
+  });
+
+  it('covers the torso and the head', function () {
+    var fig = build('npc');
+    PB.poseFigure(fig, { phase: 0, grounded: true, moving: false });
+    fig.root.updateMatrixWorld(true);
+    var hit = new THREE.Box3().setFromObject(fig.hitbox);
+    [fig.torso, fig.head].forEach(function (part, i) {
+      var box = new THREE.Box3().setFromObject(part);
+      assert.ok(hit.containsBox(box), (i ? 'the head' : 'the torso') + ' is not inside the hitbox');
+    });
+  });
+
+  it('leaves no air under the feet or over the head', function () {
+    var fig = build('npc');
+    PB.poseFigure(fig, { phase: 0, grounded: true, moving: false });
+    fig.root.updateMatrixWorld(true);
+    var body = visibleBox(fig);
+    assert.less(Math.abs(body.min.y - PB.HIT.bottom), 0.06,
+                'the soles are at ' + body.min.y.toFixed(2) +
+                ' and the box starts at ' + PB.HIT.bottom);
+    assert.less(Math.abs(body.max.y - PB.HIT.top), 0.06,
+                'the crown is at ' + body.max.y.toFixed(2) +
+                ' and the box ends at ' + PB.HIT.top);
+  });
+
+  it('is tighter than the figure at its most sprawling', function () {
+    // it should hug the body, not the reach of a swinging leg or a held rifle
+    var fig = build('player');
+    var sprawl = new THREE.Box3();
+    for (var p = 0; p < 6.3; p += 0.2) {
+      PB.poseFigure(fig, { phase: p, grounded: true, moving: true });
+      fig.root.updateMatrixWorld(true);
+      sprawl.union(visibleBox(fig));
+    }
+    assert.greater(sprawl.max.z - sprawl.min.z, PB.HIT.half * 2 + 0.3,
+                   'a running figure should reach well past its own hitbox');
+    var hitVolume = PB.HIT.half * 2 * PB.HIT.height * PB.HIT.half * 2;
+    assert.less(hitVolume, 0.5, 'the hit volume is ' + hitVolume.toFixed(2) + ' cubic units');
+  });
+
+  it('turns with the figure it belongs to', function () {
+    var fig = build('player');
+    fig.root.position.set(6, 0, -2);
+    fig.root.rotation.y = Math.PI / 2;
+    fig.root.updateMatrixWorld(true);
+    var box = new THREE.Box3().setFromObject(fig.hitbox);
+    var mid = box.getCenter(new THREE.Vector3());
+    assert.close(mid.x, 6, 0.01, 'the box did not follow the figure');
+    assert.close(mid.z, -2, 0.01, 'the box did not follow the figure');
+    assert.close(mid.y, PB.HIT.midY, 0.01, 'the box is at the wrong height');
+  });
+});
+
 describe('Health packs', function () {
   it('stands two of them in the arena, out of the cover', function () {
     freshLevel();

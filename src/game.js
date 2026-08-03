@@ -1184,9 +1184,16 @@ function createGame(options) {
   /* Which packs are on the ground, straight from the server. */
   function applyMedkits(list) {
     if (!list) return;
+    var changed = false;
     for (var i = 0; i < medkits.length && i < list.length; i++) {
-      medkits[i].ready = !!list[i];
+      var want = !!list[i];
+      if (medkits[i].ready !== want) { medkits[i].ready = want; changed = true; }
     }
+    /* Redraw now rather than waiting for the next frame. This arrives from the
+     * network, which lands after the frame's own update has already decided
+     * what to draw — so a pack could read as taken and still be standing there
+     * for a frame. */
+    if (changed) world.updateMedkits(0);
   }
 
   /* Our own health, as the server reports it. Nothing here decides damage —

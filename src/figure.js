@@ -10,6 +10,32 @@ var PB = global.PB = global.PB || {};
 
 PB.FIGURE_HEIGHT = 1.8;
 
+/* What a round is actually tested against, in the figure's own space.
+ *
+ * Defined once because three places have to agree on it: the box hung on the
+ * figure here, which is what the client raycasts; the box the server builds
+ * for a player; and the one the server rewinds through. Written out separately
+ * in each, they drift, and a drifted hitbox is a shot that lands on one screen
+ * and not on the other.
+ *
+ * It hugs the body rather than the pose. The figure measures ±0.23 across the
+ * torso and stands 0.12 to 1.76 off the ground, so this covers it with very
+ * little to spare — where the old box was 0.72 wide with a hand's width of air
+ * under the feet, sized for arms held out and a leg at the top of its swing.
+ * You cannot be shot by the far end of your own rifle or by a boot thrown out
+ * behind you, which is how it should be.
+ *
+ * Square in plan on purpose: the figure turns with its owner and the server's
+ * box does not, so anything else would make a player easier to hit from the
+ * side than from the front. */
+PB.HIT = {
+  half: 0.26,        // across, and front to back
+  bottom: 0.10,      // the soles, not the ground beneath them
+  top: 1.78,         // the crown, not a round number above it
+};
+PB.HIT.height = PB.HIT.top - PB.HIT.bottom;
+PB.HIT.midY = (PB.HIT.top + PB.HIT.bottom) / 2;
+
 PB.buildFigure = function (opts) {
   var THREE = global.THREE;
   var shadows = opts.shadows !== false;
@@ -54,7 +80,7 @@ PB.buildFigure = function (opts) {
 
   // one invisible box catches the bullets for the whole figure
   var hitbox = new THREE.Mesh(geo.hit, new THREE.MeshBasicMaterial());
-  hitbox.position.y = PB.FIGURE_HEIGHT / 2;
+  hitbox.position.y = PB.HIT.midY;
   hitbox.visible = false;
   root.add(hitbox);
 
@@ -222,7 +248,7 @@ PB.figureGeometry = function () {
     head: new THREE.BoxGeometry(0.28, 0.28, 0.28),
     limbUpper: new THREE.BoxGeometry(0.13, 0.50, 0.15),
     leg: new THREE.BoxGeometry(0.17, 0.70, 0.19),
-    hit: new THREE.BoxGeometry(0.72, PB.FIGURE_HEIGHT, 0.55),
+    hit: new THREE.BoxGeometry(PB.HIT.half * 2, PB.HIT.height, PB.HIT.half * 2),
     visor: new THREE.BoxGeometry(0.30, 0.10, 0.04),
     pack: new THREE.BoxGeometry(0.34, 0.38, 0.16),
     weapon: new THREE.BoxGeometry(0.09, 0.09, 0.46),

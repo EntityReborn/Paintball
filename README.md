@@ -148,6 +148,23 @@ time, so the only thing that has to travel is the clock itself. Clients take it
 from the snapshot stream and never advance it themselves; letting them run their
 own clock between snapshots put the same crate two metres apart on two screens.
 
+**One hit volume, defined once.** What a round is tested against is a box
+0.52 across, 0.52 deep and 1.68 tall, standing on the figure's soles. Three
+places need it — the box hung on the figure, which is what a client raycasts;
+the box the server builds for a player; and the one the server rewinds
+through — and written out separately they drift, which is a shot that lands on
+one screen and not the other. They all read `PB.HIT`.
+
+It hugs the body rather than the pose. The torso measures 0.46 across and the
+figure stands from 0.12 to 1.76, so there is very little spare; the old box was
+0.72 wide with a hand's width of air under the feet, sized for arms held out
+and a leg at the top of its swing. Nobody is shot by the far end of their own
+rifle or by a boot thrown out behind them any more — but the flip side is that
+a round now has to pass within 26cm of somebody's centre line rather than 36cm.
+Square in plan on purpose: the figure turns with its owner and the server's box
+does not, so anything else would make a player broader from the side than from
+the front.
+
 **Shots are adjudicated by the server.** The client fires, spends the round and
 draws the tracer, but what it hit is decided server-side by re-running the same
 raycast — against the targets, the NPCs *and* the other players, nearest wins —
@@ -276,12 +293,13 @@ a web server.
 
 Two layers, both driving the real engine in a real WebGL context.
 
-**Browser suite** (`tests/tests.html`) — 243 tests over bootstrap, world
+**Browser suite** (`tests/tests.html`) — 249 tests over bootstrap, world
 generation, targets, rendering, movement, collision, shooting, breaking, levels,
 input, the reload animation, NPCs, view angles, zoom, drifting targets, scoring,
 score indicators, player statistics, telling players from NPCs, the balcony,
 moving cover, perks, jumping onto cover, settings, the debug overlays, name
-tags, health packs, shields, lifetime statistics, performance, and HUD wiring. Rendering is
+tags, health packs, shields, the hit volume, lifetime statistics,
+performance, and HUD wiring. Rendering is
 checked by reading pixels back off the canvas; input by dispatching real
 `KeyboardEvent` / `MouseEvent` objects. Open it in a browser to watch it run, or
 let the driver do it.
@@ -290,11 +308,12 @@ let the driver do it.
 plays the game through Chrome's own input pipeline (trusted keyboard and mouse
 events, real pointer lock) and writes screenshots to `tests/shots/`.
 
-**Server tests** (`tests/server.test.js`) — 70 node tests over the headless
+**Server tests** (`tests/server.test.js`) — 74 node tests over the headless
 engine, seed determinism, the room's plausibility rules, spawn placement,
 server-side shot validation and lag compensation, the player-versus-player rules
 (ten hits to kill, healing, respawning, spawn protection, the shield, health
-packs, opting out of the fight, no shooting yourself or the dead), renaming,
+packs, opting out of the fight, no shooting yourself or the dead), the hit
+volume agreeing between client and server, renaming,
 snapshot cadence and size, and the static file server's path handling.
 
 **Menus** (`tests/ui.js`) — drives the pause-screen panels in a real browser:
