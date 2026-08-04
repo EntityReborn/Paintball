@@ -48,6 +48,12 @@ function build(seed) {
     invertY: options.get('invertY'),
   };
   if (seed !== undefined) settings.seed = seed;
+  // ?hunters=0 takes the red enemy out, for scripted runs that need an arena
+  // where nothing shoots back
+  if (params.has('hunters')) {
+    var wanted = Number(params.get('hunters'));
+    if (isFinite(wanted)) settings.hunters = Math.max(0, Math.min(4, wanted | 0));
+  }
   try {
     return window.createGame(settings);
   } catch (err) {
@@ -57,6 +63,7 @@ function build(seed) {
 }
 
 var el = {
+  hud: document.getElementById('hud'),
   score: document.getElementById('s-score'),
   level: document.getElementById('s-level'),
   npcs: document.getElementById('s-npcs'),
@@ -124,11 +131,13 @@ function showDeath(by) {
   deadUntil = performance.now() + game.cfg.respawnDelay * 1000;
   el.deadBy.textContent = killedBy ? 'BY ' + killedBy.toUpperCase() : '';
   el.dead.hidden = false;
+  if (el.hud) el.hud.classList.add('dead');
 }
 
 function hideDeath() {
   if (!el.dead) return;
   el.dead.hidden = true;
+  if (el.hud) el.hud.classList.remove('dead');
   deadUntil = 0;
 }
 

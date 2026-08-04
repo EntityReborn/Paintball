@@ -243,10 +243,12 @@ PB.createNet = function (opts) {
     game = g;
     figureGeo = PB.figureGeometry();
 
-    /* Every shot goes to the server for adjudication, carrying how far behind
-     * the server our view was when we aimed: the interpolation window plus
-     * however long ago the last frame drew. The server rewinds by that much,
-     * so a slow client is judged against the world it actually saw. */
+    /* Every shot goes to the server for adjudication, carrying what we saw it
+     * hit and how far behind the server our view was when we aimed. The server
+     * puts that one entity back where it was that long ago and checks it,
+     * rather than searching the whole window for something to credit — which
+     * used to hand out kills for rounds that landed in a running figure's
+     * wake. A shot that hit nothing carries no claim and is simply a miss. */
     game.on('shotFired', function (d) {
       stats.shots++;
       /* However far behind we were actually drawing when we aimed — the
@@ -255,7 +257,10 @@ PB.createNet = function (opts) {
        * we were not looking at. */
       var behind = targetDelay() + Math.min(400, now() - lastUpdateAt);
       stats.lastLag = Math.round(behind);
-      send({ t: 'shot', origin: d.origin, dir: d.dir, lag: Math.round(behind) });
+      send({
+        t: 'shot', origin: d.origin, dir: d.dir,
+        lag: Math.round(behind), claim: d.claim || null,
+      });
     });
 
     // the client's own accounting, for the leaderboard work to come
@@ -385,7 +390,16 @@ PB.createNet = function (opts) {
     fig.root.add(r.health.sprite);
     r.pvp = true;
 
-    if (fig.hitbox) game.debugHitboxes && game.debugHitboxes.push(fig.hitbox);
+    /* Rounds are raycast against this box as well as drawn from it, so it has
+     * to carry enough to name who was hit and to say whether they are in the
+     * fight at all. Flat values rather than a link back to the remote: the box
+     * hangs off the figure the remote owns, and pointing the two at each other
+     * makes a cycle for anything that walks the scene graph to fall into. */
+    if (fig.hitbox && game.debugHitboxes) {
+      fig.hitbox.userData.remoteId = id;
+      fig.hitbox.userData.pvp = true;
+      game.debugHitboxes.push(fig.hitbox);
+    }
     remotes.set(id, r);
     return r;
   }
@@ -395,6 +409,8 @@ PB.createNet = function (opts) {
   function setRemotePvp(r, on) {
     if (!r || r.pvp === on) return;
     r.pvp = on;
+    // the raycast reads this off the box itself, not off the remote
+    if (r.fig.hitbox) r.fig.hitbox.userData.pvp = on;
     r.fig.materials.forEach(function (m) {
       if (m.name === 'shieldMat') return;
       m.transparent = !on;

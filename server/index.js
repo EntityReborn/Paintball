@@ -43,6 +43,9 @@ const gameOverrides = {};
 if (process.env.NPCS_PER_LEVEL) gameOverrides.npcsPerLevel = Number(process.env.NPCS_PER_LEVEL);
 if (process.env.TARGETS_PER_LEVEL) gameOverrides.targetsPerLevel = Number(process.env.TARGETS_PER_LEVEL);
 if (process.env.PERK_EVERY) gameOverrides.perkEvery = Number(process.env.PERK_EVERY);
+// tests that measure damage to the decimal point need the level's own enemy
+// out of the way; 0 leaves the arena to the wanderers
+if (process.env.HUNTERS) gameOverrides.hunters = Number(process.env.HUNTERS);
 
 const room = new Room({
   seed: process.env.MAP_SEED ? Number(process.env.MAP_SEED) : undefined,

@@ -238,8 +238,18 @@ canvas { display: block; position: fixed; inset: 0; }
 #dead {
   position: absolute; inset: 0; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 10px;
-  background: rgba(30,6,8,.42); pointer-events: none;
+  pointer-events: none;
+  /* the whole view goes red, deepest at the edges. Fading it in over the same
+   * half second the camera takes to reach the floor keeps the two together. */
+  background: radial-gradient(ellipse at center,
+              rgba(150,14,16,.18) 0%, rgba(104,8,12,.34) 55%, rgba(52,2,6,.62) 100%);
+  box-shadow: inset 0 0 190px rgba(255,40,40,.30);
+  animation: dead-in .5s ease-out both;
 }
+@keyframes dead-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* nothing to aim while you are on the floor */
+#hud.dead #crosshair { opacity: 0; }
 #dead .big {
   font-size: 40px; letter-spacing: .16em; font-weight: 700; color: #ff6b6b;
   text-shadow: 0 3px 26px rgba(0,0,0,.85);

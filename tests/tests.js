@@ -79,6 +79,10 @@ function reset() {
   g.state.kick = 0;
   g.state.kickBack = 0;
   while (g.bullets.length) { g.scene.remove(g.bullets[0].mesh); g.bullets.shift(); }
+  // nobody starts a test on the floor, whatever the last one left behind
+  g.setHealth(g.cfg.playerHealth, g.cfg.playerHealth);
+  g.state.deathT = 0;
+  g.camera.rotation.set(0, 0, 0);
   g.yawObj.updateMatrixWorld(true);
 }
 
@@ -3550,6 +3554,325 @@ describe('Shields', function () {
   });
 });
 
+describe('Being dead', function () {
+  // Damage is the server's to decide; setHealth is how it lands here.
+  function kill() {
+    freshLevel();
+    g.setActive(true);
+    g.teleport(0, g.cfg.eye, 0);
+    g.setHealth(0, g.cfg.playerHealth);
+    assert.ok(g.state.dead, 'not dead');
+  }
+
+  it('goes nowhere the player asks it to', function () {
+    kill();
+    var at = g.state.pos.clone();
+    g.setKey('KeyW', true);
+    g.setKey('ShiftLeft', true);
+    step(0.5);
+    g.setKey('KeyW', false);
+    g.setKey('ShiftLeft', false);
+    assert.close(g.state.pos.x, at.x, 0.001, 'a dead player walked');
+    assert.close(g.state.pos.z, at.z, 0.001, 'a dead player walked');
+  });
+
+  it('does not jump', function () {
+    kill();
+    g.setKey('Space', true);
+    step(0.3);
+    g.setKey('Space', false);
+    assert.close(g.state.pos.y, g.cfg.eye, 0.001, 'a dead player jumped');
+    assert.ok(g.state.grounded, 'left the floor');
+  });
+
+  it('does not turn', function () {
+    kill();
+    var yaw = g.yawObj.rotation.y;
+    var pitch = g.pitchObj.rotation.x;
+    assert.ok(!g.applyLook(120, 60), 'the look was accepted');
+    assert.equal(g.yawObj.rotation.y, yaw, 'a dead player turned');
+    assert.equal(g.pitchObj.rotation.x, pitch, 'a dead player looked around');
+  });
+
+  it('does not shoot or reload', function () {
+    freshLevel();
+    g.setActive(true);
+    g.state.mag = 5;
+    g.setHealth(0, g.cfg.playerHealth);
+    assert.equal(g.shoot(), null, 'a dead player got a round off');
+    g.setFiring(true);
+    step(0.4);
+    g.setFiring(false);
+    assert.equal(g.state.mag, 5, 'ammo left the magazine');
+    assert.ok(!g.reload(), 'reloaded from the floor');
+    assert.ok(!g.state.reloading, 'a reload started anyway');
+  });
+
+  it('drops the view to just above the floor and tilts it', function () {
+    kill();
+    var floor = g.state.pos.y - g.cfg.eye;
+    step(0.7);                                  // longer than the fall takes
+    assert.between(g.yawObj.position.y - floor, 0.05, 0.6,
+                   'the view did not come to rest just above the floor');
+    assert.greater(Math.abs(g.camera.rotation.z), 0.3, 'the view never tilted');
+  });
+
+  it('stands the view back up on coming back', function () {
+    kill();
+    step(0.7);
+    g.setHealth(g.cfg.playerHealth, g.cfg.playerHealth);
+    step(1 / 120);
+    assert.equal(g.state.deathT, 0, 'still falling');
+    assert.equal(g.camera.rotation.z, 0, 'the view is still on its side');
+    assert.close(g.yawObj.position.y, g.state.pos.y, 0.001, 'the view is still down');
+  });
+
+  it('puts the gun away and takes it back', function () {
+    kill();
+    step(1 / 120);
+    assert.ok(!g.gun.visible, 'still holding the gun');
+    g.setHealth(g.cfg.playerHealth, g.cfg.playerHealth);
+    step(1 / 120);
+    assert.ok(g.gun.visible, 'came back empty handed');
+  });
+});
+
+describe('Hunters', function () {
+  /* Its own world, with the red one in it and nothing else moving: the shared
+   * game deliberately has no hunter, and a wandering crowd would decide these
+   * outcomes by walking through the line of fire. */
+  var hg = null;
+
+  function hunterGame() {
+    if (hg) return hg;
+    var host = document.createElement('div');
+    host.style.cssText = 'position:absolute;left:-9999px;width:320px;height:200px';
+    document.body.appendChild(host);
+    hg = global.createGame({
+      container: host, seed: SEED, audio: false, shadows: false,
+      hunters: 1, npcsPerLevel: 0, targetsPerLevel: 0,
+    });
+    return hg;
+  }
+
+  // The hunter, the player, and a clear line between them.
+  function faceOff(gap) {
+    var h = hunterGame();
+    h.startLevel(1);
+    h.setActive(true);
+    h.setHealth(h.cfg.playerHealth, h.cfg.playerHealth);
+    h.setShield(0);
+    h.state.elapsed = 0;
+    var e = h.hunters()[0];
+    h.teleport(0, h.cfg.eye, 0);
+    e.root.position.set(0, 0, -(gap === undefined ? 12 : gap));
+    e.heading = 0;                       // (sin h, cos h) is +Z: straight at them
+    e.mark = null;
+    e.quarry = null;
+    e.sawAt = -1e9;
+    e.sightSince = 0;
+    e.nextShot = 0;
+    e.root.updateMatrixWorld(true);
+    h.aimAt(new THREE.Vector3(e.root.position.x, 1.2, e.root.position.z));
+    return { g: h, e: e };
+  }
+
+  function stepGame(h, seconds) {
+    var dt = 1 / 120;
+    for (var t = 0; t < seconds; t += dt) h.update(dt);
+  }
+
+  // A slab of cover between the two of them, for as long as `fn` runs.
+  function withCover(h, z, fn) {
+    var wall = new THREE.Mesh(new THREE.BoxGeometry(8, 3, 0.5),
+                              new THREE.MeshBasicMaterial());
+    wall.position.set(0, 1.5, z);
+    wall.name = 'test-cover';
+    h.scene.add(wall);
+    wall.updateMatrixWorld(true);
+    h.solidMeshes.push(wall);
+    try {
+      fn();
+    } finally {
+      var at = h.solidMeshes.indexOf(wall);
+      if (at !== -1) h.solidMeshes.splice(at, 1);
+      h.scene.remove(wall);
+    }
+  }
+
+  it('puts exactly one red enemy in every level', function () {
+    var h = hunterGame();
+    h.startLevel(1);
+    assert.equal(h.hunters().length, 1, 'wrong number of hunters');
+    assert.ok(h.npcs[0].hunter, 'the hunter is not the first NPC');
+    // both sides rebuild a level from a count, so the index is the agreement
+    var red = h.npcs[0].fig.materials[0].color;
+    assert.greater(red.r, 0.5, 'the hunter is not red');
+    assert.less(red.g, 0.2, 'the hunter is not red');
+    assert.less(red.b, 0.2, 'the hunter is not red');
+    var count = h.npcs.length;
+    h.startLevel(2);
+    assert.equal(h.hunters().length, 1, 'the next level came without one');
+    assert.equal(h.npcs.length, count + 1, 'the level did not grow by one NPC');
+  });
+
+  it('shoots at a player it can see, once it has taken a moment', function () {
+    var set = faceOff(12);
+    var shots = [];
+    set.g.on('npcShot', function (s) { shots.push(s); });
+
+    stepGame(set.g, set.g.cfg.hunterReaction * 0.6);
+    assert.equal(shots.length, 0, 'it fired before it could have reacted');
+
+    stepGame(set.g, 2.5);
+    assert.greater(shots.length, 1, 'it never fired');
+    assert.ok(set.e.mark, 'it never marked where the player was');
+  });
+
+  it('does not shoot at somebody behind it', function () {
+    var set = faceOff(12);
+    var shots = [];
+    set.g.on('npcShot', function (s) { shots.push(s); });
+    set.e.heading = Math.PI;             // turned round: the player is behind it
+    stepGame(set.g, 1.0);
+    assert.equal(shots.length, 0, 'it shot somebody it could not see');
+  });
+
+  it('does not shoot through cover', function () {
+    var set = faceOff(12);
+    var shots = [];
+    set.g.on('npcShot', function (s) { shots.push(s); });
+    withCover(set.g, -3, function () {
+      stepGame(set.g, 1.5);
+    });
+    assert.equal(shots.length, 0, 'it shot through cover');
+    // and picks its moment again the instant the way is clear
+    stepGame(set.g, 1.5);
+    assert.greater(shots.length, 0, 'it never fired with a clear line');
+  });
+
+  it('misses about as often as it hits', function () {
+    /* Average aim, and the point of the whole thing: a cone rather than a
+     * line. Perfect aim would land every round at this range, and no aim at
+     * all would land none. */
+    var set = faceOff(14);
+    var fired = 0, landed = 0;
+    set.g.on('npcShot', function () { fired++; });
+    set.g.on('hurt', function () { landed++; });
+    // stand still and take it, topped back up so a death never cuts it short
+    for (var round = 0; round < 200 && fired < 40; round++) {
+      set.g.setHealth(set.g.cfg.playerHealth, set.g.cfg.playerHealth);
+      stepGame(set.g, 0.2);
+    }
+    assert.greater(fired, 20, 'it barely fired');
+    var share = landed / fired;
+    assert.between(share, 0.15, 0.9, 'aim is ' + (share * 100).toFixed(0) + '% — not average');
+  });
+
+  it('takes health off the player it hits, and no score off them', function () {
+    var set = faceOff(9);
+    var score = set.g.state.score;
+    var health = set.g.state.health;
+    var landed = false;
+    for (var i = 0; i < 200 && !landed; i++) {
+      stepGame(set.g, 0.1);
+      landed = set.g.state.health < health;
+    }
+    assert.ok(landed, 'nothing ever landed');
+    assert.equal(set.g.state.score, score, 'being shot at cost the player points');
+  });
+
+  it('remembers where you were and comes looking', function () {
+    var set = faceOff(18);
+    stepGame(set.g, 0.5);
+    assert.ok(set.e.mark, 'it never marked where the player was');
+
+    // out of sight: the mark stays, and it walks in on it anyway
+    var from = set.e.root.position.distanceTo(set.g.state.pos);
+    withCover(set.g, -3, function () {
+      stepGame(set.g, 1.5);
+    });
+    var to = set.e.root.position.distanceTo(set.g.state.pos);
+    assert.ok(set.e.mark, 'it forgot immediately');
+    assert.less(to, from - 1, 'it did not close on where it last saw them');
+  });
+
+  it('gives up on a sighting that has gone stale', function () {
+    var set = faceOff(16);
+    stepGame(set.g, 0.5);
+    assert.ok(set.e.mark, 'nothing to forget');
+    // no targets at all is the same as never seeing one again
+    set.g.setHunterTargets(function () { return []; });
+    stepGame(set.g, set.g.cfg.hunterMemory + 0.5);
+    assert.equal(set.e.mark, null, 'it is still working from a sighting it lost');
+    assert.equal(set.e.quarry, null, 'it is still hunting somebody it cannot see');
+    set.g.setHunterTargets(null);
+  });
+
+  it('stays on its quarry unless another looks easier', function () {
+    var set = faceOff(12);
+    var here = { id: 1, x: 0, y: set.g.cfg.eye, z: 0, health: 10 };
+    var alsoHere = { id: 2, x: 1.2, y: set.g.cfg.eye, z: 0.6, health: 10 };
+    set.g.setHunterTargets(function () { return [here, alsoHere]; });
+
+    stepGame(set.g, 0.6);
+    var first = set.e.quarry;
+    assert.ok(first === 1 || first === 2, 'it settled on nobody');
+
+    // the other one is a little nearer, which is not reason enough to switch
+    stepGame(set.g, 1.0);
+    assert.equal(set.e.quarry, first, 'it swapped target for no good reason');
+
+    // now the other one is nearly finished: worth turning to
+    var other = first === 1 ? alsoHere : here;
+    other.health = 1;
+    stepGame(set.g, 0.6);
+    assert.equal(set.e.quarry, other.id, 'it stayed on the harder target');
+    set.g.setHunterTargets(null);
+  });
+
+  it('leaves the player alone while they are dead, and while shielded', function () {
+    var set = faceOff(10);
+    set.g.setShield(5);
+    var health = set.g.state.health;
+    stepGame(set.g, 3);
+    assert.equal(set.g.state.health, health, 'a shielded player was hurt');
+    set.g.setShield(0);
+
+    set.g.setHealth(0, set.g.cfg.playerHealth);
+    assert.ok(set.g.state.dead, 'not dead');
+    var shots = [];
+    set.g.on('npcShot', function (s) { shots.push(s); });
+    stepGame(set.g, 1.5);
+    assert.equal(shots.length, 0, 'it kept shooting a body');
+  });
+
+  it('brings the player back on its own when there is no server to', function () {
+    var set = faceOff(10);
+    set.g.setHealth(0, set.g.cfg.playerHealth);
+    var fell = set.g.state.pos.clone();
+    assert.ok(set.g.state.dead, 'not dead');
+    stepGame(set.g, set.g.cfg.respawnDelay + 0.3);
+    assert.ok(!set.g.state.dead, 'never came back');
+    assert.equal(set.g.state.health, set.g.cfg.playerHealth, 'came back hurt');
+    assert.greater(set.g.state.shield, 0, 'came back with no protection');
+    assert.greater(set.g.state.pos.distanceTo(fell), 1,
+                   'came back standing where they fell');
+  });
+
+  it('goes down to a round like anything else, and finishes the level', function () {
+    var set = faceOff(12);
+    var level = set.g.state.level;
+    var down = 0;
+    set.g.on('npcDown', function () { down++; });
+    set.g.knockDownNPC(set.e);
+    assert.ok(!set.e.alive, 'it survived');
+    assert.equal(down, 1, 'nothing was said about it going down');
+    // it is the only thing standing in this level, so that clears it
+    assert.equal(set.g.state.level, level + 1, 'the level did not turn over');
+  });
+});
+
 describe('Lifetime statistics', function () {
   function store() {
     var data = {};
@@ -3716,7 +4039,12 @@ async function run() {
   var summary = document.getElementById('summary');
   var passed = 0, failed = 0, skipped = 0, failures = [];
 
-  g = freshGame();
+  /* The shared world has no hunter in it. Nearly every test here stands the
+   * player still in the open for seconds at a time, which is exactly what the
+   * red one is built to punish — one suite would be testing the game and the
+   * next would be testing whether it got shot. The Hunters suite builds its
+   * own world with one in it. */
+  g = freshGame({ hunters: 0 });
 
   for (var s = 0; s < suites.length; s++) {
     var suite = suites[s];

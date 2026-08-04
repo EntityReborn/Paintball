@@ -21,14 +21,11 @@ const SIM_HZ = 30;
  * which is worth more than the bandwidth it costs. */
 const SNAPSHOT_HZ = SIM_HZ;
 
-/* How far back a shot may be judged. Covers the client's interpolation window
- * plus a normal round trip; anything beyond this is not a late packet, it is
- * someone shooting at ghosts. */
-const REWIND_MS = 350;
-
-/* A slow client legitimately aims at an older world than a fast one, so it may
- * ask for more rewind than the default. This is the ceiling on that request —
- * beyond it, a claim is not a late packet, it is someone shooting at ghosts. */
+/* How far back a shot may be judged. A client reports how far behind it was
+ * drawing when it aimed and the shot is placed at that moment, so there is no
+ * default window to pick — only a ceiling. A slow client legitimately aims at
+ * an older world than a fast one; beyond this, a claim is not a late packet,
+ * it is someone shooting at ghosts. */
 const MAX_REWIND_MS = 700;
 
 /* Most a player may move in one go having stood still long enough to earn it.
@@ -74,7 +71,71 @@ class Room {
 
     // when the world moves on to the next level, everyone has to be told
     this.game.on('level', () => this.onBroadcast(this.levelMessage()));
+
+    /* The hunters shoot at players, and players are not in the world the
+     * engine simulates — they belong to the room. So the room says who is
+     * worth aiming at, and settles what each round hit when it goes off. */
+    this.game.setHunterTargets(() => this.huntable());
+    this.game.on('npcShot', shot => {
+      const event = this.applyNpcShot(shot);
+      if (event) this.onBroadcast(event);
+    });
     return this.seed;
+  }
+
+  /* Everyone a hunter may come after: alive, and in the world. Positions are
+   * eye height, which is how a player is kept on both sides.
+   *
+   * Health travels with them because the hunter weighs it — somebody nearly
+   * finished is worth turning to. Opting out of PvP does not take anyone off
+   * this list: that setting is about other players, and the level's own enemy
+   * is not one. */
+  huntable() {
+    const out = [];
+    for (const p of this.players.values()) {
+      if (p.deadUntil) continue;
+      out.push({
+        id: p.id, x: p.x, y: p.y, z: p.z,
+        health: p.health, maxHealth: this.game.cfg.playerHealth,
+      });
+    }
+    return out;
+  }
+
+  /* A round from the level's own enemy. Same test as a player's, with nobody
+   * to credit: no score changes hands and the kill belongs to no one. */
+  applyNpcShot(shot, now = Date.now()) {
+    const THREE = globalThis.THREE;
+    const g = this.game;
+    const origin = new THREE.Vector3(shot.origin.x, shot.origin.y, shot.origin.z);
+    const dir = new THREE.Vector3(shot.dir.x, shot.dir.y, shot.dir.z);
+    if (dir.lengthSq() < 1e-6) return null;
+
+    const event = {
+      t: 'hit', by: 0, npc: shot.index,
+      level: g.state.level,
+      origin: { x: r3(shot.origin.x), y: r3(shot.origin.y), z: r3(shot.origin.z) },
+      point: { x: r3(shot.point.x), y: r3(shot.point.y), z: r3(shot.point.z) },
+      dir: { x: r3(dir.x), y: r3(dir.y), z: r3(dir.z) },
+      kind: 'miss',
+    };
+
+    const onPlayer = this.playerHit(origin, dir, shot.distance, null);
+    if (!onPlayer) return event;
+
+    const victim = onPlayer.entity;
+    const outcome = this.damage(victim, null, now);
+    if (!outcome) return event;
+
+    event.kind = 'player';
+    event.point = { x: r3(onPlayer.point.x), y: r3(onPlayer.point.y), z: r3(onPlayer.point.z) };
+    event.victim = victim.id;
+    event.victimName = victim.name;
+    event.killerName = 'THE HUNTER';
+    event.victimHealth = victim.health;
+    event.killed = !!outcome.killed;
+    event.blocked = outcome.blocked || null;
+    return event;
   }
 
   /* ------------------------------------------------------------- players */
@@ -213,9 +274,11 @@ class Room {
     let best = null;
     for (const p of this.players.values()) {
       if (p.id === exceptId || p.deadUntil) continue;
-      // somebody out of the fight is not in the way of it either: the round
-      // carries on to whatever is behind them
-      if (!this.canHurt(shooter, p)) continue;
+      /* Somebody out of the fight is not in the way of it either: the round
+       * carries on to whatever is behind them. Only a player's round, though —
+       * with no shooter this is the level's own enemy firing, and opting out of
+       * PvP is an agreement between players. */
+      if (shooter && !this.canHurt(shooter, p)) continue;
       this.playerBox(p, box);
       if (!ray.intersectBox(box, point)) continue;
       const d = origin.distanceTo(point);
@@ -227,9 +290,14 @@ class Room {
   }
 
   /* Take a hit off somebody, and hand out the kill if that was the last one. */
+  /* `shooter` is null when the round came from the level itself rather than
+   * from another player: nobody is credited, and the PvP opt-out does not
+   * apply — it is an agreement between players. */
   damage(victim, shooter, now = Date.now()) {
     if (victim.deadUntil) return null;
-    if (!this.canHurt(shooter, victim)) return { blocked: 'pvp', killed: false, health: victim.health };
+    if (shooter && !this.canHurt(shooter, victim)) {
+      return { blocked: 'pvp', killed: false, health: victim.health };
+    }
     if (this.shielded(victim, now)) {
       return { blocked: 'shield', killed: false, health: victim.health };
     }
@@ -363,69 +431,92 @@ class Room {
     while (this.history.length > 2 && this.history[0].t < cutoff) this.history.shift();
   }
 
-  // Nearest entity the shot would have hit anywhere in the rewind window.
-  rewoundHit(origin, dir, maxDistance, now = Date.now(), windowMs = REWIND_MS, exceptId = null) {
+  /* The two samples either side of a moment. A claim is checked against where
+   * things were *then* — not against everywhere they have been since. */
+  framesAround(t) {
+    const n = this.history.length;
+    if (!n) return null;
+    if (n === 1) return [this.history[0], this.history[0]];
+    for (let h = n - 1; h > 0; h--) {
+      if (this.history[h - 1].t <= t) return [this.history[h - 1], this.history[h]];
+    }
+    return [this.history[0], this.history[1]];
+  }
+
+  /* Check the one thing the client says it hit, against where that thing was
+   * when the client was looking at it.
+   *
+   * This replaces a search, and the difference is the whole point. The old
+   * version walked every frame in the rewind window and kept the nearest hit
+   * found in any of them, so a moving figure was not a box but a smear as long
+   * as its own travel over that window — at 30Hz history and a 350ms window,
+   * an NPC at a run left about 1.8u of trail that still scored. Shots that
+   * landed well behind somebody were credited as kills.
+   *
+   * The client already raycasts the same boxes, so it knows what it hit. It
+   * says so, and this checks that one entity at that one moment. */
+  verifyClaim(claim, origin, dir, maxDistance, now = Date.now(), lagMs = 0, exceptId = null) {
+    if (!claim || typeof claim !== 'object') return null;
+    const at = now - Math.max(0, Math.min(MAX_REWIND_MS, lagMs));
+    const pair = this.framesAround(at);
+    if (!pair) return null;
+    const [older, newer] = pair;
+
     const THREE = globalThis.THREE;
     const ray = new THREE.Ray(origin, dir);
     const box = new THREE.Box3();
     const point = new THREE.Vector3();
-    let best = null;
 
-    for (let h = this.history.length - 1; h >= 0; h--) {
-      const frame = this.history[h];
-      if (now - frame.t > windowMs) break;
-
-      const older = this.history[h - 1];
-
-      for (let i = 0; i < frame.npcs.length; i++) {
-        const p = frame.npcs[i];
-        const npc = this.game.npcs[i];
-        if (!p || !npc || !npc.alive) continue;
-        // Swept from the previous sample to this one: testing the samples
-        // alone leaves gaps a running figure slips through.
-        const q = (older && older.npcs[i]) || p;
-        sweptHitBox(p[0], p[1], p[2], q[0], q[1], q[2], box);
-        if (!ray.intersectBox(box, point)) continue;
-        const d = origin.distanceTo(point);
-        if (d <= maxDistance && (!best || d < best.distance)) {
-          best = { kind: 'npc', index: i, entity: npc, distance: d, point: point.clone() };
-        }
-      }
-
-      for (let k = 0; k < (frame.players || []).length; k++) {
-        const rec = frame.players[k];
-        if (!rec) continue;
-        const player = this.players.get(rec[0]);
-        if (!player || player.deadUntil || rec[0] === exceptId) continue;
-        // swept the same way the NPCs are — a sprinting player covers most of
-        // their own width between two samples. Their y is an eye height, so it
-        // comes down to the feet the box is built from.
-        const was = (older && older.players
-          && older.players.find(o => o && o[0] === rec[0])) || rec;
-        const eye = this.game.cfg.eye;
-        sweptHitBox(rec[1], rec[2] - eye, rec[3], was[1], was[2] - eye, was[3], box);
-        if (!ray.intersectBox(box, point)) continue;
-        const d = origin.distanceTo(point);
-        if (d <= maxDistance && (!best || d < best.distance)) {
-          best = { kind: 'player', entity: player, distance: d, point: point.clone() };
-        }
-      }
-
-      for (let j = 0; j < frame.targets.length; j++) {
-        const p = frame.targets[j];
-        const target = this.game.targets[j];
-        if (!p || !target || !target.alive) continue;
-        const q = (older && older.targets[j]) || p;
-        box.min.set(Math.min(p[0], q[0]) - 0.62, Math.min(p[1], q[1]) - 0.62, Math.min(p[2], q[2]) - 0.62);
-        box.max.set(Math.max(p[0], q[0]) + 0.62, Math.max(p[1], q[1]) + 0.62, Math.max(p[2], q[2]) + 0.62);
-        if (!ray.intersectBox(box, point)) continue;
-        const d = origin.distanceTo(point);
-        if (d <= maxDistance && (!best || d < best.distance)) {
-          best = { kind: 'target', index: j, entity: target, distance: d, point: point.clone() };
-        }
-      }
+    /* Still swept between the two samples: a figure at a run covers most of
+     * its own width in the 33ms between them, and testing either sample alone
+     * leaves a gap to slip through. One interval, not the whole window. */
+    if (claim.kind === 'npc') {
+      const i = claim.index | 0;
+      const npc = this.game.npcs[i];
+      const p = newer.npcs[i];
+      if (!npc || !npc.alive || !p) return null;
+      const q = (older && older.npcs[i]) || p;
+      sweptHitBox(p[0], p[1], p[2], q[0], q[1], q[2], box);
+      if (!ray.intersectBox(box, point)) return null;
+      const d = origin.distanceTo(point);
+      if (d > maxDistance) return null;
+      return { kind: 'npc', index: i, entity: npc, distance: d, point: point.clone() };
     }
-    return best;
+
+    if (claim.kind === 'player') {
+      const victim = this.players.get(claim.id);
+      const shooter = this.players.get(exceptId);
+      if (!victim || victim.id === exceptId || victim.deadUntil) return null;
+      // somebody out of the fight was never in the way of the round
+      if (!this.canHurt(shooter, victim)) return null;
+      const rec = (newer.players || []).find(r => r && r[0] === victim.id);
+      if (!rec) return null;
+      const was = (older && older.players
+        && older.players.find(r => r && r[0] === victim.id)) || rec;
+      // their y is an eye height; the box is built from the feet
+      const eye = this.game.cfg.eye;
+      sweptHitBox(rec[1], rec[2] - eye, rec[3], was[1], was[2] - eye, was[3], box);
+      if (!ray.intersectBox(box, point)) return null;
+      const d = origin.distanceTo(point);
+      if (d > maxDistance) return null;
+      return { kind: 'player', entity: victim, distance: d, point: point.clone() };
+    }
+
+    if (claim.kind === 'target') {
+      const j = claim.index | 0;
+      const target = this.game.targets[j];
+      const p = newer.targets[j];
+      if (!target || !target.alive || !p) return null;
+      const q = (older && older.targets[j]) || p;
+      box.min.set(Math.min(p[0], q[0]) - 0.62, Math.min(p[1], q[1]) - 0.62, Math.min(p[2], q[2]) - 0.62);
+      box.max.set(Math.max(p[0], q[0]) + 0.62, Math.max(p[1], q[1]) + 0.62, Math.max(p[2], q[2]) + 0.62);
+      if (!ray.intersectBox(box, point)) return null;
+      const d = origin.distanceTo(point);
+      if (d > maxDistance) return null;
+      return { kind: 'target', index: j, entity: target, distance: d, point: point.clone() };
+    }
+
+    return null;
   }
 
   /* ---------------------------------------------------------------- perks */
@@ -498,14 +589,19 @@ class Room {
       hit = { point: onPlayer.point, player: onPlayer.entity, distance: onPlayer.distance };
     }
 
-    /* If the shot did not land on an entity where it stands right now, judge it
-     * against where the entities were while the round was in flight — but never
-     * through cover, so the rewind can only reach as far as the first wall. */
-    if (!hit.target && !hit.npc && !hit.player) {
+    /* If the shot did not land on an entity where it stands right now, check
+     * what the client says it hit, where that was while the round was in
+     * flight — but never through cover, so the rewind reaches no further than
+     * the first wall.
+     *
+     * No claim means no hit. The client runs the same raycast against the same
+     * boxes before it sends anything, so a round it did not see land is a
+     * miss; the server does not go looking for something to award. */
+    if (!hit.target && !hit.npc && !hit.player && msg.claim) {
       const reach = hit.distance || 300;
       const asked = typeof msg.lag === 'number' && isFinite(msg.lag) ? msg.lag : 0;
-      const windowMs = Math.min(MAX_REWIND_MS, Math.max(REWIND_MS, asked + 120));
-      const rewound = this.rewoundHit(origin, dir, reach, now, windowMs, id);
+      const lagMs = Math.min(MAX_REWIND_MS, Math.max(0, asked));
+      const rewound = this.verifyClaim(msg.claim, origin, dir, reach, now, lagMs, id);
       if (rewound) {
         if (rewound.kind === 'npc') {
           hit = { point: rewound.point, npc: rewound.entity, distance: rewound.distance };
@@ -787,4 +883,4 @@ function cleanName(raw) {
   return String(raw || 'player').replace(/[^A-Za-z0-9 _-]/g, '').trim().slice(0, 16) || 'player';
 }
 
-module.exports = { Room, SIM_HZ, SNAPSHOT_HZ, REWIND_MS, MAX_REWIND_MS, MOVE_BURST };
+module.exports = { Room, SIM_HZ, SNAPSHOT_HZ, MAX_REWIND_MS, MOVE_BURST };

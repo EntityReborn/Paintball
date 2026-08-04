@@ -61,6 +61,11 @@ async function advance(page, seconds, timeout = 60000) {
       ...process.env,
       PORT: String(PORT), MAP_SEED: '4242',
       PERK_EVERY: '3',                       // so a perk is out early in the run
+      /* No hunter in this match. Half of what follows counts health to the
+       * point — nine hits that must not kill, a point of regen at a time — and
+       * a third party shooting at both of them from across the arena decides
+       * those numbers instead. The room's own hunter tests cover it. */
+      HUNTERS: '0',
       SHOT_DEBUG: process.env.SHOT_DEBUG || '',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -98,7 +103,7 @@ async function advance(page, seconds, timeout = 60000) {
       const page = await browsers[nextBrowser++].newPage();
       page.on('pageerror', e => errors.push(`${name}: ${e.message}`));
       page.on('console', m => { if (m.type() === 'error') errors.push(`${name}: ${m.text()}`); });
-      await page.goto(`${BASE}/index.html?mp&name=${name}`, { waitUntil: 'load' });
+      await page.goto(`${BASE}/index.html?mp&hunters=0&name=${name}`, { waitUntil: 'load' });
       await page.waitForFunction('window.game && window.net && net.self.id', { timeout: 30000 });
       await page.evaluate(() => {
         game.setActive(true);
@@ -605,7 +610,7 @@ async function advance(page, seconds, timeout = 60000) {
     // extra NPC turned into an invisible thing that ate bullets.
     const late = await browsers[0].newPage();
     late.on('pageerror', e => errors.push('late: ' + e.message));
-    await late.goto(`${BASE}/index.html?mp&name=late`, { waitUntil: 'load' });
+    await late.goto(`${BASE}/index.html?mp&hunters=0&name=late`, { waitUntil: 'load' });
     await late.waitForFunction('window.game && window.net && net.self.id', { timeout: 30000 });
     await late.evaluate(() => {
       game.setActive(true);

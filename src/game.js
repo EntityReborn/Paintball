@@ -43,6 +43,23 @@ var DEFAULTS = {
   respawnDelay: 2.5,          // seconds on the floor before coming back
   spawnShield: 3,             // seconds of protection on coming back
 
+  /* The red one, added to every level on top of the wanderers. It hunts and
+   * shoots; everything below is the shape of how well. */
+  hunters: 1,                 // how many per level
+  hunterSight: 42,            // how far one can see, in a straight line
+  hunterFov: 1.15,            // radians either side of where it is facing
+  hunterMemory: 7,            // seconds it keeps working from a lost sighting
+  hunterGuess: 2.5,           // how much of that it spends running the guess on
+  /* Aim error, as a cone: it opens with range, the way bad shooting does.
+   * Sized so that standing in the open at the range it likes to fight from
+   * costs about half the rounds it sends, and a long shot mostly does not
+   * land — average, in other words, and not deadly. */
+  hunterSpread: 0.11,         // radians
+  hunterFireEvery: 0.8,       // seconds between rounds
+  hunterReaction: 0.45,       // seconds between spotting you and the first one
+  hunterSpeed: 4.4,           // a little quicker than a wanderer
+  hunterRange: 9,             // how close it tries to get before standing still
+
   medkits: 2,                 // health packs standing in the arena
   medkitRespawn: 25,          // seconds before a used one comes back
   medkitRadius: 1.4,
@@ -169,7 +186,7 @@ function createGame(options) {
     kickBack: 0, reloadT: 0, active: false, shotsFired: 0, elapsed: 0,
     lookSpikes: 0, maxLookDelta: 0, zoom: 0, networked: false,
     worldTime: 0, airJumps: 0, standingOn: null,
-    health: 0, maxHealth: 0, dead: false, shield: 0,
+    health: 0, maxHealth: 0, dead: false, shield: 0, deathT: 0, respawnAt: 0,
 
     /* Everything worth bragging about. Distance is kept in world units and
      * converted on the way out — the arena is metric, a unit is a metre. */
@@ -203,7 +220,23 @@ function createGame(options) {
     targetGeo: new THREE.IcosahedronGeometry(0.62, 0),
     shardGeo: new THREE.TetrahedronGeometry(0.2, 0),
     checkLevel: function () { return checkLevel(); },
+    traceShot: function (from, dir) { return traceShot(from, dir); },
   };
+
+  /* Who a hunter may come after. Offline that is the player behind the camera
+   * and nobody else; the server hands in its own list instead, because the
+   * players it owns are not in the world the engine simulates. Positions are
+   * eye height, which is how a player is kept on both sides. */
+  function ownHunterTargets() {
+    if (cfg.headless || state.networked) return null;
+    if (!state.active || state.dead) return null;
+    return [{
+      id: null, x: state.pos.x, y: state.pos.y, z: state.pos.z,
+      health: state.health, maxHealth: state.maxHealth,
+    }];
+  }
+  var hunterTargets = ownHunterTargets;
+  ctx.hunterTargets = function () { return hunterTargets(); };
 
   var world = PB.createWorld(ctx);
   var colliders = ctx.colliders = world.colliders;
@@ -216,7 +249,11 @@ function createGame(options) {
   var movers = ctx.movers = world.movers;
   var balcony = ctx.balcony = world.balcony;
   var medkits = ctx.medkits = world.medkits;
-  ctx.remoteHitboxes = [];        // net.js fills this as players appear
+  /* The boxes other players are shot at and drawn by, filled in by net.js as
+   * they appear. One list for both jobs on purpose: an overlay that came from
+   * somewhere other than what the rounds are tested against is an overlay that
+   * can lie about it. */
+  ctx.remoteHitboxes = [];
 
   var fx = ctx.fx = PB.createEffects(ctx);
   var indicators = fx.indicators;
@@ -283,6 +320,27 @@ function createGame(options) {
 
   var raycaster = new THREE.Raycaster();
 
+  /* Remote players are shot at through the same raycast as everything else, so
+   * the client's own answer covers every kind of thing a round can land on and
+   * the server has something to check rather than search for.
+   *
+   * They are kept out of solidMeshes because the list turns over as people
+   * join and leave. Two kinds are skipped, both to match what the server does
+   * with them: somebody waiting to respawn is not in the world, and somebody
+   * who has opted out of PvP is not in the way of the round either — it
+   * carries on to whatever is behind them. */
+  function shootableRemotes() {
+    var list = [];
+    for (var i = 0; i < ctx.remoteHitboxes.length; i++) {
+      var m = ctx.remoteHitboxes[i];
+      if (m.userData.pvp === false) continue;
+      // the box hangs off the figure, which is hidden while its owner waits
+      if (m.parent && !m.parent.visible) continue;
+      list.push(m);
+    }
+    return list;
+  }
+
   // Shots are resolved by a ray from the crosshair the instant they are fired,
   // so they always land where the player is aiming. The bullet mesh then flies
   // from the muzzle to that point purely as a visual.
@@ -292,25 +350,61 @@ function createGame(options) {
     var live = targets.filter(function (t) { return t.alive; }).map(function (t) { return t.mesh; });
     var tHit = live.length ? raycaster.intersectObjects(live, false)[0] : null;
     var sHit = raycaster.intersectObjects(solidMeshes, false)[0];
+    var shootable = shootableRemotes();
+    var pHit = shootable.length ? raycaster.intersectObjects(shootable, false)[0] : null;
 
-    if (tHit && (!sHit || tHit.distance < sHit.distance)) {
+    // nearest wins; cover stays ahead of a target or a body at the same range
+    var nearest = sHit || null;
+    if (tHit && (!nearest || tHit.distance < nearest.distance)) nearest = tHit;
+    if (pHit && (!nearest || pHit.distance < nearest.distance)) nearest = pHit;
+
+    // thin air. Checked before the comparisons below, which would otherwise
+    // match a null against an equally empty tHit and take the target branch.
+    if (!nearest) return { point: from.clone().addScaledVector(dir, 300), distance: 300 };
+
+    if (nearest === tHit) {
       var owner = null;
       for (var i = 0; i < targets.length; i++) if (targets[i].mesh === tHit.object) owner = targets[i];
       return { point: tHit.point.clone(), target: owner, distance: tHit.distance };
     }
-    if (sHit) {
-      if (sHit.object.userData.npc) {
-        return { point: sHit.point.clone(), npc: sHit.object.userData.npc, distance: sHit.distance };
-      }
-      var n = sHit.face
-        ? sHit.face.normal.clone().transformDirection(sHit.object.matrixWorld)
-        : new THREE.Vector3(0, 1, 0);
-      return { point: sHit.point.clone(), normal: n, object: sHit.object, distance: sHit.distance };
+    if (nearest === pHit) {
+      return {
+        point: pHit.point.clone(),
+        playerId: pHit.object.userData.remoteId,
+        distance: pHit.distance,
+      };
     }
-    return { point: from.clone().addScaledVector(dir, 300), distance: 300 };
+    // whatever is left is solid: an NPC's box, or the world itself
+    if (sHit.object.userData.npc) {
+      return { point: sHit.point.clone(), npc: sHit.object.userData.npc, distance: sHit.distance };
+    }
+    var n = sHit.face
+      ? sHit.face.normal.clone().transformDirection(sHit.object.matrixWorld)
+      : new THREE.Vector3(0, 1, 0);
+    return { point: sHit.point.clone(), normal: n, object: sHit.object, distance: sHit.distance };
   }
 
-  function fireBullet(origin, hit) {
+  /* What the client believes it hit, for the server to check rather than go
+   * looking. Null when the round landed on the world or on nothing, and the
+   * server reads that as the miss it is. */
+  function hitClaim(hit) {
+    if (hit.target) {
+      var ti = targets.indexOf(hit.target);
+      return ti === -1 ? null : { kind: 'target', index: ti };
+    }
+    if (hit.npc) {
+      var ni = npcs.indexOf(hit.npc);
+      return ni === -1 ? null : { kind: 'npc', index: ni };
+    }
+    if (hit.playerId !== undefined) return { kind: 'player', id: hit.playerId };
+    return null;
+  }
+
+  /* `theirs` marks a round somebody else fired — another player's, or a
+   * hunter's. It travels and lands like any other, but its outcome is never
+   * ours: without this an NPC shooting at us offline resolved through our own
+   * accounting and cost us the price of a miss. */
+  function fireBullet(origin, hit, theirs) {
     var core = new THREE.Mesh(bulletGeo, bulletMat);
     var tracer = new THREE.Mesh(tracerGeo, tracerMat);
     tracer.scale.y = 2.2;
@@ -326,6 +420,7 @@ function createGame(options) {
       dir: hit.point.clone().sub(origin).normalize(),
       remaining: origin.distanceTo(hit.point),
       hit: hit,
+      theirs: !!theirs,
     });
     return core;
   }
@@ -423,6 +518,13 @@ function createGame(options) {
     dx = dx || 0;
     dy = dy || 0;
 
+    // The dead do not turn. Dropped before swallowFirstMove is spent, so the
+    // first sample after coming back is still treated as the jump it is.
+    if (state.dead) {
+      logLook('dead', dx, dy);
+      return false;
+    }
+
     // The first sample after the pointer locks carries the jump from wherever
     // the cursor happened to be, and re-entering an unlocked window produces
     // the same kind of jump. Both are indistinguishable from a violent flick,
@@ -486,6 +588,7 @@ function createGame(options) {
   // Reloading runs on game time rather than a timer, so it stays in step with
   // the animation and behaves the same when the simulation is stepped by hand.
   function reload() {
+    if (state.dead) return false;
     if (state.reloading || state.mag >= magSize()) return false;
     state.reloading = true;
     state.reloadT = 0;
@@ -543,6 +646,9 @@ function createGame(options) {
 
   function shoot() {
     var now = state.elapsed * 1000;
+    /* Nothing comes off the floor. The server refuses a dead player's rounds
+     * anyway, so firing here would only be a tracer nobody else ever sees. */
+    if (state.dead) return null;
     if (state.reloading || now - state.lastShot < fireInterval()) return null;
     if (state.mag <= 0) {
       if (now - state.lastShot > 300) {
@@ -572,6 +678,7 @@ function createGame(options) {
       emit('shotFired', {
         origin: { x: _eye.x, y: _eye.y, z: _eye.z },
         dir: { x: _fwd.x, y: _fwd.y, z: _fwd.z },
+        claim: hitClaim(hit),
       });
     }
 
@@ -619,7 +726,8 @@ function createGame(options) {
     state.level = level;
     clearLevel();
     spawnTargets();
-    var count = cfg.npcsPerLevel + (level - 1);
+    // the wanderers, and the hunters that come with every level
+    var count = cfg.npcsPerLevel + (level - 1) + cfg.hunters;
     for (var i = 0; i < count; i++) npcs.push(makeNPC(i));
     /* Put what we just spawned into world space. Shots are raycast against
      * these meshes, and the first frame is what would otherwise do it — which
@@ -783,6 +891,12 @@ function createGame(options) {
   var MAX_CARRY = 1.0;        // a jump in the world clock must not fling anyone
 
   function movePlayer(dt) {
+    /* A dead player presses nothing: no wish, no sprint, no jump. Gravity and
+     * whatever they were standing on still apply, so somebody shot in mid-air
+     * comes down instead of hanging there, and friction slides them to a stop
+     * rather than stopping them on the spot. */
+    var dead = state.dead;
+
     // ride whatever we were standing on at the end of the last frame
     var riding = state.standingOn;
     if (riding && riding.delta.lengthSq() > 0 && riding.delta.length() < MAX_CARRY) {
@@ -791,15 +905,18 @@ function createGame(options) {
     }
 
     _wish.set(0, 0, 0);
-    if (keys['KeyW']) _wish.z -= 1;
-    if (keys['KeyS']) _wish.z += 1;
-    if (keys['KeyA']) _wish.x -= 1;
-    if (keys['KeyD']) _wish.x += 1;
+    if (!dead) {
+      if (keys['KeyW']) _wish.z -= 1;
+      if (keys['KeyS']) _wish.z += 1;
+      if (keys['KeyA']) _wish.x -= 1;
+      if (keys['KeyD']) _wish.x += 1;
+    }
 
     var moving = _wish.lengthSq() > 0;
     if (moving) _wish.normalize().applyAxisAngle(UP, yawObj.rotation.y);
 
-    var maxSpeed = (keys['ShiftLeft'] || keys['ShiftRight']) ? runSpeed() : walkSpeed();
+    var sprinting = !dead && (keys['ShiftLeft'] || keys['ShiftRight']);
+    var maxSpeed = sprinting ? runSpeed() : walkSpeed();
     var v = state.vel;
 
     if (moving) {
@@ -814,7 +931,7 @@ function createGame(options) {
 
     /* Jumping, with the double-jump perk folded in. `jumpHeld` stops one long
      * press from spending both jumps in consecutive frames. */
-    if (keys['Space']) {
+    if (keys['Space'] && !dead) {
       if (state.grounded) {
         state.vy = cfg.jump;
         state.grounded = false;
@@ -855,7 +972,7 @@ function createGame(options) {
     var speed = Math.hypot(v.x, v.z);
     state.stats.distance += speed * dt;
     state.bob += dt * speed * 1.35;
-    var amp = Math.min(1, speed / walkSpeed());
+    var amp = dead ? 0 : Math.min(1, speed / walkSpeed());
     var bobY = state.grounded ? Math.sin(state.bob * 2) * 0.035 * amp : 0;
     var bobX = state.grounded ? Math.cos(state.bob) * 0.028 * amp : 0;
 
@@ -865,8 +982,42 @@ function createGame(options) {
     state.standingOn = state.grounded ? supportingMover(p) : null;
   }
 
+  /* --------------------------------------------------------- being dead */
+  /* Everything a death takes away is gone by the time this runs; what is left
+   * is showing it. The view falls to the floor and rolls onto its side, so a
+   * death reads as a death rather than as the game having stopped responding.
+   *
+   * Written absolutely rather than nudged each frame: this runs whether or not
+   * the player is being simulated, and a per-frame nudge would keep sinking
+   * through the floor while the game sits paused behind the menu. */
+  var DEATH_FALL = 0.5;       // seconds for the view to reach the floor
+  var DEATH_EYE = 0.3;        // where it comes to rest above their feet
+  var DEATH_ROLL = 0.62;      // radians of tilt once it is down
+  var DEATH_NOD = 0.14;       // and a little of it towards the floor
+
+  function updateDeathView(dt) {
+    if (state.dead) {
+      state.deathT = Math.min(1, state.deathT + dt / DEATH_FALL);
+    } else if (state.deathT === 0) {
+      return;                 // the common case: alive, and nothing to undo
+    } else {
+      /* Coming back is a teleport to a fresh spawn, not standing up where we
+       * fell, so the view is simply upright again the moment it happens. */
+      state.deathT = 0;
+    }
+
+    var e = state.deathT * state.deathT;   // a fall picks up speed as it goes
+    yawObj.position.y = state.pos.y - (cfg.eye - DEATH_EYE) * e;
+    // roll on the camera itself: pitchObj carries where the player was looking
+    // when they went down, and that is worth keeping
+    camera.rotation.z = DEATH_ROLL * e;
+    camera.rotation.x = -DEATH_NOD * e;
+  }
+
   // Runs every frame, paused or not, so a reload animates to completion.
   function poseGun() {
+    // no hands to hold it up any more
+    gun.visible = !state.dead;
     var dip = animateReload();
     var z = state.zoom * state.zoom * (3 - 2 * state.zoom);   // same ease as the lens
     var bobX = state.bobX * (1 - z * 0.8);                    // steadier when sighted
@@ -901,8 +1052,9 @@ function createGame(options) {
       }
 
       var h = b.hit;
-      if (state.networked) {
-        // the server decides what this hit; see applyServerHit
+      if (state.networked || b.theirs) {
+        // the server decides what this hit (see applyServerHit), and a round
+        // that was never ours settles nothing of ours either way
         scene.remove(b.mesh);
         var netAt = bullets.indexOf(b);
         if (netAt !== -1) bullets.splice(netAt, 1);
@@ -992,7 +1144,7 @@ function createGame(options) {
 
   // Ease the lens between hip and sighted, and tell anyone who cares.
   function updateZoom(dt) {
-    var want = (zooming && state.active) ? 1 : 0;
+    var want = (zooming && state.active && !state.dead) ? 1 : 0;
     if (state.zoom === want) return;
     var stepSize = dt / cfg.zoomTime;
     var before = state.zoom;
@@ -1025,6 +1177,12 @@ function createGame(options) {
     if (state.active) {
       movePlayer(dt);
       if (firing) shoot();
+    }
+    updateDeathView(dt);
+    // offline there is no server to bring us back, so the world does it
+    if (state.dead && !state.networked && !cfg.headless &&
+        state.respawnAt && state.elapsed >= state.respawnAt) {
+      respawnSelf();
     }
     updateReload(dt);
     perkSystem.tickHolder(state, dt);
@@ -1101,7 +1259,9 @@ function createGame(options) {
       : new THREE.Vector3(0, 1, 0);
 
     if (msg.kind === 'player') {
-      spawnIndicator(msg.killed ? cfg.scoreKill : 0, point);
+      // a kill is worth points to the player who made it; one made by the
+      // level's own enemy is worth nothing to anybody, so nothing floats up
+      spawnIndicator(msg.killed && msg.by ? cfg.scoreKill : 0, point);
       // recordHit counts the hit; counting it here as well is how accuracy
       // climbed past 100% — every hit on a player was worth two
       if (mine) {
@@ -1146,10 +1306,96 @@ function createGame(options) {
     if (!msg.origin || !msg.point) return null;
     var from = new THREE.Vector3(msg.origin.x, msg.origin.y, msg.origin.z);
     var to = new THREE.Vector3(msg.point.x, msg.point.y, msg.point.z);
-    var mesh = fireBullet(from, { point: to });
+    var mesh = fireBullet(from, { point: to }, true);
     camera.getWorldPosition(_shotFrom);
     sfx.shootAt(_shotFrom.distanceTo(from));
     return mesh;
+  }
+
+  /* ---------------------------------------------------- a hunter's round */
+  /* Who a hunter hit is decided by whoever owns the players. Online that is
+   * the server and this never runs — a networked client does not simulate
+   * NPCs at all. Offline the only player is the one behind the camera, so it
+   * is settled here, against the same box and the same reach the server would
+   * have used. */
+  var _npcFrom = new THREE.Vector3();
+  var _npcDir = new THREE.Vector3();
+  var _npcTo = new THREE.Vector3();
+  var _npcRay = new THREE.Ray();
+  var _npcBox = new THREE.Box3();
+  var _npcAt = new THREE.Vector3();
+
+  /* The one hit volume, the same one the figures carry and the server tests.
+   * The player's own collision box is a different thing and a wider one — what
+   * they bump into is not what they can be shot through. */
+  function hitVolume(pos, out) {
+    var H = PB.HIT;
+    var feet = pos.y - cfg.eye;
+    out.min.set(pos.x - H.half, feet + H.bottom, pos.z - H.half);
+    out.max.set(pos.x + H.half, feet + H.top, pos.z + H.half);
+    return out;
+  }
+
+  function takeNpcRound(shot) {
+    if (cfg.headless || state.networked) return null;
+
+    // the tracer and the crack of it, whether or not it was anywhere near us
+    _npcFrom.set(shot.origin.x, shot.origin.y, shot.origin.z);
+    _npcTo.set(shot.point.x, shot.point.y, shot.point.z);
+    showRemoteShot({ origin: shot.origin, point: shot.point });
+
+    if (!state.active || state.dead) return null;
+    _npcDir.set(shot.dir.x, shot.dir.y, shot.dir.z);
+    _npcRay.set(_npcFrom, _npcDir);
+    hitVolume(state.pos, _npcBox);
+    if (!_npcRay.intersectBox(_npcBox, _npcAt)) return null;
+    // it stopped on the world before it got to us
+    if (_npcFrom.distanceTo(_npcAt) > shot.distance + 0.01) return null;
+
+    if (shielded()) return { blocked: 'shield' };
+    setHealth(state.health - 1, state.maxHealth);
+    return { hit: true, health: state.health, killed: state.dead };
+  }
+
+  /* Somewhere to come back to. Clear of cover, and out of the lap of whatever
+   * put us down — coming back inside a hunter's range is coming back to be
+   * shot again. */
+  var _spawnProbe = new THREE.Vector3();
+
+  function spawnPoint() {
+    var lim = half - 4;
+    var fallback = null;
+    for (var i = 0; i < 40; i++) {
+      var x = (rand() - 0.5) * 2 * lim;
+      var z = (rand() - 0.5) * 2 * lim;
+      _spawnProbe.set(x, cfg.eye, z);
+      var clear = true;
+      for (var b = 0; b < obstacleBoxes.length; b++) {
+        if (obstacleBoxes[b].distanceToPoint(_spawnProbe) < 1.5) { clear = false; break; }
+      }
+      if (!clear) continue;
+      if (!fallback) fallback = { x: x, z: z };
+      var gap = Infinity;
+      for (var n = 0; n < npcs.length; n++) {
+        if (!npcs[n].hunter || !npcs[n].alive) continue;
+        gap = Math.min(gap, Math.hypot(npcs[n].root.position.x - x,
+                                       npcs[n].root.position.z - z));
+      }
+      if (gap > cfg.hunterSight * 0.4) return { x: x, z: z };
+    }
+    return fallback || { x: 0, z: 0 };
+  }
+
+  /* Offline nobody is keeping our health but us, so coming back is ours to do
+   * as well. Online the server owns both and this never runs. */
+  function respawnSelf() {
+    var at = spawnPoint();
+    teleport(at.x, cfg.eye, at.z);
+    state.respawnAt = 0;
+    setHealth(cfg.playerHealth, cfg.playerHealth);
+    setShield(cfg.spawnShield);
+    emit('respawn', { mine: true, x: at.x, y: cfg.eye, z: at.z });
+    return at;
   }
 
   /* ------------------------------------------------------- health packs */
@@ -1205,7 +1451,15 @@ function createGame(options) {
     var nowDead = state.health <= 0;
     if (was !== state.health || nowDead !== state.dead) {
       if (state.health < was) emit('hurt', { health: state.health, max: state.maxHealth });
-      if (nowDead && !state.dead) state.stats.deaths++;
+      if (nowDead && !state.dead) {
+        state.stats.deaths++;
+        /* Offline nobody else is going to bring us back, so the clock for it
+         * starts here — wherever the damage came from. Online the server owns
+         * both the death and the return, and this is left alone. */
+        if (!state.networked && !cfg.headless) {
+          state.respawnAt = state.elapsed + cfg.respawnDelay;
+        }
+      }
       state.dead = nowDead;
       emit('health', { health: state.health, max: state.maxHealth, dead: state.dead });
     }
@@ -1347,6 +1601,19 @@ function createGame(options) {
     setScore: setScore, setHealth: setHealth, breakTarget: breakTarget,
     setShield: setShield, shielded: shielded,
     medkits: medkits, applyMedkits: applyMedkits, takeMedkit: takeMedkit,
+    /* The hunters, and who they may come after. The server hands in its own
+     * list of players; offline the default answer is the one at the camera. */
+    hunters: function () {
+      var out = [];
+      for (var i = 0; i < npcs.length; i++) if (npcs[i].hunter) out.push(npcs[i]);
+      return out;
+    },
+    // null puts the default back: offline, the player behind the camera
+    setHunterTargets: function (fn) {
+      hunterTargets = fn || ownHunterTargets;
+      return hunterTargets;
+    },
+    takeNpcRound: takeNpcRound, respawnSelf: respawnSelf, spawnPoint: spawnPoint,
     medkitAt: world.medkitAt,
     applyLook: applyLook, setPitch: setPitch,
     setLookDebug: function (on) { lookDebug = !!on; if (!on) lookLog.length = 0; },
@@ -1420,8 +1687,16 @@ function createGame(options) {
     viewLayer: VIEW_LAYER,
   };
 
+  // a hunter's round, settled against the only player we know about
+  on('npcShot', takeNpcRound);
+
   startLevel(1);
   yawObj.position.copy(state.pos);
+  /* Offline nobody sends us our health, so the world starts us whole. Online
+   * the hello that follows overwrites this with the server's number. The HUD
+   * bar stays hidden either way until something actually changes it — this
+   * lands before anyone has subscribed. */
+  if (!cfg.headless) setHealth(cfg.playerHealth, cfg.playerHealth);
   emit('ammo', { mag: state.mag, size: cfg.magSize });
 
   /* Compile every shader up front.

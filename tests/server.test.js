@@ -8,7 +8,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
 const { createHeadlessGame } = require('../server/engine.js');
-const { Room, SIM_HZ, SNAPSHOT_HZ, REWIND_MS, MAX_REWIND_MS, MOVE_BURST } =
+const { Room, SIM_HZ, SNAPSHOT_HZ, MAX_REWIND_MS, MOVE_BURST } =
   require('../server/room.js');
 
 /* ------------------------------------------------------------- headless */
@@ -18,7 +18,8 @@ test('the browser engine runs in node with no renderer or DOM', () => {
   assert.equal(g.domElement, null, 'headless built a canvas');
   assert.ok(g.obstacleMeshes.length > 15, 'no obstacles');
   assert.equal(g.aliveCount(), 10, 'no targets');
-  assert.equal(g.npcsAlive(), 4, 'no NPCs');
+  assert.equal(g.npcsAlive(), g.cfg.npcsPerLevel + g.cfg.hunters, 'no NPCs');
+  assert.equal(g.hunters().length, g.cfg.hunters, 'the level has no hunter in it');
 });
 
 test('the same seed builds the same arena on both sides', () => {
@@ -184,12 +185,18 @@ test('snapshots stay small enough to send 20 times a second', () => {
 });
 
 /* -------------------------------------------------------------- shooting */
-function aimedAt(room, player, point) {
+/* A shot message aimed at a point. `claim` is what a real client would have
+ * put in it after its own raycast — the server checks that rather than
+ * searching for something to credit, so a test that omits it is testing the
+ * claimless path on purpose. */
+function aimedAt(room, player, point, claim) {
   const THREE = globalThis.THREE;
   const origin = new THREE.Vector3(player.x, player.y, player.z);
   const dir = point.clone().sub(origin).normalize();
-  return { t: 'shot', origin: { x: origin.x, y: origin.y, z: origin.z },
-           dir: { x: dir.x, y: dir.y, z: dir.z } };
+  const msg = { t: 'shot', origin: { x: origin.x, y: origin.y, z: origin.z },
+                dir: { x: dir.x, y: dir.y, z: dir.z } };
+  if (claim) msg.claim = claim;
+  return msg;
 }
 
 // stand somewhere with a clear line to a point
@@ -368,49 +375,108 @@ test('a shot judged against where the NPC was still counts', () => {
   // the client aims at where it sees an NPC, one interpolation window behind
   const room = new Room({ seed: 77 });
   const p = room.join('ana');
-  const THREE = globalThis.THREE;
-  const npc = room.game.npcs.find(n => n.alive && n.grounded);
+  const set = ranOnFrom(room, p);
+  assert.ok(set, 'the NPC never left the line of fire, test proves nothing');
 
-  const seen = npc.root.position.clone().setY(1.0);
-  assert.ok(standClear(room, p, seen), 'no clear line');
-  room.recordHistory(Date.now());
-
-  // let it run on while the shot is "in flight"
-  for (let i = 0; i < 6; i++) room.step(1000 / 30);
-  const moved = npc.root.position.distanceTo(seen.clone().setY(npc.root.position.y));
-  assert.ok(moved > 0.15, `the NPC barely moved (${moved.toFixed(2)}u), test proves nothing`);
-
-  const res = room.applyShot(p.id, aimedAt(room, p, seen));
+  const shot = aimedAt(room, p, set.seen, { kind: 'npc', index: set.index });
+  shot.lag = set.elapsed;
+  const res = room.applyShot(p.id, shot, set.now);
   assert.ok(res.ok, res.reason);
   assert.equal(res.event.kind, 'npc', 'the rewind did not credit the hit');
-  assert.ok(!npc.alive, 'the NPC survived');
+  assert.ok(!set.npc.alive, 'the NPC survived');
 });
 
-test('the rewind does not reach back further than its window', () => {
+/* Set an NPC running until it is well clear of the spot the shooter aimed at,
+ * so a shot at that spot is a genuine miss against the live world and only the
+ * rewind can credit it.
+ *
+ * The room is stepped on an explicit clock: the loop runs far faster than real
+ * time, and on Date.now() every history frame lands on the same millisecond,
+ * which quietly makes any test of *when* a shot is judged prove nothing.
+ * Returns null when the arena will not cooperate. */
+function ranOnFrom(room, player) {
+  const g = room.game;
+  const THREE = globalThis.THREE;
+  const stepMs = 1000 / 30;
+  const gapWanted = globalThis.PB.HIT.half * 4;    // two clear box widths
+
+  for (const npc of g.npcs.filter(n => n.alive && n.grounded)) {
+    const seen = npc.root.position.clone().setY(1.0);
+    if (!standClear(room, player, seen)) continue;
+
+    let t = Date.now();
+    const t0 = t;
+    room.recordHistory(t0);
+    const origin = new THREE.Vector3(player.x, player.y, player.z);
+    const dir = seen.clone().sub(origin).normalize();
+
+    for (let s = 0; s < 12; s++) { t += stepMs; room.step(stepMs, t); }
+
+    const gap = npc.root.position.clone().setY(1.0).distanceTo(seen);
+    if (gap < gapWanted) continue;
+    const live = g.traceShot(origin, dir);
+    if (live.npc === npc) continue;
+    /* And the spot they left has to still be in the clear. The arena has
+     * sliding cover in it: one that moved across the line while the NPC was
+     * running makes the rewind refuse for a reason that has nothing to do with
+     * what is being tested — a rewind never reaches through a wall. */
+    if (live.distance !== undefined && live.distance < origin.distanceTo(seen)) continue;
+    return { npc, index: g.npcs.indexOf(npc), seen, origin, dir,
+             t0, now: t, elapsed: t - t0 };
+  }
+  return null;
+}
+
+test('a round that lands in a running NPC\'s wake is not credited', () => {
+  /* The bug this replaced: the server searched every history frame inside the
+   * rewind window and kept whatever it found, so a moving figure was not a box
+   * but a smear as long as its own travel — about 1.8u at a run. A shot well
+   * behind somebody scored as a kill.
+   *
+   * Judged at the moment the client says it was looking, the old position is
+   * simply not there any more. Same ray, same history, two different claimed
+   * moments: one credits, one does not. */
   const room = new Room({ seed: 77 });
   const p = room.join('ana');
-  const npc = room.game.npcs.find(n => n.alive && n.grounded);
-  const seen = npc.root.position.clone().setY(1.0);
-  assert.ok(standClear(room, p, seen));
-  const t0 = Date.now();
-  room.recordHistory(t0);
+  const set = ranOnFrom(room, p);
+  assert.ok(set, 'the NPC never left the line of fire, test proves nothing');
 
-  // ask about that position long after the window has closed
-  const origin = new globalThis.THREE.Vector3(p.x, p.y, p.z);
-  const dir = seen.clone().sub(origin).normalize();
-  const stale = room.rewoundHit(origin, dir, 300, t0 + REWIND_MS + 500);
-  assert.equal(stale, null, 'a shot from a second ago was still credited');
+  const claim = { kind: 'npc', index: set.index };
+
+  // "I was looking at the world as it was when I fired" — the rewind holds
+  const behind = room.verifyClaim(claim, set.origin, set.dir, 300, set.now, set.elapsed, p.id);
+  assert.ok(behind, 'the rewind refused a shot at where the NPC actually was');
+
+  // "I was looking at the world as it is now" — that ground is empty
+  const live = room.verifyClaim(claim, set.origin, set.dir, 300, set.now, 0, p.id);
+  assert.equal(live, null, 'a round in the wake of a running NPC was credited');
+});
+
+test('a shot the client did not see land is a miss', () => {
+  // no claim, no hit: the server does not go looking for something to award
+  const room = new Room({ seed: 77 });
+  const p = room.join('ana');
+  const set = ranOnFrom(room, p);
+  assert.ok(set, 'the NPC never left the line of fire, test proves nothing');
+
+  const shot = aimedAt(room, p, set.seen);        // deliberately claimless
+  shot.lag = set.elapsed;
+  const res = room.applyShot(p.id, shot, set.now);
+  assert.ok(res.ok, res.reason);
+  assert.equal(res.event.kind, 'miss', 'a claimless shot was credited anyway');
+  assert.ok(set.npc.alive, 'the NPC went down to a shot nobody claimed');
 });
 
 test('a client cannot ask for unlimited rewind', () => {
   const room = new Room({ seed: 77 });
   const p = room.join('ana');
   const npc = room.game.npcs.find(n => n.alive && n.grounded);
+  const i = room.game.npcs.indexOf(npc);
   const seen = npc.root.position.clone().setY(1.0);
   assert.ok(standClear(room, p, seen));
   room.recordHistory(Date.now() - MAX_REWIND_MS - 400);   // a very old sighting
 
-  const shot = aimedAt(room, p, seen);
+  const shot = aimedAt(room, p, seen, { kind: 'npc', index: i });
   shot.lag = 60000;                                        // "I saw it a minute ago"
   const res = room.applyShot(p.id, shot);
   assert.ok(res.ok, res.reason);
@@ -433,13 +499,17 @@ test('the rewind cannot reach through cover', () => {
   room.recordHistory(Date.now());
   const origin = new THREE.Vector3(p.x, p.y, p.z);
 
-  // fire at a wall: whatever is behind it must not be credited
+  // fire at a wall: whatever is behind it must not be credited, however
+  // confidently the client claims it
   const dir = new THREE.Vector3(0, 0, -1);
   const wallHit = g.traceShot(origin, dir);
-  const beyond = room.rewoundHit(origin, dir, wallHit.distance, Date.now());
-  if (beyond) {
-    assert.ok(beyond.distance <= wallHit.distance + 0.01,
-              'the rewind credited something behind cover');
+  for (let i = 0; i < g.npcs.length; i++) {
+    const beyond = room.verifyClaim({ kind: 'npc', index: i }, origin, dir,
+                                    wallHit.distance, Date.now(), 0, p.id);
+    if (beyond) {
+      assert.ok(beyond.distance <= wallHit.distance + 0.01,
+                'the rewind credited something behind cover');
+    }
   }
 });
 
@@ -1075,7 +1145,8 @@ test('a shot at where somebody was still counts', () => {
   room.recordHistory(Date.now());
   // bo has run on since the shot was aimed
   bo.x = 4; bo.z = 3;
-  const res = room.applyShot(ana.id, Object.assign({ lag: 120 }, aimed));
+  const res = room.applyShot(ana.id, Object.assign(
+    { lag: 120, claim: { kind: 'player', id: bo.id } }, aimed));
   assert.ok(res.ok, res.reason);
   assert.equal(res.event.kind, 'player', 'the rewind did not credit the hit');
   assert.equal(bo.health, room.game.cfg.playerHealth - 1, 'no damage was done');
@@ -1224,6 +1295,130 @@ test('the dead come back with a moment of protection', () => {
   room.updateHealth(back);
   assert.ok(room.shielded(bo, back), 'came back with no protection at all');
   assert.ok(!room.shielded(bo, back + cfg.spawnShield * 1000 + 50), 'protection never ends');
+});
+
+/* ---------------------------------------------------------- the hunter */
+/* The room owns the players, so it is the room that says who the level's own
+ * enemy may come after and what its rounds land on. */
+
+// Stand a player where the hunter is looking, and hand back the shot it would
+// have taken at them.
+function hunterOn(room, player, gap = 10) {
+  const g = room.game;
+  const enemy = g.hunters()[0];
+  player.x = 0;
+  player.z = 0;
+  player.y = g.cfg.eye;
+  enemy.root.position.set(0, 0, -gap);
+  enemy.heading = 0;                       // (sin h, cos h) is +Z: straight at them
+  enemy.mark = null;
+  enemy.quarry = null;
+  enemy.sawAt = -1e9;
+  enemy.sightSince = 0;
+  enemy.nextShot = 0;
+  enemy.root.updateMatrixWorld(true);
+  return enemy;
+}
+
+test('the room tells the hunter who is worth coming after', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  bo.pvp = false;
+
+  const list = room.huntable();
+  assert.equal(list.length, 2, 'somebody was left off the list');
+  const forAna = list.find(t => t.id === ana.id);
+  assert.equal(forAna.health, ana.health, 'health did not travel with them');
+  assert.equal(forAna.y, ana.y, 'a target is not at eye height');
+  // opting out of PvP is an agreement between players, not with the level
+  assert.ok(list.some(t => t.id === bo.id), 'a player out of PvP was left off');
+
+  bo.deadUntil = Date.now() + 1000;
+  assert.equal(room.huntable().length, 1, 'it was offered somebody on the floor');
+});
+
+test('a hunter\'s round takes health off the player it hits', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  ana.shieldUntil = 0;
+  const enemy = hunterOn(room, ana, 8);
+
+  // fire it by hand rather than waiting for the AI to choose its moment
+  const shots = [];
+  room.game.on('npcShot', s => shots.push(s));
+  let landed = null;
+  for (let i = 0; i < 200 && !landed; i++) {
+    enemy.nextShot = 0;
+    enemy.sightSince = -1e9;
+    room.step(1000 / 30, Date.now());
+    while (shots.length) {
+      const event = room.applyNpcShot(shots.shift());
+      if (event && event.kind === 'player') landed = event;
+    }
+    // hold both of them still: this is about the round, not the chase
+    enemy.root.position.set(0, 0, -8);
+    enemy.root.updateMatrixWorld(true);
+    ana.health = Math.min(ana.health, room.game.cfg.playerHealth);
+  }
+  assert.ok(landed, 'nothing it fired ever landed');
+  assert.equal(landed.by, 0, 'the round was credited to a player');
+  assert.equal(landed.victim, ana.id, 'it hit the wrong player');
+  assert.equal(landed.killerName, 'THE HUNTER', 'the victim is not told what hit them');
+  assert.ok(ana.health < room.game.cfg.playerHealth, 'no damage was done');
+  assert.equal(ana.score, 0, 'being shot at moved the score');
+});
+
+test('a hunter cannot hurt the shielded, the dead, or anyone through cover', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const enemy = hunterOn(room, ana, 8);
+  const THREE = globalThis.THREE;
+  const from = { x: 0, y: 1.55, z: -8 };
+  const shot = {
+    npc: enemy, index: 0, origin: from, dir: { x: 0, y: -0.05, z: 1 },
+    point: { x: 0, y: 1.15, z: 0 }, distance: 8,
+  };
+
+  ana.shieldUntil = Date.now() + 5000;
+  let event = room.applyNpcShot(shot);
+  assert.equal(event.blocked, 'shield', 'a shielded player was hurt');
+  assert.equal(ana.health, room.game.cfg.playerHealth, 'health came off anyway');
+
+  ana.shieldUntil = 0;
+  ana.deadUntil = Date.now() + 5000;
+  event = room.applyNpcShot(shot);
+  assert.equal(event.kind, 'miss', 'it shot somebody who is already down');
+
+  // and a round that the world stopped first reaches nobody
+  ana.deadUntil = 0;
+  event = room.applyNpcShot(Object.assign({}, shot, { distance: 2 }));
+  assert.equal(event.kind, 'miss', 'a round stopped by cover still hit somebody');
+  assert.equal(ana.health, room.game.cfg.playerHealth, 'damage through cover');
+});
+
+test('a hunter kills without crediting anybody', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  ana.shieldUntil = 0;
+  ana.score = 500;
+  bo.score = 500;
+  hunterOn(room, ana, 8);
+
+  const shot = {
+    npc: room.game.hunters()[0], index: 0,
+    origin: { x: 0, y: 1.55, z: -8 }, dir: { x: 0, y: -0.05, z: 1 },
+    point: { x: 0, y: 1.15, z: 0 }, distance: 8,
+  };
+  let event = null;
+  for (let i = 0; i < room.game.cfg.playerHealth; i++) event = room.applyNpcShot(shot);
+
+  assert.ok(event.killed, 'ten rounds did not put them down');
+  assert.ok(ana.deadUntil, 'they are not waiting to respawn');
+  assert.equal(ana.deaths, 1, 'the death was not counted');
+  assert.equal(bo.score, 500, 'somebody was paid for a kill they did not make');
+  assert.equal(ana.score, 500, 'the score moved for being killed');
 });
 
 test('the arena has two health packs, in the same places on both sides', () => {

@@ -86,7 +86,12 @@ async function shot(page, name) {
 
   /* ------------------------------------------------- 2. the game itself */
   log('\n== LIVE GAME (real input) ==');
-  await page.goto(`${BASE}/index.html`, { waitUntil: 'load' });
+  /* No hunter for this section. Everything below leaves the player standing
+   * in the open for seconds at a time while a keystroke or a magazine is
+   * measured, which is exactly what the red one is built to punish — a run
+   * that happens to be found would fail on the jump and the burst and tell us
+   * nothing about either. It gets a section of its own further down. */
+  await page.goto(`${BASE}/index.html?hunters=0`, { waitUntil: 'load' });
   await page.waitForFunction('window.game', { timeout: 20000 });
 
   const fatal = await page.$eval('#fatal', el => !el.hidden);
@@ -504,6 +509,90 @@ async function shot(page, name) {
     return Math.hypot(p1.x - p0.x, p1.z - p0.z);
   });
   check('paused game ignores movement', paused < 0.001, `drifted ${paused.toFixed(4)}u`);
+
+  /* ------------------------------------------- 11. the level's own enemy */
+  log('\n== THE HUNTER ==');
+  await page.goto(`${BASE}/index.html`, { waitUntil: 'load' });
+  await page.waitForFunction('window.game', { timeout: 20000 });
+
+  const enemy = await page.evaluate(() => {
+    const h = game.hunters()[0];
+    const c = h && h.fig.materials[0].color;
+    return {
+      count: game.hunters().length,
+      first: game.npcs[0] === h,
+      red: c ? [+c.r.toFixed(2), +c.g.toFixed(2), +c.b.toFixed(2)] : null,
+      armed: !!(h && h.fig.extras.length),
+    };
+  });
+  check('every level comes with one red enemy in it',
+        enemy.count === 1 && enemy.first,
+        `${enemy.count} hunters, first NPC: ${enemy.first}`);
+  check('and it is unmistakably red', enemy.red && enemy.red[0] > 0.5 &&
+        enemy.red[1] < 0.2 && enemy.red[2] < 0.2, `rgb ${enemy.red}`);
+  check('and carries something to shoot with', enemy.armed);
+
+  /* Stand in front of it and let it work: it should find the player, close
+   * the distance, open fire, and take health off them. */
+  const hunted = await page.evaluate(async () => {
+    const h = game.hunters()[0];
+    game.setActive(true);
+    game.setShield(0);
+    game.setHealth(game.cfg.playerHealth, game.cfg.playerHealth);
+    game.teleport(h.root.position.x, game.cfg.eye, h.root.position.z + 14);
+    game.aimAt(new THREE.Vector3(h.root.position.x, 1.2, h.root.position.z));
+    h.heading = 0;                       // (sin h, cos h): straight at us
+    h.root.position.z = game.state.pos.z - 14;
+    h.mark = null; h.quarry = null; h.sawAt = -1e9; h.sightSince = 0;
+
+    let shots = 0;
+    game.on('npcShot', () => shots++);
+    const startedAt = Math.hypot(h.root.position.x - game.state.pos.x,
+                                 h.root.position.z - game.state.pos.z);
+    const t0 = game.state.elapsed;
+    while (game.state.elapsed - t0 < 14 && game.state.health > 4) {
+      await new Promise(r => setTimeout(r, 40));
+      // stand still and take it, so this measures the hunter and not the tester
+      game.state.vel.set(0, 0, 0);
+    }
+    return {
+      shots, startedAt,
+      closedTo: Math.hypot(h.root.position.x - game.state.pos.x,
+                           h.root.position.z - game.state.pos.z),
+      health: game.state.health,
+      marked: !!h.mark,
+      score: game.state.score,
+    };
+  });
+  check('it finds the player and opens fire', hunted.shots > 0 && hunted.marked,
+        `${hunted.shots} rounds`);
+  check('it closes the distance', hunted.closedTo < hunted.startedAt - 1,
+        `${hunted.startedAt.toFixed(1)}u -> ${hunted.closedTo.toFixed(1)}u`);
+  check('and takes health off whoever it hits',
+        hunted.health < 10, `health ${hunted.health}/10`);
+  check('being shot at costs the player no score', hunted.score === 0,
+        `score ${hunted.score}`);
+  await shot(page, '10-hunted.png');
+
+  const dying = await page.evaluate(async () => {
+    game.setHealth(0, game.cfg.playerHealth);
+    const fell = { ...game.state.pos };
+    const dead = game.state.dead;
+    const screenUp = !document.getElementById('dead').hidden;
+    const t0 = game.state.elapsed;
+    while (game.state.dead && game.state.elapsed - t0 < 8) {
+      await new Promise(r => setTimeout(r, 40));
+    }
+    return {
+      dead, screenUp, back: !game.state.dead, health: game.state.health,
+      moved: Math.hypot(game.state.pos.x - fell.x, game.state.pos.z - fell.z),
+      screenDown: document.getElementById('dead').hidden,
+    };
+  });
+  check('going down offline puts the death screen up', dying.dead && dying.screenUp);
+  check('and the world brings the player back on its own',
+        dying.back && dying.health === 10 && dying.moved > 1 && dying.screenDown,
+        `health ${dying.health}, ${dying.moved.toFixed(1)}u from where they fell`);
 
   check('no console errors during play', consoleErrors.length === 0,
         consoleErrors.slice(0, 3).join(' | '));
