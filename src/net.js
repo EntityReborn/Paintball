@@ -649,6 +649,14 @@ PB.createNet = function (opts) {
       n.alive = !!nb[4];
       n.grounded = !!nb[5];
       n.vy = nb[6];
+      /* What is left of it, so a hurt hunter wears a bar like a hurt player.
+       * Set here as well as in the engine's own loop: that loop is skipped
+       * entirely in a networked game, because the NPCs belong to the server. */
+      if (nb.length > 9) {
+        n.health = nb[8];
+        n.maxHealth = nb[9];
+        if (n.bar) n.bar.set(n.alive ? n.health : 0, n.maxHealth);
+      }
       if (n.fig) {
         // Step the run cycle by what actually moved this frame. Using the gap
         // between the two snapshots instead advanced a whole snapshot's worth

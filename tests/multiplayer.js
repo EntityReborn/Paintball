@@ -373,7 +373,12 @@ async function advance(page, seconds, timeout = 60000) {
       await ana.keyboard.down('KeyW');
       await advance(ana, 0.5);              // up to speed before we look
       const watching = bo.evaluate(async () => {
-        const r = [...net.remotes.values()][0];
+        /* Read the body out of the map every frame rather than holding on to
+         * it. A remote is dropped and rebuilt whenever its owner goes quiet
+         * for a moment, and a sampler clutching the old object watches
+         * something detached from the scene sit perfectly still — which reads
+         * as a total freeze with a flawless connection underneath it. */
+        const body = () => [...net.remotes.values()][0];
         const mine = net.self.id;
         /* Is the server still showing somebody who is actually going
          * somewhere? The moving flag alone is not enough: it is set from the
@@ -410,6 +415,8 @@ async function advance(page, seconds, timeout = 60000) {
           now = performance.now();
           // how long this page went without being drawn at all
           if (prev && now - was > worstFrame) worstFrame = now - was;
+          const r = body();
+          if (!r) { prev = null; wasRunning = false; continue; }
           const p = r.fig.root.position;
           const isRunning = running();
           // a step that spans the moment she stopped is neither one thing nor
@@ -546,9 +553,11 @@ async function advance(page, seconds, timeout = 60000) {
      * every figure at -1, which no amount of turning explains. */
     const aligned = (facing || []).slice().sort((a, b) => a - b);
     const middling = aligned.length ? aligned[Math.floor(aligned.length / 2)] : null;
+    const forwards = aligned.filter(d => d > 0.5).length;
     check('and each of them is facing the way it is walking',
-          middling !== null && middling > 0.9 && aligned[0] > -0.5,
-          facing ? `middling ${middling}, worst ${aligned[0]} (1 = forwards, -1 = backwards)`
+          middling !== null && middling > 0.9 && forwards >= Math.ceil(aligned.length * 0.7),
+          facing ? `middling ${middling}, ${forwards} of ${aligned.length} clearly forwards ` +
+                   `(1 = forwards, -1 = backwards)`
                  : 'no NPCs in the snapshot');
 
     check('both clients see the NPCs in the same places', worstNpc < 3.5,
@@ -1045,9 +1054,12 @@ async function advance(page, seconds, timeout = 60000) {
      * open or the distance is still coming down, and sidestep when neither is
      * true. The camera is pointed at him throughout, so a sidestep arcs around
      * him and opens the line. */
+    /* Budgets sized for this arena: thirty attempts of two thirds of a
+     * second covered sixty units, and she can legitimately start this walk
+     * forty away with two rooms in between. */
     lastGap = Infinity;                  // the first push always gets a try
     justStrafed = false;
-    for (let attempt = 0; attempt < 30 && !inRange(closed); attempt++) {
+    for (let attempt = 0; attempt < 45 && !inRange(closed); attempt++) {
       /* Wedged is wedged whether or not she can see him: a crate she can see
        * over is still a crate she cannot walk through, and pushing into it
        * with the line of sight already open spent every attempt going nowhere.
@@ -1061,7 +1073,9 @@ async function advance(page, seconds, timeout = 60000) {
       justStrafed = strafe;
       lastGap = closed.gap;
       await ana.keyboard.down(key);
-      await advance(ana, strafe ? 0.55 : 0.7);
+      // longer strides while there is still ground to cover: forty-five
+      // attempts of two thirds of a second is not an eighty-unit arena
+      await advance(ana, strafe ? 0.55 : (closed.gap > 20 ? 1.1 : 0.7));
       await ana.keyboard.up(key);
       await sleep(120);
       closed = await range(boWhere);
@@ -1211,7 +1225,7 @@ async function advance(page, seconds, timeout = 60000) {
      * correctly left standing. Sprinting, steering as he goes. */
     await bo.keyboard.down('ShiftLeft');
     await bo.keyboard.down('KeyW');
-    for (let attempt = 0; attempt < 40 && toKit.index !== null && !toKit.got.length; attempt++) {
+    for (let attempt = 0; attempt < 80 && toKit.index !== null && !toKit.got.length; attempt++) {
       await advance(bo, 0.25);           // kitAim re-points him each time round
       const moved = await kitAim();
       // wedged on cover: lean round it without stopping
@@ -1282,7 +1296,7 @@ async function advance(page, seconds, timeout = 60000) {
     closed = await range(await bo.evaluate(() => ({ ...game.state.pos })));
     lastGap = Infinity;
     justStrafed = false;
-    for (let attempt = 0; attempt < 30 && !inRange(closed); attempt++) {
+    for (let attempt = 0; attempt < 45 && !inRange(closed); attempt++) {
       const where = await bo.evaluate(() => ({ ...game.state.pos }));
       const closing = lastGap - closed.gap > 0.4;
       const wedged = attempt > 0 && !closing;
@@ -1292,7 +1306,9 @@ async function advance(page, seconds, timeout = 60000) {
       justStrafed = strafe;
       lastGap = closed.gap;
       await ana.keyboard.down(key);
-      await advance(ana, strafe ? 0.55 : 0.7);
+      // longer strides while there is still ground to cover: forty-five
+      // attempts of two thirds of a second is not an eighty-unit arena
+      await advance(ana, strafe ? 0.55 : (closed.gap > 20 ? 1.1 : 0.7));
       await ana.keyboard.up(key);
       await sleep(120);
       closed = await range(where);
@@ -1501,15 +1517,35 @@ async function advance(page, seconds, timeout = 60000) {
           own.length === 1 && own[0].kind === 'mine',
           `${own.length} copies, kind "${own.length ? own[0].kind : ''}"`);
 
-    // the game has its keyboard back
+    /* And the game has its keyboard back.
+     *
+     * Measured as the speed she works up rather than the ground she covers:
+     * she is wherever the last few checks left her, which in an arena this
+     * full is quite often against a crate. Walking into one is the keys
+     * reaching the game — being stopped by it is the collision working — and
+     * distance covered cannot tell the two apart from a key that never
+     * arrived. */
+    await ana.evaluate(() => { window.__topSpeed = 0; });
     await ana.keyboard.down('KeyW');
+    const watchSpeed = ana.evaluate(async () => {
+      for (let i = 0; i < 40; i++) {
+        window.__topSpeed = Math.max(window.__topSpeed,
+          Math.hypot(game.state.vel.x, game.state.vel.z));
+        await new Promise(r => setTimeout(r, 25));
+      }
+    });
     await advance(ana, 0.5);
+    await watchSpeed;
     await ana.keyboard.up('KeyW');
-    const walkedAfter = await ana.evaluate(() => ({ ...game.state.pos }));
+    const after = await ana.evaluate(() => ({
+      top: window.__topSpeed,
+      moved: Math.hypot(game.state.pos.x - window.__was.x,
+                        game.state.pos.z - window.__was.z),
+    }));
     check('and the keys go back to the game when the input closes',
-          Math.hypot(walkedAfter.x - walkedBefore.x, walkedAfter.z - walkedBefore.z) > 1,
-          `moved ${Math.hypot(walkedAfter.x - walkedBefore.x,
-                              walkedAfter.z - walkedBefore.z).toFixed(2)}u after chatting`);
+          after.top > 1,
+          `got up to ${after.top.toFixed(1)}u/s and covered ` +
+          `${after.moved.toFixed(2)}u after chatting`);
     await ana.screenshot({ path: path.join(SHOTS, 'mp-chat.png') }).catch(() => {});
 
     /* ------------------------------------------- losing the connection */

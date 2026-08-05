@@ -31,14 +31,26 @@ PB.createNPCs = function (ctx) {
   var npcGeo = PB.figureGeometry();
   var NPC_HEIGHT = PB.FIGURE_HEIGHT;
 
-  /* Which of a level's NPCs is the hunter.
+  /* How many hunters a level has, and which of its NPCs they are.
    *
-   * Index 0, every level, on both sides of the wire. The client rebuilds a
-   * level from a count rather than from a list, so the rule for which one comes
-   * back red has to be something both sides can work out from the index alone —
-   * anything else and the server's hunter is a wanderer on your screen. */
+   * The first ones in the list, every level, on both sides of the wire. A
+   * client rebuilds a level from a count rather than from a list, so the rule
+   * has to be something both sides can work out from the index and the level
+   * alone — anything else and the server's hunter is a wanderer on your screen.
+   *
+   * One more every few levels. The wanderer count already climbs by one a
+   * level, but wanderers do not shoot back, so a ladder made only of those is
+   * a ladder of more things to tidy up rather than a harder game. */
+  function huntersFor(level) {
+    if (cfg.hunters <= 0) return 0;
+    var extra = cfg.hunterEvery > 0
+      ? Math.floor(Math.max(0, (level || 1) - 1) / cfg.hunterEvery)
+      : 0;
+    return Math.min(cfg.hunterMax, cfg.hunters + extra);
+  }
+
   function isHunterIndex(i) {
-    return cfg.hunters > 0 && i < cfg.hunters;
+    return i < huntersFor(state.level);
   }
 
   function makeNPC(i) {
@@ -73,7 +85,23 @@ PB.createNPCs = function (ctx) {
       hunter: hunter,
       quarry: null, mark: null, sawAt: -1e9, sightSince: 0,
       nextShot: 0, hold: false, veer: rand() < 0.5 ? -1 : 1,
+
+      /* A wanderer goes down to the first round that finds it, as it always
+       * has. A hunter has to be worn down, so the thing a level is built
+       * around is not settled by whoever shoots first. */
+      health: hunter ? cfg.hunterHealth : 1,
+      maxHealth: hunter ? cfg.hunterHealth : 1,
+      hurtAt: -1e9,
     };
+    /* A bar over a hunter that has been hurt, the same one a hurt player
+     * wears. Something that takes several rounds has to show what is left of
+     * it, or a fight with one is guesswork — and it only appears once it has
+     * been hit, so an untouched one is not advertising anything. */
+    if (hunter && !cfg.headless && PB.createHealthBar) {
+      npc.bar = PB.createHealthBar();
+      fig.root.add(npc.bar.sprite);
+    }
+
     fig.hitbox.userData.npc = npc;
     solidMeshes.push(fig.hitbox);
     placeNPC(npc);
@@ -456,9 +484,15 @@ PB.createNPCs = function (ctx) {
   }
 
   // NPCs stay down: they are the level objective, not respawning scenery.
+  // what putting this one down is worth
+  function worthOf(npc) {
+    return npc && npc.hunter ? cfg.scoreHunter : cfg.scoreNpc;
+  }
+
   function knockDownNPC(npc) {
     if (!npc.alive) return 0;
     npc.alive = false;
+    npc.health = 0;
     npc.downFor = 0;
     npc.vy = 3.0;
 
@@ -468,16 +502,43 @@ PB.createNPCs = function (ctx) {
 
     var where = npc.root.position.clone();
     where.y = 1.3;
-    var gained = addScore(cfg.scoreNpc, where);
+    var gained = addScore(worthOf(npc), where);
     emit('npcDown', { npc: npc, score: state.score, left: npcsAlive() });
     checkLevel();
     return gained;
+  }
+
+  /* One round into an NPC.
+   *
+   * A wanderer has one point of health and goes down to the first round that
+   * finds it, which is how it has always been. A hunter takes several, so
+   * meeting one is a fight rather than a reflex — and so the thing the level
+   * is built around is not settled by whoever pulls the trigger first.
+   *
+   * Whether it died is the answer, because the caller has to know: online it
+   * decides what the server tells the room, and offline it decides whether the
+   * score and the count move.
+   */
+  function hitNPC(npc, damage) {
+    if (!npc || !npc.alive) return { hit: false, killed: false, health: 0 };
+    npc.health -= (damage || 1);
+    if (npc.health > 0) {
+      npc.hurtAt = state.elapsed;         // for the mark over its head
+      emit('npcHurt', { npc: npc, health: npc.health, max: npc.maxHealth });
+      return { hit: true, killed: false, health: npc.health };
+    }
+    knockDownNPC(npc);
+    return { hit: true, killed: true, health: 0 };
   }
 
   function updateNPCs(dt) {
     for (var i = 0; i < npcs.length; i++) {
       var n = npcs[i];
       var p = n.root.position;
+
+      // what is left of it, wherever the number came from: locally offline,
+      // and out of the snapshot when the server is running the level
+      if (n.bar) n.bar.set(n.alive ? n.health : 0, n.maxHealth);
 
       if (!n.alive) {
         // topple over and stay down for the rest of the level
@@ -550,7 +611,8 @@ PB.createNPCs = function (ctx) {
 
   return {
     npcs: npcs, makeNPC: makeNPC, placeNPC: placeNPC,
-    npcsAlive: npcsAlive, knockDownNPC: knockDownNPC, updateNPCs: updateNPCs,
+    npcsAlive: npcsAlive, knockDownNPC: knockDownNPC, hitNPC: hitNPC,
+    huntersFor: huntersFor, updateNPCs: updateNPCs,
   };
 };
 

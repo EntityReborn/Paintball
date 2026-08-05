@@ -4288,6 +4288,93 @@ describe('Hunters', function () {
                    'came back standing where they fell');
   });
 
+  it('takes several rounds to put down, unlike a wanderer', function () {
+    var set = faceOff(12);
+    var e = set.e;
+    assert.equal(e.health, set.g.cfg.hunterHealth, 'it did not start whole');
+    assert.greater(e.maxHealth, 1, 'it is as soft as a wanderer');
+
+    var down = null;
+    for (var i = 1; i < set.g.cfg.hunterHealth; i++) {
+      down = set.g.hitNPC(e, 1);
+      assert.ok(!down.killed, 'round ' + i + ' of ' + set.g.cfg.hunterHealth + ' finished it');
+      assert.ok(e.alive, 'it went down early');
+      assert.equal(down.health, set.g.cfg.hunterHealth - i, 'the wrong amount came off');
+    }
+    down = set.g.hitNPC(e, 1);
+    assert.ok(down.killed, 'the last round did not finish it');
+    assert.ok(!e.alive, 'it survived every round it has');
+  });
+
+  it('pays out only on the round that finishes it, and pays more', function () {
+    var set = faceOff(12);
+    set.g.startLevel(1);
+    var e = set.g.hunters()[0];
+    assert.ok(e, 'no hunter');
+    /* Something else left standing, so putting the hunter down does not also
+     * clear the level: the completion bonus would land in the same total and
+     * this would be measuring both at once. */
+    set.g.spawnTarget(20, 2, 20, false);
+
+    var score = set.g.state.score;
+    set.g.hitNPC(e, 1);
+    assert.equal(set.g.state.score, score, 'a hit that did not finish it paid out');
+
+    while (e.alive) set.g.hitNPC(e, 1);
+    assert.equal(set.g.state.score - score, set.g.cfg.scoreHunter,
+                 'putting it down paid the wrong amount');
+    assert.greater(set.g.cfg.scoreHunter, set.g.cfg.scoreNpc,
+                   'it is worth no more than a wanderer');
+  });
+
+  it('sends one more of them every few levels', function () {
+    var h = hunterGame();
+    var seen = [];
+    [1, 2, 4, 5, 8, 9, 40].forEach(function (level) {
+      h.startLevel(level);
+      seen.push([level, h.hunters().length]);
+      h.hunters().forEach(function (e, i) {
+        assert.ok(h.npcs[i] === e, 'the hunters are not the first NPCs of the level');
+      });
+    });
+    var at = function (level) {
+      return seen.filter(function (s) { return s[0] === level; })[0][1];
+    };
+    assert.equal(at(1), h.cfg.hunters, 'level one has the wrong number');
+    assert.equal(at(4), h.cfg.hunters, 'it grew before it should have');
+    assert.equal(at(5), h.cfg.hunters + 1, 'it never grew');
+    assert.equal(at(9), h.cfg.hunters + 2, 'it stopped growing');
+    assert.equal(at(40), h.cfg.hunterMax, 'it grew past its own ceiling');
+    h.startLevel(1);
+  });
+
+  it('wears what is left of it once it has been hit', function () {
+    var set = faceOff(12);
+    set.g.startLevel(1);
+    var e = set.g.hunters()[0];
+    assert.ok(e.bar, 'a hunter has nothing to show its health on');
+    // and something else standing, so putting it down does not clear the
+    // level and take the figure being inspected with it
+    set.g.spawnTarget(20, 2, 20, false);
+    stepGame(set.g, 1 / 60);
+    assert.ok(!e.bar.sprite.visible, 'an untouched hunter is advertising its health');
+    set.g.hitNPC(e, 1);
+    stepGame(set.g, 1 / 60);
+    assert.ok(e.bar.sprite.visible, 'a hurt hunter shows nothing');
+    while (e.alive) set.g.hitNPC(e, 1);
+    stepGame(set.g, 1 / 60);
+    assert.ok(!e.bar.sprite.visible, 'a body is still wearing a health bar');
+  });
+
+  it('leaves a wanderer as soft as it always was', function () {
+    freshLevel();
+    var wanderer = g.npcs.filter(function (n) { return !n.hunter && n.alive; })[0];
+    assert.ok(wanderer, 'no wanderer to shoot');
+    assert.equal(wanderer.maxHealth, 1, 'a wanderer now takes more than one round');
+    var down = g.hitNPC(wanderer, 1);
+    assert.ok(down.killed, 'one round no longer puts a wanderer down');
+  });
+
   it('goes down to a round like anything else, and finishes the level', function () {
     var set = faceOff(12);
     var level = set.g.state.level;

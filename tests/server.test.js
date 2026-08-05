@@ -268,7 +268,9 @@ test('server raycasts hit the real arena, not geometry stuck at the origin', () 
 test('a shot at an NPC puts it down and scores the shooter', () => {
   const room = new Room({ seed: 31 });
   const p = room.join('ana');
-  const npc = room.game.npcs.find(n => n.alive && n.grounded);
+  // a wanderer, not the hunter: this is about a round putting an ordinary
+  // NPC down, and a hunter takes several — it has tests of its own
+  const npc = room.game.npcs.find(n => n.alive && n.grounded && !n.hunter);
   const chest = npc.root.position.clone().setY(1.0);
   assert.ok(standClear(room, p, chest), 'no clear line to an NPC');
 
@@ -284,7 +286,9 @@ test('a shot at an NPC puts it down and scores the shooter', () => {
 test('a downed NPC stays down across ticks and snapshots', () => {
   const room = new Room({ seed: 31 });
   const p = room.join('ana');
-  const npc = room.game.npcs.find(n => n.alive && n.grounded);
+  // a wanderer, not the hunter: this is about a round putting an ordinary
+  // NPC down, and a hunter takes several — it has tests of its own
+  const npc = room.game.npcs.find(n => n.alive && n.grounded && !n.hunter);
   const chest = npc.root.position.clone().setY(1.0);
   assert.ok(standClear(room, p, chest));
   room.applyShot(p.id, aimedAt(room, p, chest));
@@ -482,7 +486,9 @@ test('a shot the client did not see land is a miss', () => {
 test('a client cannot ask for unlimited rewind', () => {
   const room = new Room({ seed: 77 });
   const p = room.join('ana');
-  const npc = room.game.npcs.find(n => n.alive && n.grounded);
+  // a wanderer, not the hunter: this is about a round putting an ordinary
+  // NPC down, and a hunter takes several — it has tests of its own
+  const npc = room.game.npcs.find(n => n.alive && n.grounded && !n.hunter);
   const i = room.game.npcs.indexOf(npc);
   const seen = npc.root.position.clone().setY(1.0);
   assert.ok(standClear(room, p, seen));
@@ -1307,6 +1313,100 @@ test('the dead come back with a moment of protection', () => {
   room.updateHealth(back);
   assert.ok(room.shielded(bo, back), 'came back with no protection at all');
   assert.ok(!room.shielded(bo, back + cfg.spawnShield * 1000 + 50), 'protection never ends');
+});
+
+test('a hunter takes several rounds, and only the last one pays', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const g = room.game;
+  const enemy = g.hunters()[0];
+  assert.ok(enemy, 'no hunter in the level');
+  assert.equal(enemy.health, g.cfg.hunterHealth, 'it did not start whole');
+
+  // stand where it can be shot, and fire at its chest
+  const THREE = globalThis.THREE;
+  const chest = enemy.root.position.clone().setY(1.0);
+  assert.ok(standClear(room, ana, chest), 'no clear line to the hunter');
+  const shoot = () => {
+    const o = { x: ana.x, y: ana.y, z: ana.z };
+    const d = new THREE.Vector3(chest.x - o.x, chest.y - o.y, chest.z - o.z).normalize();
+    return room.applyShot(ana.id, { t: 'shot', origin: o, dir: { x: d.x, y: d.y, z: d.z } },
+                          Date.now() + 5000 * ++shoot.n);
+  };
+  shoot.n = 0;
+
+  const before = ana.score;
+  for (let i = 1; i < g.cfg.hunterHealth; i++) {
+    const res = shoot();
+    assert.ok(res.ok, res.reason);
+    assert.equal(res.event.kind, 'npc', `round ${i} missed`);
+    assert.equal(res.event.killed, false, `round ${i} finished it`);
+    assert.equal(res.event.npcHealth, g.cfg.hunterHealth - i, 'the wrong amount came off');
+    assert.ok(enemy.alive, 'it went down early');
+    assert.equal(ana.score, before, 'a hit that did not finish it paid out');
+    assert.equal(ana.stats.npcsDown, 0, 'it was counted before it went down');
+  }
+
+  const last = shoot();
+  assert.ok(last.event.killed, 'the last round did not finish it');
+  assert.ok(last.event.hunter, 'the room was not told which kind it was');
+  assert.ok(!enemy.alive, 'it survived every round it has');
+  assert.equal(ana.score - before, g.cfg.scoreHunter, 'the wrong payout');
+  assert.equal(ana.stats.npcsDown, 1, 'it was not counted');
+});
+
+test('a wanderer still goes down to one round', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const g = room.game;
+  const wanderer = g.npcs.filter(n => !n.hunter && n.alive)[0];
+  assert.ok(wanderer, 'no wanderer');
+  assert.equal(wanderer.maxHealth, 1, 'a wanderer now takes more than one round');
+
+  const THREE = globalThis.THREE;
+  const chest = wanderer.root.position.clone().setY(1.0);
+  assert.ok(standClear(room, ana, chest), 'no clear line to a wanderer');
+  const o = { x: ana.x, y: ana.y, z: ana.z };
+  const d = new THREE.Vector3(chest.x - o.x, chest.y - o.y, chest.z - o.z).normalize();
+  const res = room.applyShot(ana.id, { t: 'shot', origin: o, dir: { x: d.x, y: d.y, z: d.z } });
+  assert.equal(res.event.kind, 'npc', 'missed');
+  assert.ok(res.event.killed, 'one round no longer puts a wanderer down');
+  assert.equal(ana.score, g.cfg.scoreNpc, 'a wanderer paid a hunter\'s price');
+});
+
+test('the snapshot carries what is left of every NPC', () => {
+  const room = new Room({ seed: 4242 });
+  room.join('ana');
+  const g = room.game;
+  const enemy = g.hunters()[0];
+  g.hitNPC(enemy, 1);
+
+  const entry = room.snapshot().npcs[g.npcs.indexOf(enemy)];
+  assert.equal(entry[8], g.cfg.hunterHealth - 1, 'the health did not travel');
+  assert.equal(entry[9], g.cfg.hunterHealth, 'nor did what it started with');
+});
+
+test('the levels bring more hunters, the same way on both sides', () => {
+  const room = new Room({ seed: 4242 });
+  const g = room.game;
+  const seen = {};
+  for (const level of [1, 4, 5, 9, 40]) {
+    g.startLevel(level);
+    seen[level] = g.hunters().length;
+    // and always the first NPCs of the level, which is the whole agreement:
+    // a client rebuilds a level from a count and works the rest out itself
+    g.hunters().forEach((h, i) => assert.equal(g.npcs[i], h, `level ${level} order`));
+  }
+  assert.equal(seen[1], g.cfg.hunters);
+  assert.equal(seen[4], g.cfg.hunters, 'it grew early');
+  assert.equal(seen[5], g.cfg.hunters + 1, 'it never grew');
+  assert.equal(seen[9], g.cfg.hunters + 2);
+  assert.equal(seen[40], g.cfg.hunterMax, 'it grew past its ceiling');
+
+  // the level message says how many NPCs there are, which is what a client
+  // rebuilds from — the split between hunters and wanderers is derived
+  g.startLevel(5);
+  assert.equal(room.levelMessage().npcs, g.npcs.length, 'the count sent is wrong');
 });
 
 /* ---------------------------------------------------------- the hunter */

@@ -40,6 +40,9 @@ var DEFAULTS = {
   npcsPerLevel: 4,            // level 1; one more per level after that
   scoreTarget: 100,
   scoreNpc: 250,
+  /* Worth more than a wanderer, because it costs more to take down and
+   * because it is the thing that was shooting at you. */
+  scoreHunter: 750,
   scoreMiss: -25,
   scoreLevelBonus: 500,
   scoreKill: 1000,
@@ -51,7 +54,10 @@ var DEFAULTS = {
 
   /* The red one, added to every level on top of the wanderers. It hunts and
    * shoots; everything below is the shape of how well. */
-  hunters: 1,                 // how many per level
+  hunters: 1,                 // how many the first levels get
+  hunterEvery: 4,             // and one more every this many levels
+  hunterMax: 4,               // never more than this at once
+  hunterHealth: 3,            // rounds to put one down; a wanderer takes one
   /* How far it can see and how close it fights are both about the ground it
    * has to cover, so both come off the arena unless they are given. Written
    * as a fixed forty-two units, it saw most of a sixty-unit map and about a
@@ -312,6 +318,8 @@ function createGame(options) {
   var placeNPC = N.placeNPC;
   var npcsAlive = N.npcsAlive;
   var knockDownNPC = N.knockDownNPC;
+  var hitNPC = N.hitNPC;
+  var huntersFor = N.huntersFor;
   var updateNPCs = N.updateNPCs;
 
   var debugView = cfg.headless ? null : PB.createDebug(ctx);
@@ -732,6 +740,12 @@ function createGame(options) {
       var npc = npcs[n];
       scene.remove(npc.root);
       npc.root.traverse(function (o) { if (o.isMesh) o.material.dispose(); });
+      // a hunter's health bar is a canvas and a texture of its own
+      if (npc.bar) {
+        npc.bar.material.dispose();
+        npc.bar.texture.dispose();
+        npc.bar = null;
+      }
       var idx = solidMeshes.indexOf(npc.hitbox);
       if (idx !== -1) solidMeshes.splice(idx, 1);
     }
@@ -749,8 +763,8 @@ function createGame(options) {
     state.level = level;
     clearLevel();
     spawnTargets();
-    // the wanderers, and the hunters that come with every level
-    var count = cfg.npcsPerLevel + (level - 1) + cfg.hunters;
+    // the wanderers, and however many hunters this level is due
+    var count = cfg.npcsPerLevel + (level - 1) + huntersFor(level);
     for (var i = 0; i < count; i++) npcs.push(makeNPC(i));
     /* Put what we just spawned into world space. Shots are raycast against
      * these meshes, and the first frame is what would otherwise do it — which
@@ -1094,9 +1108,14 @@ function createGame(options) {
         checkLevel();                 // the last target can finish the level too
       } else if (h.npc && h.npc.alive) {
         recordHit(h.point);
-        state.stats.npcsDown++;
-        knockDownNPC(h.npc);
-        emit('hit', { npc: h.npc, score: state.score, left: aliveCount() });
+        // a hunter takes several rounds, so only the one that finishes it
+        // counts as one put down
+        var down = hitNPC(h.npc, 1);
+        if (down.killed) state.stats.npcsDown++;
+        emit('hit', {
+          npc: h.npc, killed: down.killed, health: down.health,
+          score: state.score, left: aliveCount(),
+        });
         sfx.hit();
       } else {
         // hit nothing worth hitting: a wall, the floor, a body, or thin air
@@ -1309,10 +1328,20 @@ function createGame(options) {
       if (mine) sfx.hit();
       emit('hit', { target: t, score: state.score, left: aliveCount(), mine: !!mine });
     } else if (msg.kind === 'npc') {
-      if (mine) { state.stats.npcsDown++; recordHit(point); }
-      spawnIndicator(cfg.scoreNpc, point);
+      /* A hunter takes several rounds, so a hit is not a kill. Only the round
+       * that finishes one is counted and paid for; the rest say so by landing
+       * and nothing else. */
+      var finished = msg.killed !== false;
+      if (mine) {
+        recordHit(point);
+        if (finished) state.stats.npcsDown++;
+      }
+      if (finished) spawnIndicator(msg.hunter ? cfg.scoreHunter : cfg.scoreNpc, point);
       if (mine) sfx.hit();
-      emit('hit', { npc: npcs[msg.index], score: state.score, left: aliveCount(), mine: !!mine });
+      emit('hit', {
+        npc: npcs[msg.index], killed: finished, health: msg.npcHealth,
+        score: state.score, left: aliveCount(), mine: !!mine,
+      });
     } else {
       if (mine) { state.stats.misses++; state.stats.streak = 0; }
       if (point && msg.normal) {
@@ -1659,7 +1688,8 @@ function createGame(options) {
     npcsAlive: npcsAlive, addScore: addScore, spawnIndicator: spawnIndicator,
     moveTarget: moveTarget, makeNPC: makeNPC,
     traceShot: traceShot, aliveCount: aliveCount, movePlayer: movePlayer,
-    updateNPCs: updateNPCs, knockDownNPC: knockDownNPC, placeNPC: placeNPC, poseGun: poseGun,
+    updateNPCs: updateNPCs, knockDownNPC: knockDownNPC, hitNPC: hitNPC,
+    huntersFor: huntersFor, placeNPC: placeNPC, poseGun: poseGun,
     arenaFingerprint: arenaFingerprint,
     stats: stats, resetStats: resetStats, recordHit: recordHit, FEET_PER_UNIT: FEET_PER_UNIT,
     applyServerHit: applyServerHit, showRemoteShot: showRemoteShot,

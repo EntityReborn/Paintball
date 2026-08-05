@@ -734,12 +734,22 @@ class Room {
       event.blocked = (outcome && outcome.blocked) || null;
       if (!event.blocked) player.stats.shotsHit++;
     } else if (hit.npc && hit.npc.alive) {
+      /* A hunter takes several rounds. Only the one that finishes it pays out
+       * and counts, and the room is told which kind this was so every screen
+       * can show a hit that landed differently from one that ended it. */
+      const npc = hit.npc;
+      const down = g.hitNPC(npc, 1);
       event.kind = 'npc';
-      event.index = g.npcs.indexOf(hit.npc);
-      g.knockDownNPC(hit.npc);
+      event.index = g.npcs.indexOf(npc);
+      event.hunter = !!npc.hunter;
+      event.killed = down.killed;
+      event.npcHealth = down.health;
+      event.npcMaxHealth = npc.maxHealth;
       player.stats.shotsHit++;
-      player.stats.npcsDown++;
-      this.award(player, cfg.scoreNpc);
+      if (down.killed) {
+        player.stats.npcsDown++;
+        this.award(player, npc.hunter ? cfg.scoreHunter : cfg.scoreNpc);
+      }
     } else {
       event.kind = 'miss';
       if (process.env.SHOT_DEBUG) {
@@ -881,6 +891,8 @@ class Room {
         round(n.root.position.x), round(n.root.position.y), round(n.root.position.z),
         round(n.heading), n.alive ? 1 : 0, n.grounded ? 1 : 0, round(n.vy),
         round(n.root.rotation.x),        // toppling over when downed
+        // what is left of it, so a hurt hunter wears it where everyone sees
+        n.health, n.maxHealth,
       ])),
       targets: g.targets.map(t => ([
         round(t.mesh.position.x), round(t.mesh.position.y), round(t.mesh.position.z),
