@@ -2,7 +2,8 @@
 
 A browser first-person shooting range. Walk a walled arena with WASD, look with the
 mouse, and shoot the low-poly NPCs running and jumping around the level. Floating
-targets — some fixed, some drifting — are bonus score on the side.
+targets — some fixed, some drifting — are bonus score on the side. One of the
+figures is red, and it is looking for you.
 
 ## Play
 
@@ -18,19 +19,26 @@ vendored in `vendor/`.
 | `Shift` | sprint |
 | `Space` | jump |
 | `R` | reload |
+| `Tab` | scoreboard (hold) |
+| `Enter` | chat |
 | `Esc` | pause |
 
 **A level ends when the arena is clear** — every NPC down *and* every target
 broken. NPCs do not respawn, so the level is a hunt; the fresh set that appears
 belongs to the next level, which has one more NPC than the last.
 
+**One of them shoots back.** Every level comes with a hunter: red, carrying a
+weapon, and always the first NPC of the level on both sides of the wire. See
+[The hunter](#the-hunter).
+
 | Event | Score |
 | --- | --- |
 | target broken | +100 |
-| NPC down | +250 |
+| NPC down (the hunter included) | +250 |
 | **player killed** | **+1000** |
 | level complete | +500 |
 | shot that hits nothing | −25 |
+| being shot, or killed by the hunter | nothing — it costs you health, not points |
 
 The score never goes below zero. Every hit and every miss floats a `+100` / `−25`
 label at the spot, and the score readout flashes green or red to match.
@@ -68,6 +76,77 @@ lifetime column lives in this browser's local storage and is folded in while you
 play, when you pause, and on the way out, so closing the tab does not lose the
 last few minutes.
 
+## The hunter
+
+Every level has one, on top of the wanderers. It is red — the one hue nothing
+else in the game may use — it carries a visor, a pack and a weapon so it reads
+as something that shoots back, and it is worth the same as any other NPC to put
+down. It is always NPC index 0, because a client rebuilds a level from a count
+rather than a list, so which one comes back red has to be something both sides
+can work out from the index alone.
+
+**What it knows is a memory, not a feed.** It learns where you are only while
+it can actually see you: within 42 units, inside a forward cone, and with
+nothing solid in between. Break the line and it works from where you were and
+which way you were going, running that guess on for a couple of seconds and
+then walking in on the spot itself. Seven seconds after losing you it gives up
+and goes back to patrolling. Standing behind cover is a way out of a fight,
+which it would not be if it simply always knew.
+
+**Having seen you it stays on you.** Swapping to whoever is nearest each time
+somebody steps behind a crate means fighting nobody, so another player has to
+look clearly easier — how far off they are, weighed against how much of them is
+left — before it is worth turning away from the one already being worn down.
+
+**Its aim is average on purpose.** A cone that opens with range rather than a
+line, and no allowance at all for a target that is moving. Standing in the open
+at the range it likes costs about half the rounds it sends; a long shot mostly
+does not land. It closes to nine units and holds there, sight or no sight — it
+never walks into your face, because a hunter you cannot help but shoot is not
+one.
+
+Who its rounds hit is settled by whoever owns the players: the room, online,
+testing them against the same box a player's round is tested against. Nobody is
+credited with those kills and nobody pays for them, and opting out of PvP does
+not take you off its list — that setting is an agreement between players, and
+the level's own enemy is not one.
+
+| | |
+| --- | --- |
+| per level | 1 (`hunters`) |
+| sight / field of view | 42u, ±1.15 rad |
+| memory / guess | 7s, extrapolated for the first 2.5s |
+| aim cone | ±0.11 rad, no leading |
+| rate / reaction | one round per 0.8s, 0.45s to open fire |
+| speed / standoff | 4.4u/s, holds at 9u |
+
+`index.html?hunters=0` takes it out, which is how the scripted test runs get an
+arena where nothing shoots back.
+
+## Dying
+
+Being killed takes everything away until you are put back: no movement, no
+turning, no firing, no sights, and the gun goes down. Gravity and whatever you
+were standing on still apply, so somebody shot in mid-air comes down rather
+than hanging there.
+
+The view falls over half a second from eye height to a foot off the floor and
+rolls onto its side, keeping the angle you were looking at when you went down,
+and the whole picture goes red. Coming back is a fresh spawn, so the view is
+simply upright again.
+
+Offline the world runs that loop itself — you start whole, take damage from the
+hunter, go down, and come back after the same delay the server would have used,
+somewhere clear of whatever put you down.
+
+**Being shot says which way it came from.** A red flash tells you that you are
+being hit and nothing else, which is no use when it came from somewhere you
+cannot see. A wedge sits around the crosshair at the bearing the round came
+from, fading over a second and a half. It is fixed at the moment of the hit
+rather than following the shooter: it marks where the shot came from, not where
+they are now, and a mark that swings while you turn to face it is one you can
+never line up on. A round stopped by a shield still says where it came from.
+
 ## Multiplayer
 
 Online play is opt-in — `index.html?mp` joins the server the page came from, and
@@ -86,10 +165,11 @@ in the bottom-left corner and the screen flashes red when you are hit. Health
 comes back on its own at a point every two seconds, and being hit restarts that
 wait, so a firefight cannot be won by standing still. The dead get a screen
 saying who did it and how long until they are back; they spend two and a half
-seconds on the floor — no shooting, no moving, no body in the world for anyone
-else to shoot — and come back whole, somewhere clear and well away from whoever
-is still standing. Players arrive the same way, so nobody spawns inside anybody
-else.
+seconds on the floor — no shooting, no moving, no turning, no body in the world
+for anyone else to shoot, and the view down there with them — and come back
+whole, somewhere clear and well away from whoever is still standing. Players
+arrive the same way, so nobody spawns inside anybody else. See
+[Dying](#dying).
 
 **Three seconds of protection** come with every arrival and every respawn, drawn
 as a bubble around the figure. Without it the player who killed you is still
@@ -106,6 +186,65 @@ Names and health bars are drawn behind whatever is in front of them. Floating
 them over the world regardless would be a wallhack: you could read where
 somebody was through solid cover.
 
+**Hold `Tab` for the scoreboard**: who is here, their score, kills and deaths,
+who is on the floor waiting to come back, who is away, and what their machine
+is managing — frames a second and the round trip they last measured. Your own
+row is picked out. Offline it lists the one player there is and says why the
+rest of the table is empty, because a key that does nothing reads as a broken
+key.
+
+The table travels on its own message once a second rather than in the snapshot:
+the snapshot carries a score already but no name, kills or deaths, and those
+move a handful of times a match. The server sorts it, so every client shows the
+same order rather than each inventing its own tie-break.
+
+Frame rate and round trip are each machine's word for itself — nobody else can
+see your frame rate, and a round trip is only measurable from the end that
+started it — so both are held to a sane range on arrival and nothing depends on
+either. Under thirty frames or over a hundred and twenty milliseconds is
+coloured.
+
+**Press `Enter` to say something.** The same log carries what the room does
+without being asked: who joined, who left, who lost connection and came back,
+and who killed whom, including the deaths the hunter hands out. Every line is
+stamped in the reader's own local time, while the stamp itself comes from the
+server so two people in different places see the same order. Lines fade after a
+few seconds and come back in full while the input is open.
+
+The server owns what may be said, because it is other people's text going onto
+everyone's screen: control characters out, runs of whitespace collapsed, a
+hundred and twenty characters, cut rather than refused. Rate limiting is an
+allowance rather than a gap — three in hand, one back every two seconds — so a
+burst is conversation and a stream is not, and being turned away is told to the
+sender alone. Nothing appears on your own screen until it comes back from the
+server, so what you see is what was actually said.
+
+Typing takes the keyboard away from the game entirely rather than pausing it:
+"well shot" has W, S and A in it, and a key that still reaches the game is a
+player who walks into a wall while writing about it.
+
+**A dropped connection keeps its seat.** The server hands out a token with the
+first hello; a socket that goes away has its seat held for forty-five seconds,
+and a client that reconnects presents the token to pick it back up — same id,
+same score, same kills and deaths. Retries back off from a second to ten over
+about a minute, which catches a redeploy quickly without hammering a server
+that is down.
+
+They come out of the world the instant the socket goes, though: no body to soak
+up rounds or be shot for points, no name over it, no place in a spawn point's
+reckoning, nothing to pick a pack or a perk up from, and no healing or
+respawning while nobody is driving. They stay on the scoreboard marked AWAY,
+because the score is still theirs. Coming back is on the same terms as a
+respawn — a moment of protection, and a moment where their own idea of where
+they are is not held against them.
+
+Leaving on purpose says so. The server cannot tell a closed tab from a tunnel,
+so a client that is going sends word and gives the seat up at once rather than
+sitting on the scoreboard for a minute after walking off. If the room emptied
+and the match ended while somebody was away, the arena they hold was built from
+a seed that no longer applies, and the page reloads rather than papering over
+it.
+
 ```bash
 npm start                       # server + client on :8080
 ```
@@ -120,8 +259,17 @@ stopped.
 **Each session gets its own map.** When the first player joins an empty room
 the world is rebuilt: a new arena, level one, no bodies and nothing left on the
 ground from whoever was there before. Anyone joining after that lands in the
-match already in progress. Set `MAP_SEED` to pin the arena instead — the match
-still resets, but the layout stays put.
+match already in progress. Somebody still inside their forty-five seconds of
+grace counts as being in the room — their score is being kept for them, and
+rebuilding the world underneath it would hand them back a match that no longer
+exists. Set `MAP_SEED` to pin the arena instead — the match still resets, but
+the layout stays put.
+
+The server takes a few settings from the environment, all of them for tuning
+and for tests that need a smaller or quieter world: `MAP_SEED`,
+`NPCS_PER_LEVEL`, `TARGETS_PER_LEVEL`, `PERK_EVERY`, and `HUNTERS` (`0` leaves
+the arena to the wanderers). The page takes `?hunters=N` and `?shadows=0` for
+the same reasons.
 
 **Hybrid authority.** Clients own where they are; the server owns everything
 else and checks every position it is told about against the movement rules —
@@ -176,18 +324,28 @@ behind, the server rewinds up to 350ms — more if a slow client asks, capped at
 through the gaps. The rewind can never reach through cover.
 
 The server hands out the map seed on join, so every client generates a
-byte-identical arena from the same code. The NPCs and targets are simulated
-server-side and sent in snapshots; clients render everyone else one
-interpolation window (110ms) behind arrival so the motion is smooth rather than
-arriving in 20Hz steps.
+byte-identical arena from the same code. The NPCs and targets — the hunter
+among them — are simulated server-side and sent in snapshots; clients render
+everyone else one measured interpolation window behind arrival so the motion is
+smooth rather than arriving in steps.
 
 | | |
 | --- | --- |
 | simulation | 30Hz |
 | snapshots | 30Hz, one per tick |
-| client → server | 60Hz position |
+| scoreboard | 1Hz, its own message |
+| client → server | 60Hz position, 1Hz frame rate and round trip, 5s statistics |
 | drawn behind | 45–180ms, measured |
+| seat held after a drop | 45s |
 | transport | WebSocket, same origin as the page |
+
+The clock everyone else is drawn at advances by the time that actually passed,
+not by the frame delta the game hands out — that one is clamped to 50ms so a
+hitch cannot fling the player through a wall, which is right for physics and
+wrong for a playback clock. A client drawing every 120ms gained 50ms a frame,
+fell behind real time by more than half, hit the half-second resynchronisation
+and snapped: the other player frozen for a third of a second and then jumping
+several metres, on exactly the machines that can least afford it.
 
 **How far behind you see somebody else.** Two things used to make that worse
 than it needed to be. Snapshots went out at 20Hz off a 30Hz tick, which does
@@ -220,9 +378,10 @@ and the difference between those two round trips lands straight in the answer.
 
 ```
 server/index.js   http + websocket on one port, static client, /healthz
-server/room.js    the match: players, plausibility checks, snapshots
+server/room.js    the match: players, plausibility checks, snapshots, chat,
+                  the scoreboard, and holding a seat for a dropped socket
 server/engine.js  loads the browser engine into node
-src/net.js        client socket, snapshot buffer, remote bodies
+src/net.js        client socket, snapshot buffer, remote bodies, reconnection
 src/figure.js     the low-poly body, shared by NPCs and remote players
 ```
 
@@ -269,7 +428,7 @@ src/style.css   HUD and menu styling
 src/game.js     createGame(): composes the modules, owns state, input and the loop
 src/world.js    arena floor, perimeter walls, scattered cover
 src/targets.js  target spawning, drifting, breaking
-src/npcs.js     low-poly figures: build, wander, run and jump animation
+src/npcs.js     low-poly figures: build, wander, and the hunter that comes for you
 src/perks.js    pickups and the rules they bend while they last
 src/options.js  settings, validated and kept in local storage
 src/debug.js    the hitbox and collider overlays
@@ -278,7 +437,8 @@ src/weapon.js   the viewmodel and its reload animation
 src/effects.js  pooled score labels, debris shards, break flashes
 src/audio.js    synthesised sound effects
 vendor/         three.js r160 (UMD build, loaded as a classic script)
-tests/          browser test suite and the end-to-end driver
+tests/          browser test suite and the end-to-end drivers
+tests/chrome.js how every driver launches Chrome, in one place
 ```
 
 The modules are plain scripts that hang off a `PB` namespace. `createGame` builds
@@ -293,44 +453,57 @@ a web server.
 
 Two layers, both driving the real engine in a real WebGL context.
 
-**Browser suite** (`tests/tests.html`) — 249 tests over bootstrap, world
+**Browser suite** (`tests/tests.html`) — 274 tests over bootstrap, world
 generation, targets, rendering, movement, collision, shooting, breaking, levels,
 input, the reload animation, NPCs, view angles, zoom, drifting targets, scoring,
 score indicators, player statistics, telling players from NPCs, the balcony,
 moving cover, perks, jumping onto cover, settings, the debug overlays, name
-tags, health packs, shields, the hit volume, lifetime statistics,
-performance, and HUD wiring. Rendering is
+tags, health packs, shields, the hit volume, being dead, the hunter, where a
+round came from, lifetime statistics, performance, and HUD wiring. Rendering is
 checked by reading pixels back off the canvas; input by dispatching real
 `KeyboardEvent` / `MouseEvent` objects. Open it in a browser to watch it run, or
 let the driver do it.
 
 **End-to-end driver** (`tests/verify.js`) — launches Chrome, runs the suite, then
 plays the game through Chrome's own input pipeline (trusted keyboard and mouse
-events, real pointer lock) and writes screenshots to `tests/shots/`.
+events, real pointer lock) and writes screenshots to `tests/shots/`. It finishes
+with a section on the hunter: that every level has one, that it is unmistakably
+red and armed, that it finds a player, closes, opens fire and takes health off
+them, and that going down offline puts the death screen up and the world brings
+you back on its own.
 
-**Server tests** (`tests/server.test.js`) — 74 node tests over the headless
+**Server tests** (`tests/server.test.js`) — 91 node tests over the headless
 engine, seed determinism, the room's plausibility rules, spawn placement,
 server-side shot validation and lag compensation, the player-versus-player rules
 (ten hits to kill, healing, respawning, spawn protection, the shield, health
-packs, opting out of the fight, no shooting yourself or the dead), the hit
-volume agreeing between client and server, renaming,
+packs, opting out of the fight, no shooting yourself or the dead), the hunter's
+rounds (who they may hit, that a kill by one is credited to nobody), the
+scoreboard and what each machine reports about itself, chat cleaning and rate
+limiting, holding a seat open for a dropped socket and giving it up when the
+grace runs out, the hit volume agreeing between client and server, renaming,
 snapshot cadence and size, and the static file server's path handling.
 
 **Menus** (`tests/ui.js`) — drives the pause-screen panels in a real browser:
 the buttons open their panels without starting the game, the debug toggles put
 real geometry in the scene, settings survive a reload, the lifetime figures
-outlive the page, and a player with no name is asked for one before joining.
+outlive the page, a player with no name is asked for one before joining, and the
+scoreboard and the chat both work offline with nobody else there.
 
 **Multiplayer** (`tests/multiplayer.js`) — starts the server, opens two real
 Chrome windows against it, walks one player with genuine key presses and checks
 the other window sees that movement on the right body in the right place, that
-both built the same arena, and that a teleport gets rejected and corrected. It
-also runs one player at the other and kills them: the health drops on the
-victim's own screen, the bar appears over their head on the shooter's, a point
-comes back on its own, the tenth hit pays 1000 and takes the body out of the
-world, the victim is told who did it, and they return on full health somewhere
-else. Then a rename crossing the room, a health pack collected by one player and
-gone for both, and somebody stepping out of the fight and back into it.
+both built the same arena, that every NPC is facing the way it is walking, and
+that a teleport gets rejected and corrected. It also runs one player at the
+other and kills them: the health drops on the victim's own screen, the bar
+appears over their head on the shooter's, the mark on his screen points back at
+her, a point comes back on its own, the tenth hit pays 1000 and takes the body
+out of the world, the victim is told who did it, and they return on full health
+somewhere else. Then the scoreboard on `Tab` with the frame rate and round trip
+each client reported, a message typed with real keystrokes reaching the other
+window (and W, S and A not walking the typist across the arena), a socket pulled
+out from under one client and reconnecting on its own to the same seat, a rename
+crossing the room, a health pack collected by one player and gone for both, and
+somebody stepping out of the fight and back into it.
 
 ```bash
 npm run test:server   # node tests
@@ -340,9 +513,27 @@ npm run test:mp       # two browsers, one server
 npm test              # all three
 ```
 
-One thing to know if you write more multiplayer tests: each client needs its
-**own browser window**. A hidden tab stops running `requestAnimationFrame`, so a
+The whole suite — server, browser, menus, two-browser multiplayer — runs in
+about 95 seconds.
+
+Two things to know if you write more multiplayer tests. Each client needs its
+**own browser window**: a hidden tab stops running `requestAnimationFrame`, so a
 second client in a second tab silently freezes and never processes a snapshot.
+
+And the drivers use **hardware GL**, from one place (`tests/chrome.js`). They
+used to force `--use-angle=swiftshader`, which rasterises every pixel on the
+CPU — on a machine with a GPU that is 13fps against 144, and since every wait in
+the suite is on the game clock the whole thing ran at a thirteenth of speed. It
+was not only slow: a client drawing at 13fps cannot drain its own socket between
+frames, so it processed a third of the snapshots it was sent and the networking
+tests spent their time measuring the renderer, failing on whichever check caught
+the machine at its worst. `SOFTWARE_GL=1` puts the old behaviour back for a
+machine with no GPU at all.
+
+A check that genuinely cannot run — the arena offering no clear line to line up
+on, or a starved client that never got the frames to watch with — says so and
+says which, rather than failing. A suite that fails half the time stops being
+read.
 
 ```bash
 npm run serve
@@ -355,8 +546,9 @@ npm test
 ```
 
 The driver needs Chrome at the default Windows path; override with `CHROME_PATH`.
-It waits on the game clock rather than the wall clock, because headless Chrome
-falls back to software rendering and runs at a few frames a second.
+It waits on the game clock rather than the wall clock: a wall-clock wait
+measures how fast the machine draws rather than what the game did with the
+time, which matters most under `SOFTWARE_GL=1`.
 
 ## Debugging the view angles
 
@@ -436,6 +628,14 @@ re-entering the window rather than a real flick.
   -Z, which is also where a player yaw of zero looks, so the extra half turn on
   remote players pointed them backwards. NPCs had the opposite problem: they
   travel along local +Z, so they needed the half turn nobody had given them.
+- **And every NPC in a networked game walked backwards for months.** The same
+  fact, in the one place it had not been written down. The wire carries a
+  heading — a direction of travel — and the client drawing from a snapshot
+  applied it straight to the figure's rotation, half a turn from where it
+  should have been. Nobody noticed while they only wandered aimlessly; it was
+  unmissable the moment one of them started walking at people. The half turn
+  now lives in `figure.js` next to the fact it depends on, and both the engine
+  and the client go through it.
 - **An arena cleared in multiplayer just sat there.** The server broke the
   target but never asked whether that finished the level — only the client's
   local hit path did that, and it is skipped in networked play. NPC kills
@@ -460,3 +660,22 @@ re-entering the window rather than a real flick.
   now warmed up at load, the shards are pooled, opaque, and kept out of the shadow
   pass, and the break flash reuses lights that live in the scene permanently
   (adding a light at runtime forces every material in the scene to recompile).
+- **Being shot at cost the player points.** A round somebody else fired — a
+  hunter's, offline — travelled as an ordinary bullet and was resolved through
+  our own accounting when it landed, which counted it as our miss and took the
+  price of one off our score. A round that was never ours settles nothing of
+  ours either way now.
+- **A death took nothing away.** Until recently being killed meant a caption
+  and nothing else: you could still run, turn and shoot while the server was
+  refusing every word of it. Everything is taken away now, and the view falls
+  to the floor so it reads as a death rather than as the game freezing.
+- **The test suite was measuring the renderer.** Every driver forced software
+  rasterisation on a machine with a GPU. It made the suite thirteen times
+  slower and, worse, starved each client's socket so the networking tests were
+  really frame-rate tests — they failed a different check most runs, which is
+  how a suite stops being trusted. See [Tests](#tests).
+- **A remote player froze and then jumped, on slow clients only.** The
+  interpolation clock advanced by the game's frame delta, which is clamped at
+  50ms so a hitch cannot fling the player through a wall. Right for physics,
+  wrong for a playback clock: a client drawing every 120ms fell behind real
+  time by more than half and then hit the half-second resynchronisation.
