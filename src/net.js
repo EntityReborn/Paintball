@@ -232,6 +232,14 @@ PB.createNet = function (opts) {
       emit('scores', msg);
       return;
     }
+    if (msg.t === 'chat') {
+      emit('chat', msg);
+      return;
+    }
+    if (msg.t === 'chatRejected') {
+      emit('chatRejected', msg);
+      return;
+    }
     if (msg.t === 'shotRejected') {
       stats.rejected++;
       stats.lastRejection = msg.reason;
@@ -602,6 +610,14 @@ PB.createNet = function (opts) {
     update: update,
     bracket: bracket,
     ping: function () { send({ t: 'ping', c: now() }); },
+    /* Say something to the room. Nothing goes on our own screen here — it
+     * comes back from the server like everybody else's, so what we see is
+     * what was actually said rather than what we hoped to say. */
+    say: function (text) {
+      var said = String(text === undefined || text === null ? '' : text).trim();
+      if (!said) return false;
+      return send({ t: 'chat', text: said.slice(0, 200) });
+    },
     // what the interpolation is currently costing, for the HUD and the tests
     delay: function () {
       return { target: targetDelay(), gap: arrivalGap, jitter: arrivalJitter };

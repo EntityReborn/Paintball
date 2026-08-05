@@ -293,6 +293,38 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
           !!alone.note && /OFFLINE/.test(alone.note), alone.note || 'no note');
     await page.screenshot({ path: path.join(SHOTS, 'menu-scoreboard.png') });
 
+    /* ------------------------------------------------- the chat, offline */
+    /* The log is a record of what happened as well as a conversation, so it
+     * works with nobody to talk to — and says as much rather than pretending
+     * a message went somewhere. */
+    await page.keyboard.press('Enter');
+    await sleep(150);
+    const chatUp = await page.evaluate(() => ({
+      inputUp: !document.getElementById('chat-form').hidden,
+      focused: document.activeElement === document.getElementById('chat-input'),
+    }));
+    check('ENTER opens the chat input offline as well',
+          chatUp.inputUp && chatUp.focused,
+          `input up ${chatUp.inputUp}, focused ${chatUp.focused}`);
+
+    await page.keyboard.type('anybody there');
+    await page.keyboard.press('Enter');
+    await sleep(200);
+    const said = await page.evaluate(() => ({
+      inputUp: !document.getElementById('chat-form').hidden,
+      lines: [...document.querySelectorAll('#chat-log .line')].map(l => ({
+        at: l.querySelector('.at').textContent,
+        said: l.querySelector('.said').textContent,
+      })),
+    }));
+    check('sending closes it again', !said.inputUp);
+    check('and says there is nobody to hear it',
+          said.lines.length === 1 && /NOBODY TO TALK TO/.test(said.lines[0].said),
+          said.lines.map(l => l.said).join(' | ') || 'no lines');
+    check('with a local clock on it',
+          !!said.lines.length && /^\[\d{1,2}:\d{2}(\s?[AaPp][Mm])?\]$/.test(said.lines[0].at),
+          said.lines.length ? said.lines[0].at : 'no lines');
+
     /* ------------------------------------- asking a new player their name */
     await page.evaluate(() => { localStorage.removeItem('paintball.options'); });
     await page.goto(`${BASE}/index.html?mp`, { waitUntil: 'load' });

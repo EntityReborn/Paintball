@@ -45,6 +45,15 @@
     <div class="wait">BACK IN <span id="dead-count">0</span></div>
   </div>
 
+  <div id="chat">
+    <div id="chat-log"></div>
+    <form id="chat-form" hidden autocomplete="off">
+      <span class="prompt">SAY</span>
+      <input id="chat-input" type="text" maxlength="120" autocomplete="off"
+             spellcheck="false" aria-label="say something to the room">
+    </form>
+  </div>
+
   <div id="board" hidden>
     <div class="head">
       <span class="who">PLAYER</span>
@@ -75,6 +84,7 @@
     <b>SPACE</b><span>jump</span>
     <b>R</b><span>reload</span>
     <b>TAB</b><span>scores</span>
+    <b>ENTER</b><span>chat</span>
     <b>ESC</b><span>pause</span>
   </div>
 </div>

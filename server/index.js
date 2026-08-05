@@ -164,6 +164,22 @@ wss.on('connection', socket => {
       return;
     }
 
+    /* Somebody typed something. The room decides whether it may be said —
+     * what is in it, and how often — and everyone including the sender gets
+     * it back from there, so nobody's screen shows a line the others never
+     * saw. Turned away quietly, to the sender alone: a rate limit that
+     * announces itself to the room is worth spamming for. */
+    if (msg.t === 'chat') {
+      const res = room.chat(player.id, msg.text);
+      if (res.ok) {
+        broadcast(res.event);
+        log(`${res.event.name}: ${res.event.text}`);
+      } else {
+        send(socket, { t: 'chatRejected', reason: res.reason });
+      }
+      return;
+    }
+
     if (msg.t === 'stats') {
       // the client's own accounting, kept for the leaderboard work to come
       player.clientStats = msg.stats;
@@ -179,7 +195,9 @@ wss.on('connection', socket => {
     if (!player) return;
     sockets.delete(player.id);
     room.leave(player.id);
-    broadcast({ t: 'left', id: player.id });
+    // the name goes with it: whoever is left has to write a line about them,
+    // and by the time this lands they are no longer anywhere to be looked up
+    broadcast({ t: 'left', id: player.id, name: player.name });
     log(`player ${player.id} left — ${room.players.size} in the room`);
   });
 

@@ -43,6 +43,12 @@ const MOVE_BURST = 4;
  * than anybody can read it. */
 const SCORES_MS = 1000;
 
+/* How much chat one player may put on everyone else's screen. Three in hand
+ * and one back every two seconds: a burst is conversation, a stream is not. */
+const CHAT_BURST = 3;
+const CHAT_REFILL_MS = 2000;
+const CHAT_MAX = 120;
+
 class Room {
   constructor(opts = {}) {
     // A pinned seed is for tuning and for tests that need the same arena every
@@ -810,6 +816,42 @@ class Room {
     };
   }
 
+  /* --------------------------------------------------------------- chat */
+  /* What somebody typed, cleaned up and stamped.
+   *
+   * Everything here is a rule about other people's text going onto everyone
+   * else's screen, which is why none of it is left to the sender: length,
+   * what characters may be in it, and how often. The client cleans and escapes
+   * as well, but a client is only ever the first line of that.
+   *
+   * The stamp is the server's clock. Every screen renders it in its own local
+   * time, which is what the reader wants to see — and taking it from the
+   * server means two people in different places still see the same order. */
+  chat(id, text, now = Date.now()) {
+    const player = this.players.get(id);
+    if (!player) return { ok: false, reason: 'unknown player' };
+
+    const said = cleanChat(text);
+    if (!said) return { ok: false, reason: 'nothing to say' };
+
+    /* An allowance rather than a gap between messages: a burst of three is
+     * ordinary conversation, and a steady stream of them is not. Refills at
+     * one every two seconds. */
+    const since = Math.max(0, now - (player.chatAt || 0));
+    player.chatCredit = Math.min(CHAT_BURST,
+      (player.chatCredit === undefined ? CHAT_BURST : player.chatCredit) + since / CHAT_REFILL_MS);
+    player.chatAt = now;
+    if (player.chatCredit < 1) {
+      return { ok: false, reason: 'too much at once' };
+    }
+    player.chatCredit -= 1;
+
+    return {
+      ok: true,
+      event: { t: 'chat', from: player.id, name: player.name, text: said, at: now },
+    };
+  }
+
   /* --------------------------------------------------------- scoreboard */
   /* Who is in the room and how they are doing, on its own message rather than
    * in the snapshot.
@@ -910,6 +952,21 @@ function sweptHitBox(ax, ay, az, bx, by, bz, out) {
   return out;
 }
 
+/* What may go on everyone else's screen.
+ *
+ * Control characters out — a newline turns one line into two, and a stray
+ * escape sequence can do worse to whatever is reading the server log. Runs of
+ * whitespace collapse, because a message padded to the length limit is a way
+ * of taking the whole log for yourself. The cap goes on what is left. */
+function cleanChat(raw) {
+  if (typeof raw !== 'string') return '';
+    return raw
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, CHAT_MAX);
+}
+
 /* The client's own sanitiser, run again here. Never trust the name a socket
  * sends: it goes over every other player's head, and the rule for what may be
  * in one lives in exactly one place. */
@@ -919,4 +976,5 @@ function cleanName(raw) {
   return String(raw || 'player').replace(/[^A-Za-z0-9 _-]/g, '').trim().slice(0, 16) || 'player';
 }
 
-module.exports = { Room, SIM_HZ, SNAPSHOT_HZ, MAX_REWIND_MS, MOVE_BURST };
+module.exports = { Room, SIM_HZ, SNAPSHOT_HZ, MAX_REWIND_MS, MOVE_BURST,
+                   CHAT_MAX, CHAT_BURST, cleanChat };

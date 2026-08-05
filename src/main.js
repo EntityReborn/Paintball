@@ -94,7 +94,116 @@ var el = {
   deadCount: document.getElementById('dead-count'),
   board: document.getElementById('board'),
   boardRows: document.getElementById('board-rows'),
+  chat: document.getElementById('chat'),
+  chatLog: document.getElementById('chat-log'),
+  chatForm: document.getElementById('chat-form'),
+  chatInput: document.getElementById('chat-input'),
 };
+
+/* ------------------------------------------------------------------ chat */
+/* The log carries two kinds of line: what somebody said, and what the room
+ * did — who arrived, who left, who killed whom. Both are stamped with the
+ * reader's own local time, so everyone reads their own clock and nobody has
+ * to work out what the server's clock means.
+ *
+ * Lines fade out on their own so the corner is not permanently occupied, and
+ * come back in full the moment the input is opened. */
+var CHAT_KEEP = 40;
+var CHAT_FADE_MS = 12000;
+var chatOpen = false;
+
+function clockOf(at) {
+  var d = at ? new Date(at) : new Date();
+  if (isNaN(d.getTime())) d = new Date();
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+/* Built out of nodes with textContent rather than markup: nothing anybody
+ * types can ever be anything but text, whatever the server let through. */
+function chatLine(opts) {
+  if (!el.chatLog) return null;
+  var line = document.createElement('div');
+  line.className = 'line' + (opts.kind ? ' ' + opts.kind : '');
+
+  var at = document.createElement('span');
+  at.className = 'at';
+  at.textContent = '[' + clockOf(opts.at) + ']';
+  line.appendChild(at);
+
+  if (opts.from) {
+    var who = document.createElement('span');
+    who.className = 'from';
+    who.textContent = opts.from + ':';
+    line.appendChild(who);
+    line.appendChild(document.createTextNode(' '));
+  }
+
+  var said = document.createElement('span');
+  said.className = 'said';
+  said.textContent = opts.text;
+  line.appendChild(said);
+
+  el.chatLog.appendChild(line);
+  while (el.chatLog.children.length > CHAT_KEEP) {
+    el.chatLog.removeChild(el.chatLog.firstChild);
+  }
+  setTimeout(function () { line.classList.add('faded'); }, CHAT_FADE_MS);
+  return line;
+}
+
+function chatNote(text, kind) {
+  return chatLine({ text: text, kind: kind || 'note' });
+}
+
+function openChat() {
+  if (chatOpen || !el.chatForm) return;
+  chatOpen = true;
+  el.chat.classList.add('open');
+  el.chatForm.hidden = false;
+  el.chatInput.value = '';
+  /* Hands off the game while typing. Unbinding is the whole of it rather than
+   * pausing: a key that still reaches the game is a player who walks into a
+   * wall and reloads while writing "reloading". Anything held at the moment
+   * the input opens is let go of too, or they keep walking. */
+  if (game) {
+    game.unbindInput(window);
+    Object.keys(game.keys).forEach(function (k) { game.keys[k] = false; });
+    game.setFiring(false);
+    game.setZooming(false);
+  }
+  el.chatInput.focus();
+}
+
+function closeChat() {
+  if (!chatOpen) return;
+  chatOpen = false;
+  el.chat.classList.remove('open');
+  el.chatForm.hidden = true;
+  el.chatInput.value = '';
+  el.chatInput.blur();
+  if (game) game.bindInput(window);
+}
+
+function sendChat() {
+  var text = el.chatInput.value.trim();
+  closeChat();
+  if (!text) return false;
+  if (net && net.self && net.self.id) return net.say(text);
+  // offline the log is a record of what happened, not a conversation
+  chatNote('OFFLINE — THERE IS NOBODY TO TALK TO');
+  return false;
+}
+
+if (el.chatForm) {
+  el.chatForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    sendChat();
+  });
+  // clicking about must not leave the game unable to hear the keyboard
+  el.chatInput.addEventListener('blur', function () {
+    if (chatOpen) closeChat();
+  });
+}
 
 /* ------------------------------------------------------------ scoreboard */
 /* Held on TAB. Online the rows are the server's, sorted its way so everybody
@@ -351,6 +460,10 @@ game.on('shield', function () { toast('SHIELDED'); });
 game.on('health', function (d) {
   if (d.dead) { if (el.dead.hidden) showDeath(killedBy); }
   else hideDeath();
+  /* Offline there is no room to report it, and only one thing in the level
+   * that can do it. Online the hit message carries both names and says so
+   * properly, so this would be the same death written twice. */
+  if (d.dead && !net) chatNote('THE HUNTER killed you', 'kill');
 });
 game.on('reloadStart', function () { el.reloading.textContent = 'RELOADING'; });
 game.on('reloadEnd', function () { el.reloading.textContent = ''; refresh(); });
@@ -404,6 +517,13 @@ game.start();
 }
 
 window.addEventListener('keydown', function (e) {
+  // typing takes the keyboard: the form sends on ENTER, ESCAPE gives up on it
+  if (chatOpen) {
+    if (e.code === 'Escape') closeChat();
+    if (e.code === 'Tab') e.preventDefault();
+    return;
+  }
+
   if (e.code === 'Escape' && ui && ui.isOpen()) {
     ui.close();
     e.stopPropagation();
@@ -414,6 +534,10 @@ window.addEventListener('keydown', function (e) {
   if (e.code === 'Tab') {
     e.preventDefault();
     if (!e.repeat) showBoard(true);
+  }
+  if ((e.code === 'Enter' || e.code === 'NumpadEnter') && !e.repeat) {
+    e.preventDefault();
+    openChat();
   }
 }, true);
 
@@ -501,6 +625,9 @@ if (!wantsNet) {
     net.attach(game);
     game.on('frame', function (dt) { net.update(dt); });
     ui.applyAll();
+    // nobody broadcasts your own arrival to you, and an empty log on the way
+    // in looks like a log that does not work
+    chatNote('you joined as ' + ((msg.you && msg.you.name) || options.get('name')));
     el.menuScore.textContent = 'ONLINE  ·  MAP ' + msg.seed;
     setInterval(function () { net.ping(); }, 2000);
   });
@@ -521,10 +648,32 @@ if (!wantsNet) {
     if (msg.by === net.self.id && msg.killed) {
       toast('KILLED ' + (msg.victimName || '') + '  +' + game.cfg.scoreKill);
     }
+    // every death in the room goes in the log, whoever it belonged to
+    if (msg.killed) {
+      chatNote((msg.killerName || 'somebody') + ' killed ' +
+               (msg.victimName || 'somebody'), 'kill');
+    }
   });
 
   // the room's table, as often as it is sent
   net.on('scores', renderBoard);
+
+  /* ------------------------------------------------- the room, out loud */
+  net.on('chat', function (msg) {
+    chatLine({
+      at: msg.at, from: msg.name, text: msg.text,
+      kind: msg.from === net.self.id ? 'mine' : '',
+    });
+  });
+  net.on('chatRejected', function (msg) {
+    chatNote(msg.reason === 'too much at once'
+      ? 'SLOW DOWN — TOO MUCH AT ONCE'
+      : 'THAT COULD NOT BE SAID');
+  });
+  net.on('joined', function (p) { chatNote(p.name + ' joined'); });
+  net.on('left', function (msg) {
+    chatNote((msg.name || net.names.get(msg.id) || 'somebody') + ' left');
+  });
 
   net.on('disconnected', function () {
     el.menuScore.textContent = 'DISCONNECTED';

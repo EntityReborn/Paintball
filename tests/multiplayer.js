@@ -1347,6 +1347,83 @@ async function advance(page, seconds, timeout = 60000) {
             ? `ana ${anaRow.cells.join('/')}, bo ${boRow.cells.join('/')}`
             : 'a row is missing');
 
+    /* ---------------------------------------------------------- chat */
+    /* Typed for real: ENTER to open, keystrokes through the browser's own
+     * input pipeline, ENTER to send. What ana types has to reach bo, and the
+     * room's own notices — who joined, who killed whom — have to be in both
+     * logs with a clock on them. */
+    const readLog = page => page.evaluate(() => ({
+      lines: [...document.querySelectorAll('#chat-log .line')].map(l => ({
+        at: l.querySelector('.at').textContent,
+        from: l.querySelector('.from') ? l.querySelector('.from').textContent : null,
+        said: l.querySelector('.said').textContent,
+        kind: l.className.replace('line', '').trim(),
+      })),
+      open: document.getElementById('chat').classList.contains('open'),
+      inputUp: !document.getElementById('chat-form').hidden,
+    }));
+
+    const kills = (await readLog(bo)).lines.filter(l => /killed/.test(l.said));
+    check('a kill is written into the log for everyone',
+          kills.length > 0 && /ana/.test(kills[0].said) && /bo/.test(kills[0].said),
+          kills.length ? kills[0].said : 'no kill line');
+    check('and the join was noted when they arrived',
+          (await readLog(bo)).lines.some(l => /joined/.test(l.said)),
+          'no join line');
+    check('every line carries a local clock',
+          (await readLog(bo)).lines.every(l => /^\[\d{1,2}:\d{2}(\s?[AaPp][Mm])?\]$/.test(l.at)),
+          (await readLog(bo)).lines.map(l => l.at).slice(0, 3).join(' '));
+
+    await ana.keyboard.press('Enter');
+    await sleep(150);
+    const typing = await readLog(ana);
+    check('ENTER opens the chat input', typing.open && typing.inputUp,
+          `open ${typing.open}, input up ${typing.inputUp}`);
+
+    const walkedBefore = await ana.evaluate(() => {
+      window.__was = { ...game.state.pos };
+      return window.__was;
+    });
+    /* W, S and A are in "well shot" — with the game still listening they walk
+     * her across the arena while she writes about it. */
+    await ana.keyboard.type('well shot');
+    await sleep(200);
+    const whileTyping = await ana.evaluate(() => ({
+      typed: document.getElementById('chat-input').value,
+      moved: Math.hypot(game.state.pos.x - window.__was.x, game.state.pos.z - window.__was.z),
+      firing: game.isFiring(),
+    }));
+    check('typing goes into the box and not into the game',
+          whileTyping.typed === 'well shot' && whileTyping.moved < 0.05 && !whileTyping.firing,
+          `"${whileTyping.typed}", moved ${whileTyping.moved.toFixed(2)}u`);
+
+    await ana.keyboard.press('Enter');
+    await sleep(400);
+
+    const afterSend = await readLog(ana);
+    check('sending closes the input again', !afterSend.open && !afterSend.inputUp,
+          `open ${afterSend.open}, input up ${afterSend.inputUp}`);
+
+    const heard = (await readLog(bo)).lines.filter(l => l.said === 'well shot');
+    check('what one player says reaches the other',
+          heard.length === 1 && /ana/.test(heard[0].from || ''),
+          heard.length ? `${heard[0].from} ${heard[0].said}` : 'bo never heard it');
+    const own = (await readLog(ana)).lines.filter(l => l.said === 'well shot');
+    check('and comes back to the one who said it, once',
+          own.length === 1 && own[0].kind === 'mine',
+          `${own.length} copies, kind "${own.length ? own[0].kind : ''}"`);
+
+    // the game has its keyboard back
+    await ana.keyboard.down('KeyW');
+    await advance(ana, 0.5);
+    await ana.keyboard.up('KeyW');
+    const walkedAfter = await ana.evaluate(() => ({ ...game.state.pos }));
+    check('and the keys go back to the game when the input closes',
+          Math.hypot(walkedAfter.x - walkedBefore.x, walkedAfter.z - walkedBefore.z) > 1,
+          `moved ${Math.hypot(walkedAfter.x - walkedBefore.x,
+                              walkedAfter.z - walkedBefore.z).toFixed(2)}u after chatting`);
+    await ana.screenshot({ path: path.join(SHOTS, 'mp-chat.png') }).catch(() => {});
+
     /* -------------------------------------- stepping out of the fight */
     await bo.evaluate(() => { options.set('pvp', false); net.setPvp(false); });
     await sleep(700);

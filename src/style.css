@@ -251,6 +251,45 @@ canvas { display: block; position: fixed; inset: 0; }
 /* nothing to aim while you are on the floor */
 #hud.dead #crosshair { opacity: 0; }
 
+/* the chat log, bottom left above the health bar */
+#chat {
+  position: absolute; left: 24px; bottom: 78px; width: 420px; max-width: 46vw;
+}
+#chat-log {
+  display: flex; flex-direction: column; justify-content: flex-end;
+  gap: 2px; max-height: 30vh; overflow: hidden;
+}
+#chat-log .line {
+  font-size: 12.5px; line-height: 1.45; letter-spacing: .04em;
+  color: #dbe6f3; text-shadow: 0 1px 3px rgba(0,0,0,.95);
+  opacity: 1; transition: opacity .6s;
+  overflow-wrap: anywhere;
+}
+/* said a while ago, and nobody is reading the log right now */
+#chat-log .line.faded { opacity: 0; }
+#chat.open #chat-log .line { opacity: 1; }
+#chat-log .at { color: #6f8098; margin-right: 6px; }
+#chat-log .from { color: #8ef2ff; }
+#chat-log .said { color: #f2f6fb; }
+/* the room talking about itself rather than somebody in it */
+#chat-log .line.note .said { color: #9db0c8; }
+#chat-log .line.kill .said { color: #ffb9b9; }
+#chat-log .line.mine .from { color: #8ef2a0; }
+
+#chat-form[hidden] { display: none; }
+#chat-form {
+  display: flex; align-items: center; gap: 8px; margin-top: 6px;
+  padding: 6px 8px; pointer-events: auto;
+  background: rgba(10,14,20,.9); border: 1px solid #26344a; border-radius: 3px;
+}
+#chat-form .prompt {
+  font-size: 10.5px; letter-spacing: .2em; color: #6f8098;
+}
+#chat-input {
+  flex: 1; min-width: 0; font: inherit; font-size: 13px; letter-spacing: .04em;
+  color: #e6edf3; background: transparent; border: 0; outline: none;
+}
+
 /* who is in the room and how they are doing — held on TAB */
 #board[hidden] { display: none; }
 #board {

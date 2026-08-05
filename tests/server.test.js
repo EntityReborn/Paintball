@@ -8,7 +8,7 @@ const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
 const { createHeadlessGame } = require('../server/engine.js');
-const { Room, SIM_HZ, SNAPSHOT_HZ, MAX_REWIND_MS, MOVE_BURST } =
+const { Room, SIM_HZ, SNAPSHOT_HZ, MAX_REWIND_MS, MOVE_BURST, CHAT_MAX, CHAT_BURST } =
   require('../server/room.js');
 
 /* ------------------------------------------------------------- headless */
@@ -1419,6 +1419,73 @@ test('a hunter kills without crediting anybody', () => {
   assert.equal(ana.deaths, 1, 'the death was not counted');
   assert.equal(bo.score, 500, 'somebody was paid for a kill they did not make');
   assert.equal(ana.score, 500, 'the score moved for being killed');
+});
+
+/* --------------------------------------------------------------- chat */
+test('what somebody says comes back stamped, named, and cleaned up', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+
+  const at = Date.now();
+  const res = room.chat(ana.id, '  hello   there  ', at);
+  assert.ok(res.ok, res.reason);
+  assert.equal(res.event.t, 'chat');
+  assert.equal(res.event.from, ana.id);
+  assert.equal(res.event.name, 'ana', 'the name did not travel with it');
+  assert.equal(res.event.text, 'hello there', 'the runs of space were kept');
+  assert.equal(res.event.at, at, 'it went out unstamped');
+
+  // control characters cannot make one line into two, or reach a terminal
+  const nasty = room.chat(ana.id, 'one' + String.fromCharCode(10) + 'two' +
+                                  String.fromCharCode(27) + '[31m', at + 5000);
+  assert.ok(nasty.ok, nasty.reason);
+  assert.ok(!/[\r\n]/.test(nasty.event.text), 'a newline survived');
+  assert.equal(nasty.event.text.indexOf(String.fromCharCode(27)), -1, 'an escape survived');
+
+  // and nothing to say is not said
+  assert.ok(!room.chat(ana.id, '   ', at + 10000).ok, 'whitespace was broadcast');
+  assert.ok(!room.chat(ana.id, null, at + 12000).ok, 'a non-string was broadcast');
+});
+
+test('a long message is cut to length rather than refused', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const res = room.chat(ana.id, 'x'.repeat(CHAT_MAX * 3));
+  assert.ok(res.ok, res.reason);
+  assert.equal(res.event.text.length, CHAT_MAX, 'it was not cut to the limit');
+});
+
+test('one player cannot fill the log on their own', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  let t = Date.now();
+
+  // a burst is conversation
+  for (let i = 0; i < CHAT_BURST; i++) {
+    assert.ok(room.chat(ana.id, 'line ' + i, t).ok, `message ${i} was refused`);
+  }
+  // and the next one, right behind it, is not
+  const flood = room.chat(ana.id, 'and another', t);
+  assert.ok(!flood.ok, 'the burst had no end');
+  assert.equal(flood.reason, 'too much at once');
+
+  // it comes back with the passing of time, and no faster
+  assert.ok(!room.chat(ana.id, 'too soon', t + 500).ok, 'the allowance refilled too fast');
+  t += 4000;
+  assert.ok(room.chat(ana.id, 'later', t).ok, 'the allowance never came back');
+
+  // and one player's flooding does not silence anybody else
+  const bo = room.join('bo');
+  assert.ok(room.chat(bo.id, 'hello', t).ok, 'a quiet player was rate limited');
+});
+
+test('somebody who is not in the room cannot say anything', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  room.leave(ana.id);
+  const res = room.chat(ana.id, 'still here');
+  assert.ok(!res.ok, 'a player who left was still able to talk');
+  assert.equal(res.reason, 'unknown player');
 });
 
 /* --------------------------------------------------------- scoreboard */
