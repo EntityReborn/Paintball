@@ -43,10 +43,45 @@ weapon, and always the first NPC of the level on both sides of the wire. See
 The score never goes below zero. Every hit and every miss floats a `+100` / `−25`
 label at the spot, and the score readout flashes green or red to match.
 
-Cover you are standing on carries you with it. The arena has a **balcony**
-along one wall — walk up the stairs, shoot from the
-rail, or drop through the gap in the middle. A few pieces of cover **slide back
-and forth**, and a standing jump clears the low cover.
+## The arena
+
+Eighty units across, walled, with a **balcony** along one wall — walk up the
+stairs, shoot from the rail, or drop through the gap in the middle. Cover you
+are standing on carries you with it, a few pieces **slide back and forth**, and
+a standing jump clears the low cover.
+
+Most of what is scattered about is crates, but a third of it has a way through,
+over or under, which is what makes ground worth taking rather than just worth
+hiding behind:
+
+| | |
+| --- | --- |
+| **ramps** | a slope you walk up, cover from the other side |
+| **arches** | two posts and a lintel, with headroom to walk under |
+| **rooms** | four walls, two or three doorways, no lid |
+
+Rooms are open above on purpose: light reaches inside, and they can be shot
+into from the balcony. A roofed box is somewhere safe to stand, which is the
+opposite of what cover is for.
+
+**One house per arena**, on a random edge: a room you can go inside with three
+doorways, a fence, and a tree. It is the one landmark in a level otherwise made
+of scattered crates — somewhere to say "the house" about, and somewhere to be
+cornered. The fence is jumpable rather than gated, so it slows an approach and
+makes the way in a decision without ever locking anyone out; the gaps between
+its panels are too narrow to walk through and wide enough for a round, so
+sheltering behind it is harder rather than safe. `house: false` leaves it out.
+
+A ramp is a true triangular prism to look at and a short flight of steps to
+walk on, each step inscribed *under* the slope — never above it, because a
+collider poking out of a ramp stops a player in mid-air on nothing. The cost is
+sinking a few centimetres into the surface on the way up, which is a far better
+trade than an axis-aligned box around the whole wedge: that is a wall you can
+see over and cannot climb. The house's roof is stepped for the same reason.
+
+Nothing is ever spawned into the air inside a room or the house. A target
+sealed in one can only be shot through a doorway from exactly the right angle,
+if at all — the level cannot be cleared and nothing on screen explains why.
 
 **Perks** appear from time to time, each wearing its name so you know what you
 are running for:
@@ -426,7 +461,7 @@ index.html      markup only: HUD, menu, script tags
 src/main.js     page wiring — builds the game, drives the HUD and pointer lock
 src/style.css   HUD and menu styling
 src/game.js     createGame(): composes the modules, owns state, input and the loop
-src/world.js    arena floor, perimeter walls, scattered cover
+src/world.js    arena: floor, walls, cover, ramps, arches, rooms, the house
 src/targets.js  target spawning, drifting, breaking
 src/npcs.js     low-poly figures: build, wander, and the hunter that comes for you
 src/perks.js    pickups and the rules they bend while they last
@@ -453,13 +488,14 @@ a web server.
 
 Two layers, both driving the real engine in a real WebGL context.
 
-**Browser suite** (`tests/tests.html`) — 274 tests over bootstrap, world
+**Browser suite** (`tests/tests.html`) — 285 tests over bootstrap, world
 generation, targets, rendering, movement, collision, shooting, breaking, levels,
 input, the reload animation, NPCs, view angles, zoom, drifting targets, scoring,
 score indicators, player statistics, telling players from NPCs, the balcony,
 moving cover, perks, jumping onto cover, settings, the debug overlays, name
 tags, health packs, shields, the hit volume, being dead, the hunter, where a
-round came from, lifetime statistics, performance, and HUD wiring. Rendering is
+round came from, the built structures — ramps, arches, rooms and the house —
+lifetime statistics, performance, and HUD wiring. Rendering is
 checked by reading pixels back off the canvas; input by dispatching real
 `KeyboardEvent` / `MouseEvent` objects. Open it in a browser to watch it run, or
 let the driver do it.
@@ -581,6 +617,22 @@ re-entering the window rather than a real flick.
   requested with `unadjustedMovement`. Every write to the angles goes through one
   clamped path, and samples beyond `lookSpikePx` (500 by default) are discarded
   rather than clamped — clamping still turns the view, just less far.
+- **NPCs walked through cover.** They never had collision at all: they steered
+  with a raycast on a think tick a few times a second, which turns them away
+  from most things most of the time, and in between they walked straight
+  through whatever was there. Easy to miss on a wanderer clipping the corner of
+  a crate, impossible to miss on a hunter coming at you through a wall. They
+  are resolved against the same box list the player is now, with the same
+  step-up allowance, and gravity runs every frame rather than only while
+  airborne — otherwise a figure that walks off a crate never comes down.
+- **A target could be sealed inside a room.** Nothing stopped one being spawned
+  in the air inside four walls, where it can only be shot through a doorway
+  from exactly the right angle. Rooms record their own interior now.
+- **A room reached into the middle of the map.** Cover was placed as though
+  every piece were a crate — a fixed seven-unit clearance around the spawn,
+  measured to the centre of the thing being placed. That is fine for something
+  two units across and not for something eight, which is how two players ended
+  up unable to shoot each other across the arena's own start point.
 - **Cover was bigger than it looked.** Obstacles were turned by a small random
   angle, but their collider is an axis-aligned box fitted around the mesh, so
   any angle other than a quarter turn makes it larger than the thing you can
