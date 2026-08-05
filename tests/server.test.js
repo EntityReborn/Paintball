@@ -1634,6 +1634,92 @@ test('somebody who is away is left out of the running of the world', () => {
   assert.ok(kit.ready, 'the pack went with them');
 });
 
+/* ------------------------------------------------------- the controls */
+test('a restart builds a new map and puts everybody back to nothing', () => {
+  const room = new Room({ seed: null });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const seedBefore = room.seed;
+
+  ana.score = 900; ana.kills = 3; ana.deaths = 1;
+  ana.stats.shotsFired = 40;
+  bo.score = 120;
+  bo.health = 2;
+  bo.deadUntil = Date.now() + 5000;
+  room.game.startLevel(4);
+
+  const out = room.restart(ana.id);
+  assert.equal(out.t, 'restart');
+  assert.equal(out.name, 'ana', 'the room is not told who did it');
+  assert.notEqual(out.seed, seedBefore, 'the map did not change');
+  assert.equal(room.game.state.level, 1, 'it did not go back to level one');
+
+  for (const p of [ana, bo]) {
+    assert.equal(p.score, 0, 'a score survived the restart');
+    assert.equal(p.kills, 0, 'kills survived');
+    assert.equal(p.deaths, 0, 'deaths survived');
+    assert.equal(p.stats.shotsFired, 0, 'the figures survived');
+    assert.equal(p.health, room.game.cfg.playerHealth, 'they came back hurt');
+    assert.equal(p.deadUntil, 0, 'somebody is still waiting to respawn');
+    assert.ok(room.shielded(p), 'they came back with no protection');
+  }
+  assert.ok(Math.hypot(ana.x - bo.x, ana.z - bo.z) > 2, 'two players in the same spot');
+
+  // the hunters and the level's own wiring point at the new world
+  assert.ok(room.game.hunters().length > 0, 'the new match has no hunter');
+  assert.equal(room.game.hitNPC(room.game.hunters()[0], 99).killed, true,
+               'the new world is not the one the room is running');
+});
+
+test('a restart keeps a pinned map pinned', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const out = room.restart(ana.id);
+  assert.equal(out.seed, 4242, 'a pinned seed was thrown away by a restart');
+});
+
+test('the controls add to the level already running', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const g = room.game;
+  const before = {
+    targets: g.aliveCount(), npcs: g.npcs.length,
+    hunters: g.hunters().length, perks: g.perks.length,
+  };
+
+  const added = room.addToLevel('hunter', 2, ana.id);
+  assert.ok(added, 'nothing was added');
+  assert.equal(added.made, 2, 'the wrong number arrived');
+  assert.equal(added.note.name, 'ana', 'the room is not told who did it');
+  assert.equal(g.hunters().length, before.hunters + 2, 'the hunters did not arrive');
+  assert.equal(added.level.t, 'levelStart', 'the room was not sent the new contents');
+  assert.equal(added.level.npcs, g.npcs.length, 'the contents do not match the level');
+
+  assert.equal(room.addToLevel('target', 4, ana.id).made, 4);
+  assert.equal(g.aliveCount(), before.targets + 4, 'the targets did not arrive');
+  assert.equal(room.addToLevel('npc', 3, ana.id).made, 3);
+  assert.equal(room.addToLevel('perk', 2, ana.id).made, 2);
+  assert.equal(g.perks.length, before.perks + 2, 'the perks did not arrive');
+
+  // and nothing else is accepted
+  assert.equal(room.addToLevel('elephant', 1, ana.id), null, 'it added an elephant');
+  assert.equal(room.addToLevel('npc', 0, ana.id), null, 'it added nothing and said so');
+});
+
+test('nothing added to a level is sealed inside the arena', () => {
+  const room = new Room({ seed: 4242 });
+  const g = room.game;
+  room.addToLevel('target', 20, 0);
+  const sealed = g.targets.filter(t => t.alive &&
+    g.insideAnything(t.mesh.position.x, t.mesh.position.z, t.mesh.position.y, 0));
+  assert.equal(sealed.length, 0, 'a target was added inside a room');
+  for (const t of g.targets) {
+    const p = t.mesh.position;
+    const lim = g.cfg.arena / 2;
+    assert.ok(Math.abs(p.x) < lim && Math.abs(p.z) < lim, 'a target was added outside the arena');
+  }
+});
+
 /* --------------------------------------------------------------- chat */
 test('what somebody says comes back stamped, named, and cleaned up', () => {
   const room = new Room({ seed: 4242 });

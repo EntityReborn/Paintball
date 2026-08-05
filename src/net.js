@@ -316,6 +316,17 @@ PB.createNet = function (opts) {
       emit('chat', msg);
       return;
     }
+    /* Somebody used the controls. A restart is a new map, and this arena was
+     * built from the old seed, so there is nothing to do here but say so and
+     * come back on the new one. */
+    if (msg.t === 'restart') {
+      emit('restart', msg);
+      return;
+    }
+    if (msg.t === 'added') {
+      emit('added', msg);
+      return;
+    }
     if (msg.t === 'chatRejected') {
       emit('chatRejected', msg);
       return;
@@ -756,6 +767,11 @@ PB.createNet = function (opts) {
     // the raw measurement: a local server answers inside a millisecond, and
     // rounding that to zero loses the difference between fast and unmeasured
     latency: function () { return stats.lastLatency || 0; },
+    // the controls on the pause screen; the room decides and tells everyone
+    restart: function () { return send({ t: 'restart' }); },
+    addToLevel: function (what, count) {
+      return send({ t: 'add', what: what, count: count });
+    },
     remoteCount: function () { return remotes.size; },
     names: names,
     // rows of [id, name, score, kills, deaths, waitingToRespawn]

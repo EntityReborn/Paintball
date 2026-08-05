@@ -76,6 +76,7 @@
   <div class="play">CLICK TO PLAY</div>
   <div id="menu-buttons">
     <button type="button" id="btn-options">OPTIONS</button>
+    <button type="button" id="btn-match">MATCH</button>
     <button type="button" id="btn-debug">DEBUG</button>
   </div>
   <div id="keys">
@@ -141,6 +142,41 @@
 
     <div class="row note">Saved in this browser.</div>
     <button type="button" class="wide" id="reset-options">RESET TO DEFAULTS</button>
+  </div>
+
+  <!-- The controls: start the whole thing again, or put more in it. Online
+       these are the room's, not this player's — everybody gets the same new
+       map, and everybody is told who did it. -->
+  <div class="panel" id="panel-match">
+    <h2>MATCH <button type="button" class="x" id="close-match">CLOSE</button></h2>
+
+    <div class="row note" id="match-where">Offline — this map is yours alone.</div>
+
+    <div class="row"><span>ADD TO THIS LEVEL</span></div>
+    <div class="row adders">
+      <button type="button" data-add="target">TARGETS</button>
+      <button type="button" data-add="npc">NPCS</button>
+      <button type="button" data-add="hunter">HUNTERS</button>
+      <button type="button" data-add="perk">PERKS</button>
+    </div>
+    <label class="row">
+      <span>HOW MANY AT A TIME</span>
+      <input type="range" id="match-count" min="1" max="10" step="1" value="3">
+      <span class="value" id="match-count-value">3</span>
+    </label>
+    <div class="row note" id="match-added">They arrive where the level would
+      have put them: never inside cover, never sealed in a room.</div>
+
+    <div class="row"><span>START AGAIN</span></div>
+    <label class="row">
+      <span>ALSO WIPE LIFETIME FIGURES</span>
+      <input type="checkbox" id="match-wipe-career">
+    </label>
+    <div class="row note">A restart builds a new map, puts everybody back at
+      level one with nothing to their name, and moves them somewhere clear.
+      The session's figures go with it; the lifetime column is kept unless you
+      say otherwise.</div>
+    <button type="button" class="wide danger" id="match-restart">RESTART THE MATCH</button>
   </div>
 
   <div class="panel" id="panel-debug">

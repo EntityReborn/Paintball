@@ -804,13 +804,65 @@ function createGame(options) {
       var t = desc.targets[i];
       spawnTarget(t[0], t[1], t[2], !!t[3]);
     }
-    for (var n = 0; n < desc.npcs; n++) npcs.push(makeNPC(n));
+    /* Which ones are hunters comes from the server when it says so. Working
+     * it out from the index alone holds for a level as it was built and stops
+     * holding the moment one is added to a level already running — that one
+     * goes on the end of the list, where the rule says it is a wanderer. */
+    for (var n = 0; n < desc.npcs; n++) {
+      npcs.push(makeNPC(n, desc.hunters ? desc.hunters.indexOf(n) !== -1 : undefined));
+    }
     scene.updateMatrixWorld(true);
     if (debugView) debugView.refresh();
     emit('level', {
       level: state.level, npcs: npcsAlive(), targets: aliveCount(), complete: false,
     });
     return { targets: aliveCount(), npcs: npcsAlive() };
+  }
+
+  /* Add to a level already in progress.
+   *
+   * Nothing in the game does this on its own — a level is what it is once it
+   * has started. It is here for the hand on the controls: somebody tuning the
+   * thing, or making a fight out of an arena that has gone quiet.
+   *
+   * Online the server does the adding and tells everyone, because a client
+   * inventing an NPC of its own would be a figure nobody else can see and
+   * nobody else's rounds can touch.
+   */
+  function addToLevel(what, count) {
+    // an explicit none is none: `count || 1` turned it into one
+    var asked = count === undefined || count === null ? 1 : Number(count);
+    var n = isFinite(asked) ? Math.max(0, Math.min(50, Math.round(asked))) : 0;
+    var made = 0;
+    for (var i = 0; i < n; i++) {
+      if (what === 'target') {
+        var lim = half - 4;
+        var x = (rand() - 0.5) * 2 * lim;
+        var z = (rand() - 0.5) * 2 * lim;
+        var y = 1.2 + rand() * 2.6;
+        // the same rules a level's own targets are placed under
+        _spawnProbe.set(x, y, z);
+        var buried = obstacleBoxes.some(function (b) {
+          return b.distanceToPoint(_spawnProbe) < 0.9;
+        });
+        if (buried || world.insideAnything(x, z, y, 1.2)) { i--; continue; }
+        spawnTarget(x, y, z, rand() < cfg.wanderingTargets);
+        made++;
+      } else if (what === 'npc' || what === 'hunter') {
+        npcs.push(makeNPC(npcs.length, what === 'hunter'));
+        made++;
+      } else if (what === 'perk') {
+        if (perkSystem.spawn({})) made++;
+      }
+    }
+    if (made) {
+      scene.updateMatrixWorld(true);      // shots are raycast against these
+      if (debugView) debugView.refresh();
+      emit('level', {
+        level: state.level, npcs: npcsAlive(), targets: aliveCount(), complete: false,
+      });
+    }
+    return made;
   }
 
   function checkLevel() {
@@ -1684,7 +1736,7 @@ function createGame(options) {
     on: on, emit: emit, start: start, stop: stop, update: update, render: render,
     shoot: shoot, reload: reload, spawnTargets: spawnTargets, spawnTarget: spawnTarget,
     startLevel: startLevel, checkLevel: checkLevel, clearLevel: clearLevel,
-    applyLevel: applyLevel, reviveTarget: reviveTarget,
+    applyLevel: applyLevel, reviveTarget: reviveTarget, addToLevel: addToLevel,
     npcsAlive: npcsAlive, addScore: addScore, spawnIndicator: spawnIndicator,
     moveTarget: moveTarget, makeNPC: makeNPC,
     traceShot: traceShot, aliveCount: aliveCount, movePlayer: movePlayer,

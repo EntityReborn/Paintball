@@ -1725,6 +1725,77 @@ async function advance(page, seconds, timeout = 60000) {
     await ana.screenshot({ path: path.join(SHOTS, 'mp-ana.png') });
     await bo.screenshot({ path: path.join(SHOTS, 'mp-bo.png') });
 
+    /* ------------------------------------------- the match controls */
+    /* Adding is the room's, not one client's: what ana asks for has to turn
+     * up in bo's arena too, or it is a figure nobody else can see and nobody
+     * else's rounds can touch. Last but one, because a restart ends the match
+     * everything above was running in. */
+    const worldBefore = await Promise.all([ana, bo].map(p => p.evaluate(() => ({
+      npcs: game.npcs.length, hunters: game.hunters().length,
+      targets: game.targets.length,
+    }))));
+
+    await ana.evaluate(() => { net.addToLevel('hunter', 2); });
+    await sleep(1200);
+    const worldAfter = await Promise.all([ana, bo].map(p => p.evaluate(() => ({
+      npcs: game.npcs.length, hunters: game.hunters().length,
+      targets: game.targets.length,
+    }))));
+
+    /* Both arenas, not both deltas. By this point in the run the two have
+     * been through several levels and a kill apiece, and a client that
+     * rebuilt a level a moment before the other one legitimately holds a
+     * different number until the next message lands. What matters is that
+     * they hold the same world once the add has gone round. */
+    check('what one player adds turns up in the other one\'s arena',
+          worldAfter[0].npcs === worldAfter[1].npcs &&
+          worldAfter[0].npcs >= worldBefore[0].npcs + 2,
+          `ana ${worldBefore[0].npcs} -> ${worldAfter[0].npcs}, ` +
+          `bo ${worldBefore[1].npcs} -> ${worldAfter[1].npcs}`);
+    check('and they are hunters on both screens, not wanderers',
+          worldAfter[0].hunters >= 2 && worldAfter[0].hunters === worldAfter[1].hunters,
+          `ana ${worldAfter[0].hunters}, bo ${worldAfter[1].hunters} hunters ` +
+          `in a room that runs with none of its own`);
+    const toldAbout = await bo.evaluate(() =>
+      [...document.querySelectorAll('#chat-log .line')]
+        .map(l => l.textContent).filter(t => /added/.test(t)));
+    check('the room is told who asked for them', toldAbout.length > 0,
+          toldAbout.slice(-1)[0] || 'no note in the log');
+
+    /* And a restart, which ends the match for everybody: a new map, and both
+     * clients back on it with nothing to their name. */
+    const beforeRestart = await Promise.all([ana, bo].map(p => p.evaluate(() => ({
+      map: game.arenaFingerprint(), seed: net.self.seed, score: game.state.score,
+    }))));
+    await ana.evaluate(() => { game.state.score = 5000; net.restart(); });
+    // both pages reload onto the new match on their own
+    for (const page of [ana, bo]) {
+      await page.waitForFunction(
+        'window.game && window.net && net.self.id && game.state.score === 0',
+        { timeout: 30000 });
+    }
+    await sleep(800);
+    const afterRestart = await Promise.all([ana, bo].map(p => p.evaluate(() => ({
+      map: game.arenaFingerprint(), seed: net.self.seed, score: game.state.score,
+      level: game.state.level, kills: game.stats().kills,
+      players: net.scores().length,
+    }))));
+    /* This room pins its map with MAP_SEED, so the rest of the run has ground
+     * it can rely on — and a restart keeps a pinned map pinned. What is
+     * checked here is that both clients came back onto the same one; a
+     * restart drawing a fresh seed when none is pinned is a server test. */
+    check('a restart puts everybody back on the same map',
+          afterRestart[0].map === afterRestart[1].map &&
+          afterRestart[0].seed === beforeRestart[0].seed,
+          `ana ${afterRestart[0].map} vs bo ${afterRestart[1].map}, ` +
+          `seed ${beforeRestart[0].seed} -> ${afterRestart[0].seed} (pinned)`);
+    check('at level one with nothing to anybody\'s name',
+          afterRestart.every(s => s.level === 1 && s.score === 0 && s.kills === 0),
+          afterRestart.map(s => `level ${s.level}, score ${s.score}`).join(' | '));
+    check('and both of them still in the room',
+          afterRestart.every(s => s.players === 2),
+          afterRestart.map(s => `${s.players} on the board`).join(', '));
+
     /* ------------------------------------------------------ leaving */
     await bo.close();
     // poll rather than guessing at a delay

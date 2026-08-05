@@ -53,8 +53,11 @@ PB.createNPCs = function (ctx) {
     return i < huntersFor(state.level);
   }
 
-  function makeNPC(i) {
-    var hunter = isHunterIndex(i);
+  /* `force` overrides what the index would have decided, for the one caller
+   * that knows better than the level does: something added to a level already
+   * in progress, which has no index of its own to be judged by. */
+  function makeNPC(i, force) {
+    var hunter = force === undefined ? isHunterIndex(i) : !!force;
     /* Red, and only ever red. NPCs stay in the warm half of the wheel and the
      * cool band is reserved for players, so the two can never end up the same
      * colour; the hunter is pulled out of that scheme entirely and given the

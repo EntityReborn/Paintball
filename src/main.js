@@ -777,6 +777,18 @@ if (!wantsNet) {
   net.on('left', function (msg) {
     chatNote((msg.name || net.names.get(msg.id) || 'somebody') + ' left');
   });
+  /* Somebody used the controls. A restart is a new map, and this arena came
+   * out of the old seed, so there is nothing to salvage: say who did it and
+   * come back on the new one. */
+  net.on('restart', function (msg) {
+    chatNote((msg.name || 'somebody') + ' restarted the match — new map');
+    el.menuScore.textContent = 'RESTARTING…';
+    setTimeout(function () { location.reload(); }, 900);
+  });
+  net.on('added', function (msg) {
+    chatNote((msg.name || 'somebody') + ' added ' + msg.made + ' ' + msg.what +
+             (msg.made === 1 ? '' : 's'));
+  });
   net.on('away', function (msg) {
     chatNote((msg.name || 'somebody') + ' lost connection');
   });

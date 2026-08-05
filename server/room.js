@@ -283,6 +283,12 @@ class Room {
       t: 'levelStart',
       level: this.game.state.level,
       npcs: this.game.npcs.length,
+      /* Which of them are hunters, said outright rather than left to be worked
+       * out. The rule — the first few of a level, by level — holds for a level
+       * as it is built and stops holding the moment one is added to a level
+       * already running, because that one goes on the end. Saying it costs a
+       * handful of numbers on a message that goes out when a level turns over. */
+      hunters: this.game.npcs.reduce((at, n, i) => (n.hunter ? at.concat(i) : at), []),
       targets: this.game.targets.map(t => ([
         round(t.mesh.position.x), round(t.base), round(t.mesh.position.z),
         t.wander ? 1 : 0,
@@ -921,6 +927,58 @@ class Room {
     const p = Math.round(Number(ping));
     if (isFinite(p) && p >= 0) player.ping = Math.min(9999, p);
     return player.fps;
+  }
+
+  /* ------------------------------------------------------ the controls */
+  /* Start the whole thing again: a new map, level one, and everybody back to
+   * nothing. Every client's arena was generated from the old seed and cannot
+   * be regenerated in place, so what goes out is the new seed and the fact of
+   * it — the clients reload onto the new match, which is the same path a
+   * player already takes when they come back from a drop to find the room
+   * rebuilt underneath them.
+   *
+   * Anyone in the room may do this. There is no host here, and a note in the
+   * chat naming whoever did it is the whole of the accountability. */
+  restart(by, now = Date.now()) {
+    const seed = this.buildWorld(this.pinnedSeed === null ? null : this.pinnedSeed);
+    for (const p of this.players.values()) {
+      p.score = 0;
+      p.kills = 0;
+      p.deaths = 0;
+      p.stats = { shotsFired: 0, shotsHit: 0, misses: 0, targetsBroken: 0, npcsDown: 0 };
+      p.clientStats = null;
+      p.perks = {};
+      p.health = this.game.cfg.playerHealth;
+      p.deadUntil = 0;
+      p.healAt = now + this.game.cfg.healEvery * 1000;
+      p.shieldUntil = now + this.game.cfg.spawnShield * 1000;
+      p.lastStateAt = now;
+      p.settleUntil = now + 1000;
+      p.moveCredit = MOVE_BURST;
+      const at = this.clearSpot(p);
+      p.x = at.x;
+      p.z = at.z;
+      p.y = this.game.cfg.eye;
+    }
+    this.history.length = 0;
+    const who = this.players.get(by);
+    return { t: 'restart', seed, by: by || 0, name: who ? who.name : 'somebody' };
+  }
+
+  /* More of something, into the level already running. The level contents go
+   * out afterwards so every client builds the same arena again — which is the
+   * message they already handle when a level turns over. */
+  addToLevel(what, count, by) {
+    const kinds = ['target', 'npc', 'hunter', 'perk'];
+    if (kinds.indexOf(what) === -1) return null;
+    const made = this.game.addToLevel(what, count);
+    if (!made) return null;
+    const who = this.players.get(by);
+    return {
+      made, what,
+      level: this.levelMessage(),
+      note: { t: 'added', what, made, by: by || 0, name: who ? who.name : 'somebody' },
+    };
   }
 
   /* --------------------------------------------------------------- chat */

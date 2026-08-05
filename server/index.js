@@ -220,6 +220,25 @@ wss.on('connection', socket => {
       return;
     }
 
+    /* The controls on the pause screen. Anyone in the room may use them —
+     * there is no host — so both say who did it, in the chat, where the room
+     * can see it. */
+    if (msg.t === 'restart') {
+      const out = room.restart(player.id);
+      log(`${out.name} restarted the match — new map seed ${out.seed}`);
+      broadcast(out);
+      return;
+    }
+
+    if (msg.t === 'add') {
+      const out = room.addToLevel(msg.what, msg.count, player.id);
+      if (!out) return;
+      log(`${out.note.name} added ${out.made} ${out.what}(s)`);
+      broadcast(out.note);
+      broadcast(out.level);
+      return;
+    }
+
     // what their machine is drawing at, for the scoreboard
     if (msg.t === 'fps') {
       room.reportFps(player.id, msg.fps);

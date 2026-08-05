@@ -293,6 +293,106 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
           !!alone.note && /OFFLINE/.test(alone.note), alone.note || 'no note');
     await page.screenshot({ path: path.join(SHOTS, 'menu-scoreboard.png') });
 
+    /* --------------------------------------------- the match controls */
+    const matchPanel = await page.evaluate(async () => {
+      document.getElementById('btn-match').click();
+      await new Promise(r => setTimeout(r, 150));
+      return {
+        open: document.getElementById('panel-match').classList.contains('on'),
+        playing: window.game.isActive(),
+        where: document.getElementById('match-where').textContent,
+        adders: [...document.querySelectorAll('[data-add]')].map(b => b.dataset.add),
+      };
+    });
+    check('the match button opens the match panel', matchPanel.open);
+    check('and does not drop you into the game', !matchPanel.playing);
+    check('it says whose match this is', /Offline/.test(matchPanel.where),
+          matchPanel.where);
+    check('with something to add of each kind',
+          ['target', 'npc', 'hunter', 'perk'].every(k => matchPanel.adders.includes(k)),
+          matchPanel.adders.join(', '));
+
+    const added = await page.evaluate(async () => {
+      const before = {
+        targets: game.aliveCount(), npcs: game.npcs.length,
+        hunters: game.hunters().length, perks: game.perks.length,
+      };
+      document.getElementById('match-count').value = '2';
+      document.getElementById('match-count')
+        .dispatchEvent(new Event('input', { bubbles: true }));
+      for (const what of ['target', 'npc', 'hunter', 'perk']) {
+        document.querySelector(`[data-add="${what}"]`).click();
+        await new Promise(r => setTimeout(r, 60));
+      }
+      return {
+        before,
+        after: {
+          targets: game.aliveCount(), npcs: game.npcs.length,
+          hunters: game.hunters().length, perks: game.perks.length,
+        },
+        count: document.getElementById('match-count-value').textContent,
+        note: document.getElementById('match-added').textContent,
+      };
+    });
+    check('the counter says how many each press brings', added.count === '2', added.count);
+    check('adding targets, NPCs, hunters and perks all arrive',
+          added.after.targets === added.before.targets + 2 &&
+          added.after.npcs === added.before.npcs + 4 &&      // npcs and hunters both
+          added.after.hunters === added.before.hunters + 2 &&
+          added.after.perks === added.before.perks + 2,
+          `${JSON.stringify(added.before)} -> ${JSON.stringify(added.after)}`);
+    check('and it says what it did', /Added 2/.test(added.note), added.note);
+    await page.screenshot({ path: path.join(SHOTS, 'menu-match.png') });
+
+    /* Restarting takes two presses on purpose: it throws the map, the level
+     * and every figure in the session away. */
+    const arming = await page.evaluate(async () => {
+      const b = document.getElementById('match-restart');
+      const before = b.textContent;
+      b.click();
+      await new Promise(r => setTimeout(r, 60));
+      return { before, armed: b.textContent, flag: b.dataset.armed };
+    });
+    check('one press on restart only arms it',
+          /RESTART/.test(arming.before) && /SURE/.test(arming.armed) && arming.flag === '1',
+          `"${arming.before}" -> "${arming.armed}"`);
+
+    // it disarms itself rather than sitting there loaded
+    const disarmed = await page.evaluate(async () => {
+      await new Promise(r => setTimeout(r, 4300));
+      const b = document.getElementById('match-restart');
+      return { text: b.textContent, flag: b.dataset.armed };
+    });
+    check('and forgets about it if you walk away',
+          /RESTART/.test(disarmed.text) && disarmed.flag !== '1',
+          `"${disarmed.text}"`);
+
+    /* And the second press restarts. Offline that is a reload, so the page is
+     * gone after this: everything below re-navigates anyway. */
+    const restarted = await page.evaluate(async () => {
+      game.state.score = 4321;
+      const seedBefore = game.arenaFingerprint();
+      const b = document.getElementById('match-restart');
+      b.click();                                   // arm
+      await new Promise(r => setTimeout(r, 60));
+      b.click();                                   // and go
+      return { seedBefore, text: b.textContent };
+    });
+    await page.waitForFunction('window.game && game.state.score === 0', { timeout: 15000 });
+    const afterRestart = await page.evaluate(() => ({
+      score: game.state.score,
+      level: game.state.level,
+      fingerprint: game.arenaFingerprint(),
+      shots: game.stats().shotsFired,
+    }));
+    check('the second press restarts the match', restarted.text === 'RESTARTING…',
+          restarted.text);
+    check('on a new map, at level one, with the figures wiped',
+          afterRestart.fingerprint !== restarted.seedBefore &&
+          afterRestart.level === 1 && afterRestart.score === 0 && afterRestart.shots === 0,
+          `level ${afterRestart.level}, score ${afterRestart.score}, ` +
+          `map ${restarted.seedBefore} -> ${afterRestart.fingerprint}`);
+
     /* ------------------------------------------------- the chat, offline */
     /* The log is a record of what happened as well as a conversation, so it
      * works with nobody to talk to — and says as much rather than pretending
