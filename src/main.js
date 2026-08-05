@@ -220,7 +220,7 @@ function boardRows() {
     return net.scores().map(function (row) {
       return {
         id: row[0], name: row[1], score: row[2], kills: row[3], deaths: row[4],
-        down: !!row[5], you: row[0] === net.self.id,
+        down: !!row[5], away: !!row[6], you: row[0] === net.self.id,
       };
     });
   }
@@ -236,9 +236,11 @@ function renderBoard() {
   if (!el.board || el.board.hidden) return;
   var rows = boardRows();
   var html = rows.map(function (r) {
-    return '<div class="row' + (r.you ? ' you' : '') + (r.down ? ' down' : '') + '">' +
+    var mark = r.away ? 'AWAY' : (r.down ? 'DOWN' : '');
+    return '<div class="row' + (r.you ? ' you' : '') +
+      (r.down || r.away ? ' down' : '') + '">' +
       '<span class="who">' + escapeHtml(r.name) +
-        (r.down ? '<span class="waiting">DOWN</span>' : '') + '</span>' +
+        (mark ? '<span class="waiting">' + mark + '</span>' : '') + '</span>' +
       '<span class="n">' + r.score + '</span>' +
       '<span class="n">' + r.kills + '</span>' +
       '<span class="n">' + r.deaths + '</span>' +
@@ -506,7 +508,12 @@ document.addEventListener('pointerlockchange', function () {
 
 // and on the way out, however that happens
 setInterval(saveCareer, 15000);
-window.addEventListener('pagehide', saveCareer);
+window.addEventListener('pagehide', function () {
+  saveCareer();
+  // closing the tab is leaving, not dropping: give the seat up rather than
+  // have the room hold it open for somebody who is not coming back
+  if (net) net.close();
+});
 document.addEventListener('visibilitychange', function () {
   if (document.hidden) saveCareer();
 });
@@ -602,6 +609,11 @@ if (!wantsNet) {
   el.menuScore.textContent = 'CONNECTING…';
 
   net.on('hello', function (msg) {
+    /* A hello arrives on every connection, including the ones that put us
+     * back after a drop. The world is built from the first: building a second
+     * one leaves a whole game — canvas, WebGL context, level and all — running
+     * behind the one on screen. */
+    if (game) return;
     game = build(msg.seed);
     if (!game) return;
     window.game = game;
@@ -674,10 +686,41 @@ if (!wantsNet) {
   net.on('left', function (msg) {
     chatNote((msg.name || net.names.get(msg.id) || 'somebody') + ' left');
   });
-
-  net.on('disconnected', function () {
-    el.menuScore.textContent = 'DISCONNECTED';
+  net.on('away', function (msg) {
+    chatNote((msg.name || 'somebody') + ' lost connection');
   });
+  net.on('back', function (p) { chatNote(p.name + ' came back'); });
+
+  /* Our own connection going and coming. The game keeps running underneath —
+   * you can still walk about, you are simply the only thing moving — so the
+   * menu line is where this is said, and the log keeps the history of it. */
+  net.on('disconnected', function () {
+    el.menuScore.textContent = 'CONNECTION LOST';
+    chatNote('CONNECTION LOST');
+  });
+  net.on('reconnecting', function (d) {
+    el.menuScore.textContent = 'RECONNECTING… (' + d.attempt + '/' + d.of + ')';
+  });
+  net.on('resumed', function () {
+    el.menuScore.textContent = 'ONLINE  ·  MAP ' + net.self.seed;
+    chatNote('back in — your score was kept');
+  });
+  net.on('rejoined', function () {
+    el.menuScore.textContent = 'ONLINE  ·  MAP ' + net.self.seed;
+    chatNote('back in, as a new player — the seat had gone');
+  });
+  net.on('gaveUp', function (d) {
+    el.menuScore.textContent = 'DISCONNECTED';
+    chatNote('GAVE UP RECONNECTING AFTER ' + d.attempts + ' TRIES — RELOAD TO PLAY ON');
+  });
+  /* The room built a new world while we were away, which happens when the
+   * last player leaves and the match ends. This arena came out of the old
+   * seed and cannot be regenerated in place. */
+  net.on('worldChanged', function () {
+    chatNote('THE MATCH ENDED WHILE YOU WERE AWAY — RELOADING');
+    setTimeout(function () { location.reload(); }, 1200);
+  });
+
 
   net.connect();
 }

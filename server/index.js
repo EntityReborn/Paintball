@@ -56,6 +56,10 @@ const room = new Room({
       const who = room.players.get(msg.by);
       log(`${who ? who.name : msg.by} took health pack ${msg.index}`);
     }
+    // the sweep gave up on somebody who never came back
+    if (msg.t === 'left') {
+      log(`player ${msg.id} (${msg.name}) did not come back — ${room.players.size} in the room`);
+    }
     broadcast(msg);
   },
 });
@@ -116,6 +120,27 @@ wss.on('connection', socket => {
 
     if (msg.t === 'join') {
       if (player) return;
+
+      /* A socket carrying a token is somebody who was already here and lost
+       * the connection. If the seat is still theirs they pick it back up with
+       * everything in it; if the grace ran out, or the token is somebody's
+       * guess, they simply join as a newcomer. */
+      const resumed = msg.token ? room.resume(msg.token, msg.name) : null;
+      if (resumed) {
+        player = resumed;
+        if (typeof msg.pvp === 'boolean') player.pvp = msg.pvp;
+        /* Whatever socket was on this id is gone, but say so rather than
+         * assume: two sockets on one seat would both be sent everything and
+         * only one of them would ever be read. */
+        const stale = sockets.get(player.id);
+        if (stale && stale !== socket) stale.close();
+        sockets.set(player.id, socket);
+        send(socket, room.hello(player));
+        broadcast({ t: 'back', player: room.publicPlayer(player) }, player.id);
+        log(`player ${player.id} (${player.name}) came back — ${room.players.size} in the room`);
+        return;
+      }
+
       const matchesBefore = room.matches;
       player = room.join(msg.name);
       if (typeof msg.pvp === 'boolean') player.pvp = msg.pvp;
@@ -180,6 +205,21 @@ wss.on('connection', socket => {
       return;
     }
 
+    /* Going, and saying so. A socket that simply drops gets its seat kept,
+     * because the server cannot tell a tunnel from a closed tab — but a client
+     * that is leaving on purpose can say which it is, and then nobody sits on
+     * the scoreboard as "away" for a minute after walking off. */
+    if (msg.t === 'leave') {
+      const going = player;
+      sockets.delete(going.id);
+      room.leave(going.id);
+      broadcast({ t: 'left', id: going.id, name: going.name });
+      log(`player ${going.id} (${going.name}) left — ${room.players.size} in the room`);
+      player = null;
+      socket.close();
+      return;
+    }
+
     if (msg.t === 'stats') {
       // the client's own accounting, kept for the leaderboard work to come
       player.clientStats = msg.stats;
@@ -193,12 +233,22 @@ wss.on('connection', socket => {
 
   socket.on('close', () => {
     if (!player) return;
-    sockets.delete(player.id);
-    room.leave(player.id);
+    // a socket that has already been replaced by a reconnect is not this
+    // player's any more, and closing it must not take their seat with it
+    if (sockets.get(player.id) === socket) sockets.delete(player.id);
+    else return;
+
+    /* The seat is kept for a while rather than cleared: a dropped connection
+     * is usually a lid or a tunnel, not somebody leaving. They come out of the
+     * world at once — see Room.disconnect — and the room is told they are
+     * away. If they do not come back, the sweep in the tick loop says they
+     * left, with the name still attached. */
+    const gone = room.disconnect(player.id);
+    if (!gone) return;
     // the name goes with it: whoever is left has to write a line about them,
-    // and by the time this lands they are no longer anywhere to be looked up
-    broadcast({ t: 'left', id: player.id, name: player.name });
-    log(`player ${player.id} left — ${room.players.size} in the room`);
+    // and by then they may no longer be anywhere to look up
+    broadcast({ t: 'away', id: player.id, name: player.name });
+    log(`player ${player.id} (${player.name}) dropped — holding their seat`);
   });
 
   socket.on('error', () => { /* close handles the cleanup */ });

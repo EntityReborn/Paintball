@@ -8,8 +8,8 @@ const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
 const { createHeadlessGame } = require('../server/engine.js');
-const { Room, SIM_HZ, SNAPSHOT_HZ, MAX_REWIND_MS, MOVE_BURST, CHAT_MAX, CHAT_BURST } =
-  require('../server/room.js');
+const { Room, SIM_HZ, SNAPSHOT_HZ, MAX_REWIND_MS, MOVE_BURST, CHAT_MAX, CHAT_BURST,
+        GRACE_MS } = require('../server/room.js');
 
 /* ------------------------------------------------------------- headless */
 test('the browser engine runs in node with no renderer or DOM', () => {
@@ -1419,6 +1419,107 @@ test('a hunter kills without crediting anybody', () => {
   assert.equal(ana.deaths, 1, 'the death was not counted');
   assert.equal(bo.score, 500, 'somebody was paid for a kill they did not make');
   assert.equal(ana.score, 500, 'the score moved for being killed');
+});
+
+/* ------------------------------------------------- losing the connection */
+test('a dropped socket keeps the seat, and comes out of the world', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  ana.score = 700;
+  ana.kills = 2;
+
+  const hello = room.hello(ana);
+  assert.ok(hello.token && hello.token.length >= 16, 'no token to come back with');
+
+  const now = Date.now();
+  assert.ok(room.disconnect(ana.id, now), 'the drop was not registered');
+  assert.ok(room.players.has(ana.id), 'the seat was given up immediately');
+  assert.ok(!room.here(ana), 'they still count as being here');
+
+  // out of the world: no body to draw, to shoot, or for a hunter to aim at
+  const snap = room.snapshot();
+  assert.ok(!snap.players.some(p => p[0] === ana.id), 'a body was left standing');
+  assert.ok(!room.huntable().some(t => t.id === ana.id), 'the hunter still has them');
+  assert.ok(!room.playerHit(
+    new globalThis.THREE.Vector3(ana.x, ana.y, ana.z - 5),
+    new globalThis.THREE.Vector3(0, 0, 1), 40, bo.id), 'their body still stopped a round');
+
+  // but still on the scoreboard, marked as away, with everything intact
+  const row = room.scoreboard().players.find(r => r[0] === ana.id);
+  assert.ok(row, 'they fell off the scoreboard');
+  assert.equal(row[2], 700, 'their score went with the connection');
+  assert.equal(row[3], 2, 'their kills went with the connection');
+  assert.equal(row[6], 1, 'the table does not show them as away');
+});
+
+test('coming back with the token picks the same seat up', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  ana.score = 1234;
+  ana.kills = 3;
+  ana.deaths = 1;
+  const token = room.hello(ana).token;
+
+  const now = Date.now();
+  room.disconnect(ana.id, now);
+  const back = room.resume(token, 'ana', now + 5000);
+  assert.ok(back, 'the seat was not there to pick up');
+  assert.equal(back.id, ana.id, 'they came back as somebody else');
+  assert.equal(back.score, 1234, 'the score was not kept');
+  assert.equal(back.kills, 3);
+  assert.equal(back.deaths, 1);
+  assert.ok(room.here(back), 'still counted as away');
+  assert.ok(room.shielded(back, now + 5000), 'came back with no protection');
+  assert.ok(room.snapshot().players.some(p => p[0] === ana.id), 'no body came back');
+
+  // and a name changed while away comes back with them
+  room.disconnect(ana.id, now + 6000);
+  const renamed = room.resume(token, 'anastasia', now + 7000);
+  assert.equal(renamed.name, 'anastasia', 'the new name was not taken');
+});
+
+test('a seat is not held forever, and not handed to a guess', () => {
+  const sent = [];
+  const room = new Room({ seed: 4242, onBroadcast: m => sent.push(m) });
+  const ana = room.join('ana');
+  const token = room.hello(ana).token;
+  const now = Date.now();
+  room.disconnect(ana.id, now);
+
+  assert.equal(room.resume('not-the-token', 'ana', now + 1000), null,
+               'a guessed token took somebody\'s seat');
+  assert.equal(room.resume(token, 'ana', now + GRACE_MS + 1000), null,
+               'the seat was still theirs long after they went');
+
+  // the sweep gives it up and says so, with the name still attached
+  room.step(1000 / 30, now + GRACE_MS + 1500);
+  assert.ok(!room.players.has(ana.id), 'the seat was never given up');
+  const left = sent.filter(m => m.t === 'left');
+  assert.equal(left.length, 1, 'nobody was told they had gone');
+  assert.equal(left[0].name, 'ana', 'the message does not say who left');
+});
+
+test('somebody who is away is left out of the running of the world', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const now = Date.now();
+  ana.health = 4;
+  ana.healAt = now - 1;
+  room.disconnect(ana.id, now);
+
+  room.updateHealth(now + 60000);
+  assert.equal(ana.health, 4, 'they healed while nobody was driving them');
+  assert.ok(!ana.deadUntil, 'they were respawned while away');
+
+  // and they are not standing on anything to pick it up
+  const kit = room.game.medkits[0];
+  kit.ready = true;
+  ana.x = kit.x;
+  ana.z = kit.z;
+  ana.y = room.game.cfg.eye;
+  assert.equal(room.updateMedkits(now).length, 0, 'an absent player took a pack');
+  assert.ok(kit.ready, 'the pack went with them');
 });
 
 /* --------------------------------------------------------------- chat */

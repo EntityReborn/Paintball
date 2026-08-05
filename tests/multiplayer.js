@@ -521,6 +521,29 @@ async function advance(page, seconds, timeout = 60000) {
         npcAgreement[0][i][0] - npcAgreement[1][i][0],
         npcAgreement[0][i][1] - npcAgreement[1][i][1]));
     }
+    /* And they are facing the way they are going. The wire carries a heading,
+     * which is a direction of travel; a figure's front is its local -Z, so
+     * drawing one straight from the other has the whole level walking
+     * backwards. Nobody spotted it while they only wandered. */
+    const facing = await ana.evaluate(() => {
+      const snap = net.snapshots[net.snapshots.length - 1];
+      if (!snap || !snap.npcs.length) return null;
+      const THREE_ = window.THREE;
+      const out = [];
+      for (let i = 0; i < game.npcs.length && i < snap.npcs.length; i++) {
+        const heading = snap.npcs[i][3];
+        const travel = new THREE_.Vector3(Math.sin(heading), 0, Math.cos(heading));
+        const front = new THREE_.Vector3(0, 0, -1)
+          .applyQuaternion(game.npcs[i].root.quaternion);
+        out.push(+front.dot(travel).toFixed(2));
+      }
+      return out;
+    });
+    check('and each of them is facing the way it is walking',
+          !!facing && facing.length > 0 && facing.every(d => d > 0.9),
+          facing ? `worst alignment ${Math.min.apply(null, facing)} (1 = forwards, -1 = backwards)`
+                 : 'no NPCs in the snapshot');
+
     check('both clients see the NPCs in the same places', worstNpc < 3.5,
           `worst disagreement ${worstNpc.toFixed(2)}u`);
 
@@ -907,6 +930,10 @@ async function advance(page, seconds, timeout = 60000) {
             `client ${geometry.pick}u on the ${geometry.object}, server ${geometry.server}u`);
     }
 
+    // leaving on purpose, which gives the seat up rather than having the room
+    // hold it open for a return that is not coming
+    await late.evaluate(() => { net.close(); });
+    await sleep(300);
     await late.close();
     await sleep(400);
 
@@ -1423,6 +1450,80 @@ async function advance(page, seconds, timeout = 60000) {
           `moved ${Math.hypot(walkedAfter.x - walkedBefore.x,
                               walkedAfter.z - walkedBefore.z).toFixed(2)}u after chatting`);
     await ana.screenshot({ path: path.join(SHOTS, 'mp-chat.png') }).catch(() => {});
+
+    /* ------------------------------------------- losing the connection */
+    /* Pull bo's socket out from under him the way a tunnel would. He should
+     * come back on his own, with the same seat and the same score, and ana
+     * should be told both times. */
+    const boBefore = await bo.evaluate(() => ({
+      id: net.self.id, score: game.state.score, token: !!net.self.token,
+    }));
+    check('the server handed out something to come back with', boBefore.token);
+
+    await bo.evaluate(() => { net.dropConnection(); });
+    await sleep(600);
+
+    const dropped = await bo.evaluate(() => ({
+      connected: net.self.connected,
+      trying: net.reconnecting(),
+      playing: game.isActive(),
+    }));
+    check('a lost connection is noticed and retried',
+          !dropped.connected && dropped.trying,
+          `connected ${dropped.connected}, retrying ${dropped.trying}`);
+    check('and the game carries on running while it tries', dropped.playing);
+
+    const anaSawAway = await ana.evaluate(() => ({
+      bodies: net.remoteCount(),
+      log: [...document.querySelectorAll('#chat-log .line')].map(l => l.textContent),
+    }));
+    check('the room is told they dropped, and their body is taken out',
+          anaSawAway.bodies === 0 &&
+          anaSawAway.log.some(l => /lost connection/.test(l)),
+          `${anaSawAway.bodies} bodies still drawn`);
+
+    // it backs off, so give it long enough for the first retry to land
+    await bo.evaluate(async () => {
+      for (let i = 0; i < 60 && !net.self.connected; i++) {
+        await new Promise(r => setTimeout(r, 250));
+      }
+    });
+    const resumed = await bo.evaluate(() => ({
+      connected: net.self.connected,
+      id: net.self.id,
+      score: game.state.score,
+      log: [...document.querySelectorAll('#chat-log .line')].map(l => l.textContent),
+    }));
+    check('it reconnects on its own', resumed.connected, `connected ${resumed.connected}`);
+    check('and picks the same seat back up',
+          resumed.id === boBefore.id && resumed.score === boBefore.score,
+          `id ${boBefore.id} -> ${resumed.id}, score ${boBefore.score} -> ${resumed.score}`);
+    check('and says so in the log',
+          resumed.log.some(l => /your score was kept/.test(l)),
+          resumed.log.slice(-2).join(' | '));
+
+    await sleep(900);
+    const anaSawBack = await ana.evaluate(() => ({
+      bodies: net.remoteCount(),
+      log: [...document.querySelectorAll('#chat-log .line')].map(l => l.textContent),
+      board: net.scores().length,
+    }));
+    check('the other player gets their body back',
+          anaSawBack.bodies === 1 && anaSawBack.log.some(l => /came back/.test(l)),
+          `${anaSawBack.bodies} bodies, log ${anaSawBack.log.slice(-1)[0] || ''}`);
+    check('and the room never grew a second seat for them',
+          anaSawBack.board === 2, `${anaSawBack.board} on the scoreboard`);
+
+    // and the connection is still a working one, not just an open socket
+    await bo.evaluate(() => { window.__sentBefore = net.stats.sent; });
+    await advance(bo, 0.6);
+    const flowing = await bo.evaluate(() => ({
+      sent: net.stats.sent - window.__sentBefore,
+      received: net.snapshots.length,
+    }));
+    check('with state going out and snapshots coming back in',
+          flowing.sent > 5 && flowing.received > 2,
+          `${flowing.sent} sent, ${flowing.received} snapshots buffered`);
 
     /* -------------------------------------- stepping out of the fight */
     await bo.evaluate(() => { options.set('pvp', false); net.setPvp(false); });

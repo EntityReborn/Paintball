@@ -41,7 +41,13 @@ PB.createNet = function (opts) {
   var pvp = opts.pvp !== false;
 
   var socket = null;
-  var self = { id: null, seed: null, connected: false, error: null, arenaMatch: null };
+  var self = { id: null, seed: null, connected: false, error: null, arenaMatch: null,
+               token: null };
+  var retryTimer = null;
+  var attempts = 0;
+  var closing = false;          // we are the ones hanging up, so do not retry
+  var wired = false;            // the game's own handlers, hooked up once
+  var MAX_RETRIES = 8;          // about a minute of trying, backing off
   var listeners = {};
   var snapshots = [];           // {at, players, npcs, targets}
   var remotes = new Map();      // id -> {fig, phase, name, last}
@@ -79,11 +85,17 @@ PB.createNet = function (opts) {
   }
 
   function connect() {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
     socket = new global.WebSocket(url);
 
     socket.onopen = function () {
       self.connected = true;
-      send({ t: 'join', name: name, pvp: pvp });
+      /* The token says which seat is ours. The server hands it back on the
+       * first hello and keeps the seat warm for a while after a socket drops,
+       * so a lid closing or a redeploy costs a couple of seconds rather than
+       * a score. Without one — the first connection of a session — this is an
+       * ordinary join. */
+      send({ t: 'join', name: name, pvp: pvp, token: self.token || undefined });
     };
 
     socket.onmessage = function (ev) {
@@ -93,15 +105,41 @@ PB.createNet = function (opts) {
     };
 
     socket.onclose = function () {
+      var was = self.connected;
       self.connected = false;
       stopSending();
-      emit('disconnected', {});
+      // the buffer describes a world we are no longer being told about; the
+      // one that arrives after we are back is the one to draw from
+      snapshots.length = 0;
+      renderClock = null;
+      if (was) emit('disconnected', {});
+      if (!closing) retry();
     };
 
     socket.onerror = function () {
       self.error = 'connection failed';
       emit('error', { message: self.error });
     };
+  }
+
+  /* Try again, backing off, for as long as the seat could still be there and
+   * then some — a server that is being redeployed comes back within a few
+   * seconds, and a laptop that woke up on a different network takes longer.
+   * The delay doubles from a second to ten, which is quick enough not to be
+   * noticed and slow enough not to hammer a server that is down. */
+  function retry() {
+    if (retryTimer || closing) return;
+    attempts++;
+    if (attempts > MAX_RETRIES) {
+      emit('gaveUp', { attempts: attempts - 1 });
+      return;
+    }
+    var wait = Math.min(10000, 1000 * Math.pow(2, attempts - 1));
+    emit('reconnecting', { attempt: attempts, wait: wait, of: MAX_RETRIES });
+    retryTimer = setTimeout(function () {
+      retryTimer = null;
+      connect();
+    }, wait);
   }
 
   function sendPrefs() {
@@ -111,16 +149,52 @@ PB.createNet = function (opts) {
 
   function handle(msg) {
     if (msg.t === 'hello') {
+      var again = self.id !== null;
+      /* A hello on a socket we had already introduced ourselves on is a
+       * reconnection. Whether the seat was still ours is the server's to say:
+       * the same id back means it was. */
+      var resumed = again && msg.id === self.id;
       self.id = msg.id;
-      self.seed = msg.seed;
+      self.token = msg.token || self.token;
+      attempts = 0;
       (msg.players || []).forEach(function (p) { names.set(p.id, p.name); });
       if (msg.you && msg.you.maxHealth) maxHealth = msg.you.maxHealth;
+
+      /* A different map means the room built a new world while we were away —
+       * everybody left and the match ended. The arena here was generated from
+       * the old seed and cannot be regenerated in place, so this is a page
+       * reload rather than something to paper over. */
+      if (again && msg.seed !== self.seed) {
+        self.seed = msg.seed;
+        emit('worldChanged', msg);
+        return;
+      }
+      self.seed = msg.seed;
+
       if (game && msg.you) {
         game.setHealth(msg.you.health, maxHealth);
         // the server picked our spot, so we do not land on top of somebody
         game.teleport(msg.you.x, msg.you.y, msg.you.z);
       }
+      // our own clocks were stopped when the socket went; start them again
+      if (game) startSending(game);
+      if (again) emit(resumed ? 'resumed' : 'rejoined', msg);
       emit('hello', msg);
+      return;
+    }
+    /* Somebody's socket dropped, or came back. They are not in the world in
+     * between — no body, no name over it — but their seat and their score are
+     * being kept, and the room should be told rather than left to guess from
+     * a figure that vanished. */
+    if (msg.t === 'away') {
+      dropRemote(msg.id);
+      emit('away', msg);
+      return;
+    }
+    if (msg.t === 'back') {
+      departed.delete(msg.player.id);
+      names.set(msg.player.id, msg.player.name);
+      emit('back', msg.player);
       return;
     }
     if (msg.t === 'perk') {
@@ -257,9 +331,16 @@ PB.createNet = function (opts) {
   }
 
   /* ------------------------------------------------------------- sending */
+  /* Called on attaching, and again on every reconnection — the timers are
+   * stopped when a socket drops, and something has to start them again. The
+   * subscription below is hooked up once and only once: doing it per
+   * connection is one message per shot per reconnection, and three lives in a
+   * flaky tunnel would have every round adjudicated three times. */
   function startSending(g) {
     game = g;
-    figureGeo = PB.figureGeometry();
+    if (!figureGeo) figureGeo = PB.figureGeometry();
+    if (wired) return startTimers();
+    wired = true;
 
     /* Every shot goes to the server for adjudication, carrying what we saw it
      * hit and how far behind the server our view was when we aimed. The server
@@ -281,6 +362,10 @@ PB.createNet = function (opts) {
       });
     });
 
+    return startTimers();
+  }
+
+  function startTimers() {
     // the client's own accounting, for the leaderboard work to come
     if (!statsTimer) {
       statsTimer = setInterval(function () {
@@ -553,7 +638,8 @@ PB.createNet = function (opts) {
       var ny = lerp(na[1], nb[1], pair.f);
       var nz = lerp(na[2], nb[2], pair.f);
       n.root.position.set(nx, ny, nz);
-      n.root.rotation.y = lerpAngle(na[3], nb[3], pair.f);
+      // the wire carries a heading, which is not what a figure is turned to
+      PB.faceHeading(n.root, lerpAngle(na[3], nb[3], pair.f));
       n.alive = !!nb[4];
       n.grounded = !!nb[5];
       n.vy = nb[6];
@@ -622,7 +708,26 @@ PB.createNet = function (opts) {
     delay: function () {
       return { target: targetDelay(), gap: arrivalGap, jitter: arrivalJitter };
     },
-    close: function () { stopSending(); if (socket) socket.close(); },
+    close: function () {
+      closing = true;                    // deliberate: nothing to reconnect to
+      if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+      stopSending();
+      /* Say we are going, so the seat is given up now rather than held for a
+       * minute against a return that is not coming. Best effort by its nature
+       * — a tab being closed may not get the message out — and the grace is
+       * what covers it when it does not. */
+      send({ t: 'leave' });
+      if (socket) socket.close();
+    },
+    /* Pull the plug, the way a tunnel or a closing lid would: the socket goes
+     * without anybody meaning it to, so the reconnection is left to do its
+     * job. Nothing in the game calls this — it is how a test can lose a
+     * connection on purpose. */
+    dropConnection: function () {
+      if (socket) socket.close();
+      return true;
+    },
+    reconnecting: function () { return attempts > 0; },
     remoteCount: function () { return remotes.size; },
     names: names,
     // rows of [id, name, score, kills, deaths, waitingToRespawn]

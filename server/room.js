@@ -49,6 +49,12 @@ const CHAT_BURST = 3;
 const CHAT_REFILL_MS = 2000;
 const CHAT_MAX = 120;
 
+/* How long a seat is kept for somebody whose socket dropped. Long enough to
+ * cover a lid closing, a tunnel, or a redeploy of this very server; short
+ * enough that a name nobody is behind any more leaves the scoreboard while the
+ * match is still the same match. */
+const GRACE_MS = 45000;
+
 class Room {
   constructor(opts = {}) {
     // A pinned seed is for tuning and for tests that need the same arena every
@@ -105,7 +111,7 @@ class Room {
   huntable() {
     const out = [];
     for (const p of this.players.values()) {
-      if (p.deadUntil) continue;
+      if (p.deadUntil || p.goneAt) continue;
       out.push({
         id: p.id, x: p.x, y: p.y, z: p.z,
         health: p.health, maxHealth: this.game.cfg.playerHealth,
@@ -155,7 +161,11 @@ class Room {
     /* An empty room means the last match is over. Rebuild before letting the
      * first player in, so they arrive on a fresh map at level one rather than
      * inheriting whatever the previous session left behind — a half-cleared
-     * arena, a level count from someone else's game, perks on the ground. */
+     * arena, a level count from someone else's game, perks on the ground.
+     *
+     * Somebody still inside their grace counts as being in the room: their
+     * score is being kept for them, and rebuilding the world underneath it
+     * would hand them back a match that no longer exists. */
     if (this.players.size === 0) this.buildWorld(this.pinnedSeed);
 
     const id = this.nextId++;
@@ -181,6 +191,13 @@ class Room {
       deaths: 0,
       perks: {},
       stats: { shotsFired: 0, shotsHit: 0, misses: 0, targetsBroken: 0, npcsDown: 0 },
+      /* What a returning socket proves itself with. A dropped connection is
+       * ordinary — a laptop lid, a train tunnel, a redeploy — and coming back
+       * as a stranger with nothing to your name is a worse answer to it than
+       * holding the seat for a minute. Not guessable: it is the only thing
+       * standing between somebody and another player's score. */
+      token: newToken(),
+      goneAt: 0,                 // when the socket dropped, 0 while connected
     };
     player.health = this.game.cfg.playerHealth;
     player.healAt = Date.now() + this.game.cfg.healEvery * 1000;
@@ -196,6 +213,60 @@ class Room {
     // of where it started, which is not their fault either
     player.settleUntil = player.lastStateAt + 1000;
     return player;
+  }
+
+  /* --------------------------------------------------- losing the thread */
+  /* A socket went away. The seat is kept, and everything in it — score, kills,
+   * the lot — until the grace runs out.
+   *
+   * They come out of the world immediately, though. A body left standing where
+   * somebody rage-quit is one that soaks up rounds and gets shot for points,
+   * and a hunter would happily spend the next minute emptying itself into it. */
+  disconnect(id, now = Date.now()) {
+    const player = this.players.get(id);
+    if (!player || player.goneAt) return null;
+    player.goneAt = now;
+    return player;
+  }
+
+  /* Prove who you were and pick the seat back up. The name comes with them
+   * because it may have changed in the meantime — in the options panel, while
+   * disconnected — and the token is what says it is the same person. */
+  resume(token, name, now = Date.now()) {
+    if (!token) return null;
+    for (const p of this.players.values()) {
+      if (p.token !== token || !p.goneAt) continue;
+      if (now - p.goneAt > GRACE_MS) return null;      // the seat is not theirs
+      p.goneAt = 0;
+      if (typeof name === 'string' && name) p.name = cleanName(name);
+      p.lastStateAt = now;
+      p.moveCredit = MOVE_BURST;
+      /* Back on the same terms as coming out of a respawn: a moment of
+       * protection, and a moment where their own idea of where they are is
+       * not held against them. They have been away; the world has not. */
+      p.settleUntil = now + 1000;
+      p.shieldUntil = now + this.game.cfg.spawnShield * 1000;
+      p.healAt = now + this.game.cfg.healEvery * 1000;
+      return p;
+    }
+    return null;
+  }
+
+  /* Whoever ran out of grace. Their seat goes, and the room is told properly
+   * so the tags and the scoreboard let go of them. */
+  sweepGone(now = Date.now()) {
+    const left = [];
+    for (const p of [...this.players.values()]) {
+      if (!p.goneAt || now - p.goneAt <= GRACE_MS) continue;
+      this.players.delete(p.id);
+      left.push({ t: 'left', id: p.id, name: p.name });
+    }
+    return left;
+  }
+
+  // in the room, and on the end of a socket
+  here(p) {
+    return !!p && !p.goneAt;
   }
 
   leave(id) {
@@ -223,12 +294,14 @@ class Room {
       arena: this.game.arenaFingerprint(),
       level: this.levelMessage(),
       id: player.id,
+      // what a dropped connection comes back with; see resume()
+      token: player.token,
       seed: this.seed,
       simHz: SIM_HZ,
       snapshotHz: SNAPSHOT_HZ,
       you: this.publicPlayer(player),
       players: [...this.players.values()]
-        .filter(p => p.id !== player.id)
+        .filter(p => p.id !== player.id && !p.goneAt)
         .map(p => this.publicPlayer(p)),
     };
   }
@@ -285,7 +358,7 @@ class Room {
     const shooter = this.players.get(exceptId);
     let best = null;
     for (const p of this.players.values()) {
-      if (p.id === exceptId || p.deadUntil) continue;
+      if (p.id === exceptId || p.deadUntil || p.goneAt) continue;
       /* Somebody out of the fight is not in the way of it either: the round
        * carries on to whatever is behind them. Only a player's round, though —
        * with no shooter this is the level's own enemy firing, and opting out of
@@ -346,7 +419,7 @@ class Room {
 
       let gap = Infinity;
       for (const other of this.players.values()) {
-        if (other.id === player.id || other.deadUntil) continue;
+        if (other.id === player.id || other.deadUntil || other.goneAt) continue;
         gap = Math.min(gap, Math.hypot(other.x - x, other.z - z));
       }
       if (gap > bestGap) { bestGap = gap; best = { x, z }; }
@@ -387,7 +460,7 @@ class Room {
       if (!kit.ready && now >= kit.backAt) kit.ready = true;
     }
     for (const p of this.players.values()) {
-      if (p.deadUntil || p.health >= g.cfg.playerHealth) continue;
+      if (p.goneAt || p.deadUntil || p.health >= g.cfg.playerHealth) continue;
       const kit = g.medkitAt(p.x, p.z, p.y - g.cfg.eye);
       if (!kit) continue;
       kit.ready = false;
@@ -404,6 +477,7 @@ class Room {
     const events = [];
     const cfg = this.game.cfg;
     for (const p of this.players.values()) {
+      if (p.goneAt) continue;
       if (p.deadUntil) {
         if (now >= p.deadUntil) {
           const at = this.respawn(p, now);
@@ -538,6 +612,7 @@ class Room {
     const g = this.game;
     const picked = [];
     for (const player of this.players.values()) {
+      if (player.goneAt) continue;
       const perk = g.perkSystem.pickUpAt(player.x, player.z, player.y - g.cfg.eye);
       if (!perk) continue;
       g.perkSystem.grant(player, perk.kind);
@@ -791,7 +866,9 @@ class Room {
       t: 'snapshot',
       tick: this.tick,
       time: Date.now(),
-      players: [...this.players.values()].map(p => ([
+      // somebody whose socket dropped is not in the world at all: no body to
+      // draw, to shoot, or to walk into
+      players: [...this.players.values()].filter(p => !p.goneAt).map(p => ([
         p.id,
         round(p.x), round(p.y), round(p.z),
         round(p.yaw), p.moving ? 1 : 0, p.grounded ? 1 : 0, round(p.vy),
@@ -871,7 +948,11 @@ class Room {
    * inventing its own tie-break. */
   scoreboard() {
     const rows = [...this.players.values()]
-      .map(p => ([p.id, p.name, p.score, p.kills, p.deaths, p.deadUntil ? 1 : 0]))
+      // somebody whose socket dropped stays on the table while their seat is
+      // being kept: their score is still theirs, and the room can see that
+      // they are away rather than watching them vanish and reappear
+      .map(p => ([p.id, p.name, p.score, p.kills, p.deaths,
+                  p.deadUntil ? 1 : 0, p.goneAt ? 1 : 0]))
       .sort((a, b) => b[2] - a[2] || b[3] - a[3] || a[1].localeCompare(b[1]));
     return { t: 'scores', players: rows };
   }
@@ -885,6 +966,7 @@ class Room {
     for (const player of this.players.values()) {
       this.game.perkSystem.tickHolder(player, dt);
     }
+    for (const msg of this.sweepGone(now)) this.onBroadcast(msg);
     for (const msg of this.collectPerks(now)) this.onBroadcast(msg);
     for (const msg of this.updateMedkits(now)) this.onBroadcast(msg);
     for (const msg of this.updateHealth(now)) this.onBroadcast(msg);
@@ -926,6 +1008,12 @@ class Room {
 
 function round(n) {
   return Math.round(n * 1000) / 1000;
+}
+
+/* The only thing between somebody and another player's seat, so it comes from
+ * the platform's own source of randomness rather than from Math.random. */
+function newToken() {
+  return require('crypto').randomBytes(16).toString('hex');
 }
 const r3 = round;
 
@@ -977,4 +1065,4 @@ function cleanName(raw) {
 }
 
 module.exports = { Room, SIM_HZ, SNAPSHOT_HZ, MAX_REWIND_MS, MOVE_BURST,
-                   CHAT_MAX, CHAT_BURST, cleanChat };
+                   CHAT_MAX, CHAT_BURST, GRACE_MS, cleanChat };

@@ -36,6 +36,23 @@ PB.HIT = {
 PB.HIT.height = PB.HIT.top - PB.HIT.bottom;
 PB.HIT.midY = (PB.HIT.top + PB.HIT.bottom) / 2;
 
+/* Turn a figure to face the way it is going.
+ *
+ * A heading is a direction of travel — (sin h, cos h) — while a figure's front
+ * is its local -Z, so the two are a half turn apart. That half turn belongs in
+ * one place because two of them need it: the engine, simulating an NPC, and a
+ * client drawing one from a snapshot. Written out in only the first of those,
+ * every NPC in a networked game walked backwards — which nobody noticed for as
+ * long as they only wandered, and which was unmissable the moment one of them
+ * started walking at people.
+ *
+ * Players are not turned through here: a yaw of 0 already looks down -Z, the
+ * same way the camera does, so their figures take their yaw unchanged. */
+PB.faceHeading = function (obj, heading) {
+  obj.rotation.y = heading + Math.PI;
+  return obj.rotation.y;
+};
+
 PB.buildFigure = function (opts) {
   var THREE = global.THREE;
   var shadows = opts.shadows !== false;
