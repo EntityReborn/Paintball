@@ -444,8 +444,19 @@ PB.createNet = function (opts) {
    * the camera). */
   function update(dt) {
     if (!game || snapshots.length === 0) return;
-    lastUpdateAt = now();
-    var pair = bracket(advanceClock(dt));
+    var at = now();
+    /* Advance the playback clock by the time that actually passed, not by the
+     * frame delta handed in. The game clamps that to 50ms so a hitch cannot
+     * fling the player through a wall, which is right for physics and wrong
+     * for this: on a client drawing every 120ms the clock gained 50ms a frame,
+     * fell behind real time by more than half, and then hit the half-second
+     * resynchronisation below and snapped. On screen that is the other player
+     * frozen for a third of a second and then jumping several metres — the
+     * exact stutter the interpolation exists to prevent, on exactly the
+     * machines that can least afford it. */
+    var real = lastUpdateAt ? Math.min(500, at - lastUpdateAt) : dt * 1000;
+    lastUpdateAt = at;
+    var pair = bracket(advanceClock(real / 1000));
     if (!pair) return;
 
     var seen = new Set();

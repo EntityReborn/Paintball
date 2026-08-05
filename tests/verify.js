@@ -10,6 +10,7 @@
  * Requires the static server on http://localhost:8123 (see .claude/launch.json).
  */
 const fs = require('fs');
+const { chromeArgs, glMode } = require('./chrome.js');
 const path = require('path');
 
 
@@ -22,9 +23,9 @@ const HEADFUL = process.argv.includes('--headful');
 const log = (...a) => console.log(...a);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Wait for the game clock, not the wall clock. Headless Chrome falls back to
-// software rendering and runs at a handful of frames a second, so wall-clock
-// waits would test the renderer's speed instead of the game's behaviour.
+// Wait for the game clock, not the wall clock: a wall-clock wait measures how
+// fast the machine draws rather than what the game did with the time. Matters
+// most under SOFTWARE_GL, where frames come at a handful a second.
 async function advance(page, seconds, timeout = 60000) {
   const from = await page.evaluate('game.state.elapsed');
   await page.waitForFunction(
@@ -54,17 +55,11 @@ async function shot(page, name) {
   const browser = await launch({
     executablePath: CHROME,
     headless: HEADFUL ? false : 'new',
-    args: [
+    args: chromeArgs([
       '--window-size=1280,800',
-      '--use-angle=swiftshader',
-      '--enable-unsafe-swiftshader',
       '--disable-web-security',      // lets the suite reach into the index.html iframe
       '--autoplay-policy=no-user-gesture-required',
-      '--no-sandbox',
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding',
-    ],
+    ]),
     defaultViewport: { width: 1280, height: 800 },
   });
 
@@ -74,7 +69,7 @@ async function shot(page, name) {
   page.on('pageerror', e => consoleErrors.push('pageerror: ' + e.message));
 
   /* ------------------------------------------------------- 1. test suite */
-  log('\n== BROWSER TEST SUITE ==');
+  log(`\n== BROWSER TEST SUITE ==  (${glMode()} GL)`);
   await page.goto(`${BASE}/tests/tests.html`, { waitUntil: 'load' });
   await page.waitForFunction('window.__results && window.__results.done', { timeout: 180000 });
   const results = await page.evaluate('window.__results');
@@ -539,10 +534,27 @@ async function shot(page, name) {
     game.setActive(true);
     game.setShield(0);
     game.setHealth(game.cfg.playerHealth, game.cfg.playerHealth);
-    game.teleport(h.root.position.x, game.cfg.eye, h.root.position.z + 14);
-    game.aimAt(new THREE.Vector3(h.root.position.x, 1.2, h.root.position.z));
-    h.heading = 0;                       // (sin h, cos h): straight at us
-    h.root.position.z = game.state.pos.z - 14;
+    game.teleport(0, game.cfg.eye, 0);
+
+    /* Stand it where it can actually see us. The arena offline is a fresh
+     * random map every run, so a fixed offset lands it behind cover about as
+     * often as not — and a hunter that never got a look at anybody is a
+     * correct hunter and a worthless check. */
+    const eye = new THREE.Vector3(0, game.cfg.eye, 0);
+    const lim = game.cfg.arena / 2 - 4;
+    let spot = null;
+    for (let a = 0; a < Math.PI * 2 && !spot; a += Math.PI / 24) {
+      const at = new THREE.Vector3(Math.sin(a) * 14, 1.2, Math.cos(a) * 14);
+      if (Math.abs(at.x) > lim || Math.abs(at.z) > lim) continue;
+      if (game.hasLineOfSight(eye, at)) spot = at;
+    }
+    if (!spot) return { spot: false };
+
+    h.root.position.set(spot.x, 0, spot.z);
+    h.root.updateMatrixWorld(true);
+    game.aimAt(new THREE.Vector3(spot.x, 1.2, spot.z));
+    // (sin, cos) is the way it walks and looks: point it back at us
+    h.heading = Math.atan2(-spot.x, -spot.z);
     h.mark = null; h.quarry = null; h.sawAt = -1e9; h.sightSince = 0;
 
     let shots = 0;
@@ -556,7 +568,7 @@ async function shot(page, name) {
       game.state.vel.set(0, 0, 0);
     }
     return {
-      shots, startedAt,
+      spot: true, shots, startedAt,
       closedTo: Math.hypot(h.root.position.x - game.state.pos.x,
                            h.root.position.z - game.state.pos.z),
       health: game.state.health,
@@ -564,14 +576,19 @@ async function shot(page, name) {
       score: game.state.score,
     };
   });
-  check('it finds the player and opens fire', hunted.shots > 0 && hunted.marked,
-        `${hunted.shots} rounds`);
-  check('it closes the distance', hunted.closedTo < hunted.startedAt - 1,
-        `${hunted.startedAt.toFixed(1)}u -> ${hunted.closedTo.toFixed(1)}u`);
-  check('and takes health off whoever it hits',
-        hunted.health < 10, `health ${hunted.health}/10`);
-  check('being shot at costs the player no score', hunted.score === 0,
-        `score ${hunted.score}`);
+  if (!hunted.spot) {
+    // a fresh random arena every run, and this one is cover all the way round
+    log('  SKIP  the hunter section — no clear line out of the middle of this map');
+  } else {
+    check('it finds the player and opens fire', hunted.shots > 0 && hunted.marked,
+          `${hunted.shots} rounds`);
+    check('it closes the distance', hunted.closedTo < hunted.startedAt - 1,
+          `${hunted.startedAt.toFixed(1)}u -> ${hunted.closedTo.toFixed(1)}u`);
+    check('and takes health off whoever it hits',
+          hunted.health < 10, `health ${hunted.health}/10`);
+    check('being shot at costs the player no score', hunted.score === 0,
+          `score ${hunted.score}`);
+  }
   await shot(page, '10-hunted.png');
 
   const dying = await page.evaluate(async () => {

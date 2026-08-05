@@ -9,6 +9,7 @@
 'use strict';
 
 const path = require('path');
+const { chromeArgs, glMode } = require('./chrome.js');
 
 const CHROME = process.env.CHROME_PATH ||
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
@@ -32,8 +33,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const browser = await launch({
     executablePath: CHROME,
     headless: 'new',
-    args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox',
-           '--window-size=1100,760'],
+    args: chromeArgs(['--window-size=1100,760']),
     defaultViewport: { width: 1100, height: 760 },
   });
 

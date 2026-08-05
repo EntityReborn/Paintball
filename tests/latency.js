@@ -23,6 +23,7 @@
 const path = require('path');
 const { spawn } = require('child_process');
 const http = require('http');
+const { chromeArgs, glMode } = require('./chrome.js');
 
 const CHROME = process.env.CHROME_PATH ||
   String.raw`C:\Program Files\Google\Chrome\Application\chrome.exe`;
@@ -101,11 +102,7 @@ function bestOffset(truth, seen) {
   const newBrowser = () => launch({
     executablePath: CHROME,
     headless: 'new',
-    args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--no-sandbox',
-           '--window-size=900,560',
-           '--disable-background-timer-throttling',
-           '--disable-backgrounding-occluded-windows',
-           '--disable-renderer-backgrounding'],
+    args: chromeArgs(['--window-size=900,560']),
     defaultViewport: { width: 900, height: 560 },
   });
   const browsers = [await newBrowser(), await newBrowser()];

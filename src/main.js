@@ -54,6 +54,11 @@ function build(seed) {
     var wanted = Number(params.get('hunters'));
     if (isFinite(wanted)) settings.hunters = Math.max(0, Math.min(4, wanted | 0));
   }
+  /* ?shadows=0 for the same kind of run. A headless browser has no GPU and
+   * rasterises in software, where the shadow pass is most of the frame; two of
+   * them on one machine spend so long drawing that the socket goes unread
+   * between frames, and a test of the networking ends up measuring that. */
+  if (params.get('shadows') === '0') settings.shadows = false;
   try {
     return window.createGame(settings);
   } catch (err) {
