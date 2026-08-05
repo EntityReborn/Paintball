@@ -27,14 +27,15 @@ vendored in `vendor/`.
 broken. NPCs do not respawn, so the level is a hunt; the fresh set that appears
 belongs to the next level, which has one more NPC than the last.
 
-**One of them shoots back.** Every level comes with a hunter: red, carrying a
-weapon, and always the first NPC of the level on both sides of the wire. See
+**One of them shoots back.** Every level comes with a hunter — red, armed, and
+taking three rounds to put down — and another every four levels after that. See
 [The hunter](#the-hunter).
 
 | Event | Score |
 | --- | --- |
 | target broken | +100 |
-| NPC down (the hunter included) | +250 |
+| NPC down | +250 |
+| **hunter down** (three rounds to put one down) | **+750** |
 | **player killed** | **+1000** |
 | level complete | +500 |
 | shot that hits nothing | −25 |
@@ -115,12 +116,20 @@ last few minutes.
 
 ## The hunter
 
-Every level has one, on top of the wanderers. It is red — the one hue nothing
-else in the game may use — it carries a visor, a pack and a weapon so it reads
-as something that shoots back, and it is worth the same as any other NPC to put
-down. It is always NPC index 0, because a client rebuilds a level from a count
-rather than a list, so which one comes back red has to be something both sides
-can work out from the index alone.
+Every level has one, on top of the wanderers, and one more every four levels to
+a ceiling of four. It is red — the one hue nothing else in the game may use —
+and it carries a visor, a pack and a weapon so it reads as something that shoots
+back.
+
+**It takes three rounds to put down**, where a wanderer takes one, so the thing
+a level is built around is not settled by whoever pulls the trigger first. Once
+it has been hit it wears what is left of it, the same bar a hurt player wears;
+untouched it shows nothing. Only the round that finishes one pays out or counts
+as an NPC down, and it pays 750 against a wanderer's 250.
+
+The hunters are always the first NPCs of a level, because a client rebuilds a
+level from a count rather than a list — so which ones come back red has to be
+something both sides can work out from the index and the level alone.
 
 **What it knows is a memory, not a feed.** It learns where you are only while
 it can actually see you: inside a forward cone, with nothing solid in between,
@@ -140,9 +149,9 @@ left — before it is worth turning away from the one already being worn down.
 **Its aim is average on purpose.** A cone that opens with range rather than a
 line, and no allowance at all for a target that is moving. Standing in the open
 at the range it likes costs about half the rounds it sends; a long shot mostly
-does not land. It closes to nine units and holds there, sight or no sight — it
-never walks into your face, because a hunter you cannot help but shoot is not
-one.
+does not land. It closes to an eighth of the arena and holds there, sight or no
+sight — it never walks into your face, because a hunter you cannot help but
+shoot is not one.
 
 Who its rounds hit is settled by whoever owns the players: the room, online,
 testing them against the same box a player's round is tested against. Nobody is
@@ -152,7 +161,9 @@ the level's own enemy is not one.
 
 | | |
 | --- | --- |
-| per level | 1 (`hunters`) |
+| per level | 1, and one more every 4 (`hunters`, `hunterEvery`, `hunterMax` 4) |
+| rounds to put down | 3 (`hunterHealth`), against a wanderer's 1 |
+| worth | 750 (`scoreHunter`), against a wanderer's 250 |
 | sight / field of view | seven tenths of the arena (56u at 80), ±1.15 rad |
 | memory / guess | 7s, extrapolated for the first 2.5s |
 | aim cone | ±0.11 rad, no leading |
@@ -492,7 +503,7 @@ a web server.
 
 Two layers, both driving the real engine in a real WebGL context.
 
-**Browser suite** (`tests/tests.html`) — 288 tests over bootstrap, world
+**Browser suite** (`tests/tests.html`) — 293 tests over bootstrap, world
 generation, targets, rendering, movement, collision, shooting, breaking, levels,
 input, the reload animation, NPCs, view angles, zoom, drifting targets, scoring,
 score indicators, player statistics, telling players from NPCs, the balcony,
@@ -512,7 +523,7 @@ red and armed, that it finds a player, closes, opens fire and takes health off
 them, and that going down offline puts the death screen up and the world brings
 you back on its own.
 
-**Server tests** (`tests/server.test.js`) — 91 node tests over the headless
+**Server tests** (`tests/server.test.js`) — 95 node tests over the headless
 engine, seed determinism, the room's plausibility rules, spawn placement,
 server-side shot validation and lag compensation, the player-versus-player rules
 (ten hits to kill, healing, respawning, spawn protection, the shield, health
