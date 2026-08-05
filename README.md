@@ -72,12 +72,14 @@ makes the way in a decision without ever locking anyone out; the gaps between
 its panels are too narrow to walk through and wide enough for a round, so
 sheltering behind it is harder rather than safe. `house: false` leaves it out.
 
-A ramp is a true triangular prism to look at and a short flight of steps to
-walk on, each step inscribed *under* the slope — never above it, because a
-collider poking out of a ramp stops a player in mid-air on nothing. The cost is
-sinking a few centimetres into the surface on the way up, which is a far better
-trade than an axis-aligned box around the whole wedge: that is a wall you can
-see over and cannot climb. The house's roof is stepped for the same reason.
+A ramp is a true triangular prism to look at and a flight of very short steps
+to walk on, each one inscribed *under* the slope — never above it, because a
+collider poking out of a ramp stops a player in mid-air on nothing. The rise is
+an eighth of what a player can step up: at the full step height the climb is a
+staircase taken in lurches rather than a slope. The cost is sinking about a
+hundredth of the height into the visible surface on the way up, which is a far
+better trade than an axis-aligned box around the whole wedge: that is a wall you
+can see over and cannot climb. The house's roof is stepped for the same reason.
 
 Nothing is ever spawned into the air inside a room or the house. A target
 sealed in one can only be shot through a doorway from exactly the right angle,
@@ -121,8 +123,10 @@ rather than a list, so which one comes back red has to be something both sides
 can work out from the index alone.
 
 **What it knows is a memory, not a feed.** It learns where you are only while
-it can actually see you: within 42 units, inside a forward cone, and with
-nothing solid in between. Break the line and it works from where you were and
+it can actually see you: inside a forward cone, with nothing solid in between,
+and within seven tenths of the arena — a distance rather than a fixed number of
+units, because the same figure written as "forty-two" saw most of a small map
+and a third of a large one. Break the line and it works from where you were and
 which way you were going, running that guess on for a couple of seconds and
 then walking in on the spot itself. Seven seconds after losing you it gives up
 and goes back to patrolling. Standing behind cover is a way out of a fight,
@@ -149,11 +153,11 @@ the level's own enemy is not one.
 | | |
 | --- | --- |
 | per level | 1 (`hunters`) |
-| sight / field of view | 42u, ±1.15 rad |
+| sight / field of view | seven tenths of the arena (56u at 80), ±1.15 rad |
 | memory / guess | 7s, extrapolated for the first 2.5s |
 | aim cone | ±0.11 rad, no leading |
 | rate / reaction | one round per 0.8s, 0.45s to open fire |
-| speed / standoff | 4.4u/s, holds at 9u |
+| speed / standoff | 4.4u/s, holds at an eighth of the arena (10u at 80) |
 
 `index.html?hunters=0` takes it out, which is how the scripted test runs get an
 arena where nothing shoots back.
@@ -488,7 +492,7 @@ a web server.
 
 Two layers, both driving the real engine in a real WebGL context.
 
-**Browser suite** (`tests/tests.html`) — 285 tests over bootstrap, world
+**Browser suite** (`tests/tests.html`) — 288 tests over bootstrap, world
 generation, targets, rendering, movement, collision, shooting, breaking, levels,
 input, the reload animation, NPCs, view angles, zoom, drifting targets, scoring,
 score indicators, player statistics, telling players from NPCs, the balcony,
@@ -617,6 +621,12 @@ re-entering the window rather than a real flick.
   requested with `unadjustedMovement`. Every write to the angles goes through one
   clamped path, and samples beyond `lookSpikePx` (500 by default) are discarded
   rather than clamped — clamping still turns the view, just less far.
+- **A ramp you could see straight through.** Its faces were wound the wrong
+  way round, so with front-facing materials — which everything in the scene
+  uses — most of them were simply not drawn, and what was left was the inside
+  of the far side. Its bottom face also lay in the same plane as the floor and
+  flickered against it from across the arena; there is nothing under a ramp to
+  see, so it does not have one now.
 - **NPCs walked through cover.** They never had collision at all: they steered
   with a raycast on a think tick a few times a second, which turns them away
   from most things most of the time, and in between they walked straight

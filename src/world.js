@@ -132,6 +132,7 @@ PB.createWorld = function (ctx) {
    * arena fingerprint the two sides check.
    */
   var structures = [];        // {kind, parts: [mesh], box: overall footprint}
+  var RAMP_RISE = 0.12;       // how far a ramp climbs per collider step
 
   /* The air inside a room, which is not a collider and not solid, and which
    * nothing may be spawned into.
@@ -192,20 +193,31 @@ PB.createWorld = function (ctx) {
    * far better trade than being stopped by air, or than an axis-aligned box
    * around the whole wedge — that is a wall you can see over and not climb.
    */
+  /* A triangular prism: full height along -Z, sloping down to the floor at +Z.
+   *
+   * Every triangle is wound counter-clockwise seen from outside. Get one
+   * backwards and it is simply not drawn — the materials here are front-faced,
+   * as everything in the scene is — which is how the first version of this
+   * ended up as a shape you could see straight through.
+   *
+   * There is no bottom face. It sits flat on the floor, so nothing can ever
+   * see it, and a face in the same plane as the floor flickers against it from
+   * halfway across the arena.
+   */
   function wedgeGeometry(w, h, d) {
     var geo = new THREE.BufferGeometry();
     var x = w / 2, z = d / 2;
-    // 0-3 bottom, 4-5 the top edge along the high side
+    // 0-3 the four corners on the ground, 4-5 the top edge along the high side
     var v = [
       -x, 0, -z, x, 0, -z, x, 0, z, -x, 0, z,
       -x, h, -z, x, h, -z,
     ];
     geo.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
     geo.setIndex([
-      0, 2, 1, 0, 3, 2,          // floor
-      4, 1, 5, 4, 0, 1,          // the high back
-      4, 3, 0, 5, 1, 2,          // the two triangular sides
-      4, 5, 2, 4, 2, 3,          // the slope
+      0, 5, 1, 0, 4, 5,          // the high back, facing -Z
+      0, 3, 4,                   // the left triangle, facing -X
+      1, 5, 2,                   // the right triangle, facing +X
+      4, 2, 5, 4, 3, 2,          // the slope, facing up and +Z
     ]);
     geo.computeVertexNormals();
     return geo;
@@ -230,8 +242,16 @@ PB.createWorld = function (ctx) {
 
     /* Steps under the slope. Each is as tall as the slope is at the far edge
      * of that step, so the top of every step is on or below the surface. */
+    /* Fine steps, not stairs.
+     *
+     * They were as tall as a player can step up, which is the most the shape
+     * could get away with and exactly what it felt like: a staircase you climb
+     * in lurches. At an eighth of that the rise is below what anybody notices
+     * and the walk up reads as a slope. It also cuts how far into the visible
+     * surface a player sinks, since each step is inscribed under it.
+     */
     var steps = [];
-    var count = Math.max(2, Math.ceil(h / cfg.stepHeight));
+    var count = Math.max(4, Math.ceil(h / RAMP_RISE));
     var parts = [m];
     var alongZ = turns % 2 === 0;
     var run = (alongZ ? d : w) / count;

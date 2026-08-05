@@ -374,9 +374,12 @@ describe('World', function () {
       });
       var below = 0;
       treads.forEach(function (top) {
-        assert.less(top - below, g.cfg.stepHeight + 0.01,
-                    'ramp ' + i + ' has a rise of ' + (top - below).toFixed(2) +
-                    'u, more than a player can step up');
+        /* Well under what a player can step up, not merely within it: at the
+         * full step height this is a staircase you climb in lurches, which is
+         * not what a slope should feel like. */
+        assert.less(top - below, g.cfg.stepHeight / 3,
+                    'ramp ' + i + ' rises ' + (top - below).toFixed(2) +
+                    'u at a time — that is a staircase, not a ramp');
         below = top;
       });
     });
@@ -437,7 +440,9 @@ describe('World', function () {
      * honest about what is actually in the list. */
     var rampSteps = 0;
     g.structures.filter(function (s) { return s.kind === 'wedge'; }).forEach(function (r) {
-      rampSteps += Math.max(2, Math.ceil((r.box.max.y - r.box.min.y) / g.cfg.stepHeight)) - 1;
+      // the steps themselves rather than the formula that made them: this is
+      // a count of what is in the list, not a second copy of the arithmetic
+      rampSteps += r.steps.length;
     });
     var ramps = g.obstacleMeshes.filter(function (m) { return m.name === 'wedge'; }).length;
     assert.equal(g.colliders.length,
@@ -3367,7 +3372,11 @@ describe('Performance', function () {
       g.state.lastShot = -1e9;
       g.state.mag = g.cfg.magSize;
       g.shoot();
-      step(0.3);
+      // wait for the round to land rather than for a fixed time: it covers 36u
+      // in the third of a second this used to allow, and the arena is eighty
+      // across, so a target in plain sight can be further off than that
+      for (var i = 0; i < 30 && g.bullets.length; i++) step(0.05);
+      step(0.1);
       g.render();
       return !t.alive;
     }
@@ -3746,6 +3755,61 @@ describe('Built structures', function () {
     g.setKey('KeyW', false);
     return seen;
   }
+
+  it('builds a ramp that can be seen from outside it', function () {
+    /* Every face wound so its front is the outside. Get one backwards and it
+     * is simply not drawn, and the shape becomes something you can see
+     * straight through — which is what the first version of this was. */
+    var ramps = g.structures.filter(function (s) { return s.kind === 'wedge'; });
+    assert.greater(ramps.length, 0, 'no ramps');
+    var mesh = ramps[0].parts[0];
+    var geo = mesh.geometry;
+    var pos = geo.getAttribute('position');
+    var idx = geo.getIndex();
+    assert.ok(idx, 'the ramp has no faces');
+
+    var mid = new THREE.Vector3();
+    var a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    var ab = new THREE.Vector3(), ac = new THREE.Vector3(), n = new THREE.Vector3();
+    // the middle of the shape, which every outward normal must point away from
+    for (var v = 0; v < pos.count; v++) {
+      mid.add(new THREE.Vector3().fromBufferAttribute(pos, v));
+    }
+    mid.divideScalar(pos.count);
+
+    for (var f = 0; f < idx.count; f += 3) {
+      a.fromBufferAttribute(pos, idx.getX(f));
+      b.fromBufferAttribute(pos, idx.getX(f + 1));
+      c.fromBufferAttribute(pos, idx.getX(f + 2));
+      n.crossVectors(ab.subVectors(b, a), ac.subVectors(c, a));
+      var outward = a.clone().add(b).add(c).divideScalar(3).sub(mid);
+      assert.greater(n.dot(outward), 0,
+                     'face ' + (f / 3) + ' of the ramp is wound inside out');
+    }
+  });
+
+  it('keeps the ramp off the floor plane it stands on', function () {
+    // a face in the same plane as the floor flickers against it from across
+    // the arena; there is nothing under a ramp to see anyway
+    var mesh = g.structures.filter(function (s) { return s.kind === 'wedge'; })[0].parts[0];
+    var pos = mesh.geometry.getAttribute('position');
+    var idx = mesh.geometry.getIndex();
+    var flat = 0;
+    for (var f = 0; f < idx.count; f += 3) {
+      var ys = [idx.getX(f), idx.getX(f + 1), idx.getX(f + 2)]
+        .map(function (i) { return pos.getY(i); });
+      if (Math.max.apply(null, ys) < 0.001) flat++;
+    }
+    assert.equal(flat, 0, 'the ramp has a face lying in the floor');
+  });
+
+  it('sizes the hunter to the arena it is in', function () {
+    /* Not a fixed number of units: the same figure would see most of a small
+     * map and a third of a large one. */
+    assert.close(g.cfg.hunterSight, g.cfg.arena * 0.7, 0.01, 'sight');
+    assert.close(g.cfg.hunterRange, g.cfg.arena * 0.125, 0.01, 'standoff');
+    assert.less(g.cfg.hunterRange, g.cfg.hunterSight, 'it stands off further than it can see');
+  });
 
   it('puts ramps, arches and rooms in the arena', function () {
     var kinds = {};

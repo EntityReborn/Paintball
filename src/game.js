@@ -52,7 +52,12 @@ var DEFAULTS = {
   /* The red one, added to every level on top of the wanderers. It hunts and
    * shoots; everything below is the shape of how well. */
   hunters: 1,                 // how many per level
-  hunterSight: 42,            // how far one can see, in a straight line
+  /* How far it can see and how close it fights are both about the ground it
+   * has to cover, so both come off the arena unless they are given. Written
+   * as a fixed forty-two units, it saw most of a sixty-unit map and about a
+   * third of a hundred-unit one — the same enemy playing a different game
+   * depending on a number somewhere else entirely. */
+  hunterSight: null,          // null: seven tenths of the arena
   hunterFov: 1.15,            // radians either side of where it is facing
   hunterMemory: 7,            // seconds it keeps working from a lost sighting
   hunterGuess: 2.5,           // how much of that it spends running the guess on
@@ -64,7 +69,7 @@ var DEFAULTS = {
   hunterFireEvery: 0.8,       // seconds between rounds
   hunterReaction: 0.45,       // seconds between spotting you and the first one
   hunterSpeed: 4.4,           // a little quicker than a wanderer
-  hunterRange: 9,             // how close it tries to get before standing still
+  hunterRange: null,          // null: an eighth of the arena, before standing still
 
   medkits: 2,                 // health packs standing in the arena
   medkitRespawn: 25,          // seconds before a used one comes back
@@ -111,6 +116,14 @@ function createGame(options) {
   var cfg = Object.assign({}, DEFAULTS, options || {});
   var rand = cfg.seed === null ? Math.random : mulberry32(cfg.seed);
   var half = cfg.arena / 2;
+
+  /* What the hunter can see and how close it fights, for the arena it is
+   * actually in. Both are settled here rather than left to whoever reads them,
+   * so the server and every client work from the same numbers — they are part
+   * of how the same seed produces the same match. Give either one a value and
+   * it is used as given. */
+  if (cfg.hunterSight === null) cfg.hunterSight = +(cfg.arena * 0.7).toFixed(3);
+  if (cfg.hunterRange === null) cfg.hunterRange = +(cfg.arena * 0.125).toFixed(3);
 
   /* ----------------------------------------------------------- renderer */
   var container = cfg.container ||
