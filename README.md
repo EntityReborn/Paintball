@@ -460,6 +460,20 @@ local storage under `paintball.options` and applied the moment it changes.
 Values are validated on the way in: storage is editable by hand, and a
 sensitivity of zero or a NaN volume would leave the game unplayable.
 
+**Match** — the controls. Add targets, NPCs, hunters or perks to the level
+that is running, one to ten at a press; they arrive under the rules a level's
+own are placed by, so nothing lands inside cover or sealed in a room. And
+restart: a new map, level one, everybody back to nothing and moved somewhere
+clear. That takes two presses, because a single misplaced click throws away
+the map and every figure in the session. The session's figures go with it; the
+lifetime column is kept unless the checkbox says otherwise.
+
+Online both belong to the room rather than to the player who pressed them —
+everybody gets the same new map, and a note in the chat names whoever asked
+for it. There is no host: anyone in the room may use either, which is worth
+knowing before pointing this at a public server. A pinned `MAP_SEED` stays
+pinned across a restart.
+
 **Debug** — two overlays that draw the real data structures rather than copies
 of them, so if an overlay disagrees with what happens in play, the overlay is
 right:
@@ -523,7 +537,7 @@ red and armed, that it finds a player, closes, opens fire and takes health off
 them, and that going down offline puts the death screen up and the world brings
 you back on its own.
 
-**Server tests** (`tests/server.test.js`) — 95 node tests over the headless
+**Server tests** (`tests/server.test.js`) — 99 node tests over the headless
 engine, seed determinism, the room's plausibility rules, spawn placement,
 server-side shot validation and lag compensation, the player-versus-player rules
 (ten hits to kill, healing, respawning, spawn protection, the shield, health
@@ -537,8 +551,9 @@ snapshot cadence and size, and the static file server's path handling.
 **Menus** (`tests/ui.js`) — drives the pause-screen panels in a real browser:
 the buttons open their panels without starting the game, the debug toggles put
 real geometry in the scene, settings survive a reload, the lifetime figures
-outlive the page, a player with no name is asked for one before joining, and the
-scoreboard and the chat both work offline with nobody else there.
+outlive the page, a player with no name is asked for one before joining, the
+scoreboard and the chat both work offline with nobody else there, and the match
+controls add what they say they add and take two presses to restart.
 
 **Multiplayer** (`tests/multiplayer.js`) — starts the server, opens two real
 Chrome windows against it, walks one player with genuine key presses and checks
