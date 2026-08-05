@@ -191,6 +191,35 @@ function findClearTarget(fromY) {
     );
     if (hit.target === t) found = t;
   }
+  /* Nothing in view from here. The arena is eighty across with rooms and a
+   * house in it now, so standing at the spawn and looking around is no longer
+   * a reliable way to find anything — go and stand where one can be seen.
+   * Only a fallback: a target already in view is still shot from where the
+   * caller was, which is what most of these tests are about. */
+  for (var r = 0; r < g.targets.length && !found; r++) {
+    var want = g.targets[r];
+    if (!want.alive) continue;
+    for (var a = 0; a < Math.PI * 2 && !found; a += Math.PI / 8) {
+      for (var reach = 4; reach <= 10 && !found; reach += 3) {
+        var at = new THREE.Vector3(
+          want.mesh.position.x + Math.sin(a) * reach, g.cfg.eye,
+          want.mesh.position.z + Math.cos(a) * reach);
+        var lim = g.cfg.arena / 2 - 2;
+        if (Math.abs(at.x) > lim || Math.abs(at.z) > lim) continue;
+        var probe = g.playerBox(at, new THREE.Box3());
+        if (g.colliders.some(function (c) { return c.intersectsBox(probe); })) continue;
+        if (!g.hasLineOfSight(at, want.mesh.position)) continue;
+        g.teleport(at.x, g.cfg.eye, at.z);
+        g.aimAt(want.mesh.position);
+        var shot = g.traceShot(
+          g.camera.getWorldPosition(new THREE.Vector3()),
+          g.camera.getWorldDirection(new THREE.Vector3())
+        );
+        if (shot.target === want) found = want;
+      }
+    }
+  }
+
   // leave the camera where we found it, so callers aim for themselves
   g.yawObj.rotation.y = yaw;
   g.setPitch(pitch);
@@ -304,6 +333,12 @@ describe('World', function () {
      * see — you get stopped by cover you have not reached. */
     var size = new THREE.Vector3();
     g.obstacleMeshes.forEach(function (m, i) {
+      /* A ramp is the exception, and deliberately: its collider is a short
+       * flight of steps inscribed under the slope, because a box around a
+       * wedge is a wall you can see over and cannot climb. Its entry on the
+       * obstacle list is its whole volume, which is what spawning keeps out
+       * of, and it is checked for that further down rather than here. */
+      if (m.name === 'wedge') return;
       var p = m.geometry.parameters;
       g.obstacleBoxes[i].getSize(size);
 
@@ -314,6 +349,36 @@ describe('World', function () {
       assert.close(box[0], visual[0], 0.01, 'obstacle ' + i + ' collider is the wrong width');
       assert.close(box[1], visual[1], 0.01, 'obstacle ' + i + ' collider is the wrong depth');
       assert.close(size.y, p.height, 0.01, 'obstacle ' + i + ' collider is the wrong height');
+    });
+  });
+
+  it('gives a ramp steps that stay under its slope', function () {
+    /* Never above the surface: a collider poking out of a ramp stops a player
+     * in mid-air on nothing. Under it by a little is the cost of the trade. */
+    var ramps = g.structures.filter(function (s) { return s.kind === 'wedge'; });
+    assert.greater(ramps.length, 0, 'no ramps in the arena');
+    ramps.forEach(function (r, i) {
+      assert.greater(r.steps.length, 0, 'ramp ' + i + ' has nothing to walk up');
+      r.steps.forEach(function (c) {
+        assert.less(c.max.y, r.box.max.y + 0.01,
+                    'ramp ' + i + ' has a step standing above its slope');
+        assert.ok(g.colliders.indexOf(c) !== -1,
+                  'ramp ' + i + ' has a step nothing collides with');
+      });
+      /* Each step is a solid block from the floor up to its own tread — the
+       * balcony stairs are built the same way, because boxes centred on their
+       * own middles leave gaps between treads half again as tall as the rise.
+       * So what has to be small is the step up from one tread to the next. */
+      var treads = r.steps.map(function (c) { return c.max.y; }).sort(function (a, b) {
+        return a - b;
+      });
+      var below = 0;
+      treads.forEach(function (top) {
+        assert.less(top - below, g.cfg.stepHeight + 0.01,
+                    'ramp ' + i + ' has a rise of ' + (top - below).toFixed(2) +
+                    'u, more than a player can step up');
+        below = top;
+      });
     });
   });
 
@@ -334,6 +399,9 @@ describe('World', function () {
     for (var i = 0; i < g.obstacleBoxes.length; i += 4) {
       var box = g.obstacleBoxes[i];
       if (box.max.y < 1.2) continue;
+      // a ramp is for walking up, so coming to rest at its face is exactly
+      // what it must not do
+      if (g.obstacleMeshes[i] && g.obstacleMeshes[i].name === 'wedge') continue;
       var c = box.getCenter(new THREE.Vector3());
       var size = box.getSize(new THREE.Vector3());
       var startX = c.x + size.x / 2 + 5;
@@ -344,6 +412,11 @@ describe('World', function () {
       g.teleport(startX, g.cfg.eye, c.z);
       var probe = g.playerBox(g.state.pos, new THREE.Box3());
       if (g.colliders.some(function (o) { return o.intersectsBox(probe); })) continue;
+      /* And the run-up has to be clear. Cover comes in structures now — the
+       * far wall of a room, the fence around the house — so a walk at one box
+       * can be stopped by another one entirely, which is correct behaviour and
+       * proves nothing about the box being aimed at. */
+      if (!g.hasLineOfSight(g.state.pos.clone(), c)) continue;
       g.aimAt(c);
       g.setKey('KeyW', true);
       step(3);
@@ -358,8 +431,18 @@ describe('World', function () {
   });
 
   it('registers a collider for every wall, obstacle, slider and structure', function () {
+    /* One each for the four walls, the sliders and the balcony's parts, one
+     * for every obstacle — and a ramp brings several, since its slope is
+     * stepped. Counting the steps rather than assuming one apiece keeps this
+     * honest about what is actually in the list. */
+    var rampSteps = 0;
+    g.structures.filter(function (s) { return s.kind === 'wedge'; }).forEach(function (r) {
+      rampSteps += Math.max(2, Math.ceil((r.box.max.y - r.box.min.y) / g.cfg.stepHeight)) - 1;
+    });
+    var ramps = g.obstacleMeshes.filter(function (m) { return m.name === 'wedge'; }).length;
     assert.equal(g.colliders.length,
-                 4 + g.obstacleMeshes.length + g.movers.length + g.balcony.parts.length,
+                 4 + (g.obstacleMeshes.length - ramps) + rampSteps +
+                 g.movers.length + g.balcony.parts.length,
                  'collider count');
   });
 
@@ -653,6 +736,8 @@ describe('Collision', function () {
     for (var i = 0; i < g.obstacleBoxes.length; i += 3) {
       var b = g.obstacleBoxes[i];
       if (b.max.y < 1.2) continue;                   // low enough to stand on, not a wall
+      // a ramp is walked up, not walked into: its volume is meant to be entered
+      if (g.obstacleMeshes[i] && g.obstacleMeshes[i].name === 'wedge') continue;
       var c = b.getCenter(new THREE.Vector3());
       for (var d = 0; d < dirs.length; d++) {
         var sx = c.x + dirs[d][0] * 7, sz = c.z + dirs[d][1] * 7;
@@ -663,6 +748,8 @@ describe('Collision', function () {
         var start = g.playerBox(g.state.pos, box);
         var blocked = g.colliders.some(function (cc) { return cc.intersectsBox(start); });
         if (blocked) continue;
+        // and be a run at this box rather than at whatever stands in front of it
+        if (!g.hasLineOfSight(g.state.pos.clone(), c)) continue;
         tried++;
         g.setActive(true);
         g.aimAt(c);
@@ -2038,10 +2125,13 @@ describe('Perks', function () {
   it('clears the ground when a perk times out', function () {
     freshLevel();
     clearPerks();
-    g.perkSystem.spawn({ kind: 'clip', x: 20, y: 1.1, z: 20, life: 0.5 });
+    var dropped = g.perkSystem.spawn({ kind: 'clip', x: 20, y: 1.1, z: 20, life: 0.5 });
     assert.equal(g.perkSystem.perks.length, 1, 'nothing on the ground');
     step(1);
-    assert.equal(g.perkSystem.perks.length, 0, 'it never timed out');
+    /* This one, rather than the list being empty: the world drops perks of its
+     * own on a timer, and one landing during the step is not this one failing
+     * to expire. */
+    assert.equal(g.perkSystem.perks.indexOf(dropped), -1, 'it never timed out');
     clearPerks();
   });
 });
@@ -3345,6 +3435,9 @@ describe('Performance', function () {
       g.shoot();
       step(0.4);
     }
+    // and let the last one land: a round crosses 48u in the 0.4s above, which
+    // was the whole arena once and is no longer half of it
+    for (var w = 0; w < 40 && g.bullets.length; w++) step(0.1);
     assert.less(g.scene.children.length, before + 1, 'firing 60 rounds grew the scene');
     assert.less(g.impacts.length, g.decalPool.length + 1, 'more live decals than the pool holds');
   });
@@ -3637,6 +3730,181 @@ describe('Being dead', function () {
   });
 });
 
+describe('Built structures', function () {
+  function walk(from, dir, seconds, watch) {
+    g.setActive(true);
+    Object.keys(g.keys).forEach(function (k) { g.keys[k] = false; });
+    g.teleport(from[0], g.cfg.eye, from[1]);
+    g.yawObj.rotation.y = Math.atan2(-dir[0], -dir[1]);
+    g.setKey('KeyW', true);
+    var seen = false;
+    var dt = 1 / 60;
+    for (var t = 0; t < seconds; t += dt) {
+      g.update(dt);
+      if (watch && watch()) { seen = true; break; }
+    }
+    g.setKey('KeyW', false);
+    return seen;
+  }
+
+  it('puts ramps, arches and rooms in the arena', function () {
+    var kinds = {};
+    g.structures.forEach(function (s) { kinds[s.kind] = (kinds[s.kind] || 0) + 1; });
+    assert.ok(kinds.wedge > 0, 'no ramps: ' + JSON.stringify(kinds));
+    assert.ok(kinds.arch > 0, 'no arches: ' + JSON.stringify(kinds));
+    assert.ok(kinds.room > 0, 'no rooms: ' + JSON.stringify(kinds));
+    assert.equal(kinds.house, 1, 'wrong number of houses');
+  });
+
+  it('stands one house on an edge, with a fence and a tree', function () {
+    var h = g.house;
+    assert.ok(h, 'no house');
+    var edge = g.cfg.arena / 2 - Math.max(Math.abs(h.x), Math.abs(h.z));
+    assert.less(edge, 22, 'the house is not near an edge — ' + edge.toFixed(1) + 'u in');
+    assert.ok(h.tree, 'no tree');
+    var trunk = h.parts.filter(function (p) { return p.name === 'treeTrunk'; });
+    assert.equal(trunk.length, 1, 'the tree has no trunk to stop a round');
+    var fences = h.parts.filter(function (p) { return p.name === 'fence'; });
+    assert.greater(fences.length, 6, 'the fence is barely there');
+  });
+
+  it('leaves no gap in the fence wide enough to walk through', function () {
+    /* The gaps are what make it read as a fence rather than a low wall, and
+     * rounds go through them — but a player who can walk through one never
+     * has to jump, and the fence stops meaning anything. */
+    var h = g.house;
+    var runs = {};
+    h.parts.filter(function (p) { return p.name === 'fence'; }).forEach(function (p) {
+      var b = new THREE.Box3().setFromObject(p);
+      var alongX = (b.max.x - b.min.x) > (b.max.z - b.min.z);
+      var key = alongX ? 'z' + b.min.z.toFixed(1) : 'x' + b.min.x.toFixed(1);
+      (runs[key] = runs[key] || []).push(alongX ? [b.min.x, b.max.x] : [b.min.z, b.max.z]);
+    });
+    var widest = 0;
+    Object.keys(runs).forEach(function (k) {
+      var segs = runs[k].sort(function (a, b) { return a[0] - b[0]; });
+      for (var i = 1; i < segs.length; i++) {
+        widest = Math.max(widest, segs[i][0] - segs[i - 1][1]);
+      }
+    });
+    assert.less(widest, g.cfg.radius * 2, 'a player can walk through the fence');
+  });
+
+  it('has a fence that needs a jump and takes one', function () {
+    var h = g.house;
+    // low enough to clear: a standing jump reaches about two units
+    var reach = (g.cfg.jump * g.cfg.jump) / (2 * g.cfg.gravity);
+    assert.less(h.fence.height, reach - 0.4, 'the fence cannot be jumped');
+    assert.greater(h.fence.height, g.cfg.stepHeight + 0.2, 'the fence can be walked over');
+  });
+
+  it('lets a player walk in through every doorway', function () {
+    var h = g.house;
+    var inside = function () {
+      return Math.abs(g.state.pos.x - h.x) < h.width / 2 - 0.7 &&
+             Math.abs(g.state.pos.z - h.z) < h.depth / 2 - 0.7;
+    };
+    var ways = 0;
+    var approaches = [
+      [[h.x, h.z - h.depth / 2 - 3], [0, 1]],
+      [[h.x, h.z + h.depth / 2 + 3], [0, -1]],
+      [[h.x - h.width / 2 - 3, h.z], [1, 0]],
+      [[h.x + h.width / 2 + 3, h.z], [-1, 0]],
+    ];
+    approaches.forEach(function (a) {
+      if (walk(a[0], a[1], 4, inside)) ways++;
+    });
+    assert.equal(ways, 3, 'walked in ' + ways + ' ways, expected three doorways');
+  });
+
+  it('lets a player walk up a ramp', function () {
+    var wedge = g.structures.filter(function (s) { return s.kind === 'wedge'; })[0];
+    assert.ok(wedge, 'no ramp to walk up');
+    var box = wedge.box;
+    var top = box.max.y;
+    // approach from each side; one of them is the slope
+    var climbed = 0;
+    var mid = box.getCenter(new THREE.Vector3());
+    var span = Math.max(box.max.x - box.min.x, box.max.z - box.min.z);
+    [[0, 1], [0, -1], [1, 0], [-1, 0]].forEach(function (d) {
+      var from = [mid.x - d[0] * (span / 2 + 2.5), mid.z - d[1] * (span / 2 + 2.5)];
+      var up = walk(from, d, 3, function () {
+        return g.state.pos.y - g.cfg.eye > Math.min(0.5, top * 0.6);
+      });
+      if (up) climbed++;
+    });
+    assert.greater(climbed, 0, 'no way up the ramp from any side');
+  });
+
+  it('lets a player walk under an arch', function () {
+    var arch = g.structures.filter(function (s) { return s.kind === 'arch'; })[0];
+    assert.ok(arch, 'no arch');
+    var mid = arch.box.getCenter(new THREE.Vector3());
+    var span = arch.box.max.x - arch.box.min.x;
+    var through = walk([mid.x, mid.z - span - 2], [0, 1], 3, function () {
+      return g.state.pos.z > mid.z + 0.6;
+    }) || walk([mid.x - span - 2, mid.z], [1, 0], 3, function () {
+      return g.state.pos.x > mid.x + 0.6;
+    });
+    assert.ok(through, 'the arch cannot be walked under from either axis');
+  });
+
+  it('never hangs a target inside anything', function () {
+    for (var level = 1; level <= 4; level++) {
+      g.startLevel(level);
+      for (var i = 0; i < g.targets.length; i++) {
+        var p = g.targets[i].mesh.position;
+        assert.ok(!g.insideAnything(p.x, p.z, p.y, 0),
+                  'level ' + level + ': a target is sealed inside a structure');
+      }
+    }
+    freshLevel();
+  });
+
+  it('keeps a drifting target out of them as well', function () {
+    freshLevel();
+    for (var t = 0; t < 25; t += 1 / 60) {
+      step(1 / 60);
+      for (var i = 0; i < g.targets.length; i++) {
+        var tg = g.targets[i];
+        if (!tg.alive) continue;
+        var p = tg.mesh.position;
+        assert.ok(!g.insideAnything(p.x, p.z, p.y, 0),
+                  'a target drifted inside a structure');
+      }
+    }
+  });
+
+  it('does not let NPCs walk through anything', function () {
+    freshLevel();
+    var H = PB.HIT;
+    var box = new THREE.Box3();
+    var worst = 0;
+    for (var t = 0; t < 12; t += 1 / 60) {
+      step(1 / 60);
+      for (var n = 0; n < g.npcs.length; n++) {
+        var npc = g.npcs[n];
+        if (!npc.alive) continue;
+        var p = npc.root.position;
+        box.min.set(p.x - H.half, npc.y + H.bottom, p.z - H.half);
+        box.max.set(p.x + H.half, npc.y + H.top, p.z + H.half);
+        for (var c = 0; c < g.colliders.length; c++) {
+          var col = g.colliders[c];
+          if (!box.intersectsBox(col)) continue;
+          // resting exactly on top of something is not being inside it
+          var oy = Math.min(box.max.y - col.min.y, col.max.y - box.min.y);
+          if (oy <= 0.02) continue;
+          var ov = Math.min(
+            Math.min(box.max.x - col.min.x, col.max.x - box.min.x),
+            Math.min(box.max.z - col.min.z, col.max.z - box.min.z));
+          if (ov > worst) worst = ov;
+        }
+      }
+    }
+    assert.less(worst, 0.05, 'an NPC was ' + worst.toFixed(2) + 'u inside cover');
+  });
+});
+
 describe('Where the shot came from', function () {
   /* A bearing relative to the view: 0 straight ahead, positive to the right,
    * the way a compass reads. Everything drawing it just rotates by this, so
@@ -3739,9 +4007,14 @@ describe('Hunters', function () {
     var host = document.createElement('div');
     host.style.cssText = 'position:absolute;left:-9999px;width:320px;height:200px';
     document.body.appendChild(host);
+    /* Bare ground on purpose: no cover, no house, nothing else walking about.
+     * What is being measured is what the hunter does about a player it can or
+     * cannot see, and an arena full of crates decides that instead. Cover goes
+     * up per test, through withCover, exactly where it is wanted. */
     hg = global.createGame({
       container: host, seed: SEED, audio: false, shadows: false,
       hunters: 1, npcsPerLevel: 0, targetsPerLevel: 0,
+      obstacles: 0, movingObstacles: 0, house: false,
     });
     return hg;
   }

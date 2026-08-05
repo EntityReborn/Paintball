@@ -16,6 +16,9 @@ PB.createNPCs = function (ctx) {
   var cfg = ctx.cfg, rand = ctx.rand, half = ctx.half, scene = ctx.scene;
   var state = ctx.state, emit = ctx.emit;
   var solidMeshes = ctx.solidMeshes, obstacleBoxes = ctx.obstacleBoxes, floor = ctx.floor;
+  // what a figure may not walk through: cover, the balcony, the walls, the
+  // sliders — the same list the player is resolved against
+  var colliders = ctx.colliders;
   var addScore = ctx.addScore, checkLevel = function () { return ctx.checkLevel(); };
   var _v = new THREE.Vector3();
 
@@ -358,6 +361,75 @@ PB.createNPCs = function (ctx) {
     }
   }
 
+  /* ------------------------------------------------------- not walking through */
+  /* NPCs used to have no collision at all. They steered with a raycast on a
+   * think tick a few times a second, which turns them away from most things
+   * most of the time — and in between they walked straight through cover,
+   * because nothing ever stopped them. It was easy to miss on a wanderer
+   * drifting through the corner of a crate and impossible to miss on a hunter
+   * coming at you through a wall.
+   *
+   * They are resolved against the same box list the player is now, with the
+   * same step-up allowance, so they can climb a ramp or a stair but not a
+   * wall, and they walk through a doorway rather than through the wall beside
+   * it. Their box is the one their own rounds are tested against — PB.HIT —
+   * so what stops a figure is what a figure is.
+   */
+  var _npcBox = new THREE.Box3();
+
+  function boxOf(npc, out) {
+    var H = PB.HIT;
+    var p = npc.root.position;
+    out.min.set(p.x - H.half, npc.y + H.bottom, p.z - H.half);
+    out.max.set(p.x + H.half, npc.y + H.top, p.z + H.half);
+    return out;
+  }
+
+  function resolveNPC(npc) {
+    var p = npc.root.position;
+    var touched = false;
+    // twice: pushing out of one box can put a figure inside its neighbour
+    for (var pass = 0; pass < 2; pass++) {
+      var again = false;
+      boxOf(npc, _npcBox);
+      for (var i = 0; i < colliders.length; i++) {
+        var b = colliders[i];
+        if (!_npcBox.intersectsBox(b)) continue;
+        touched = again = true;
+
+        var ox = Math.min(_npcBox.max.x - b.min.x, b.max.x - _npcBox.min.x);
+        var oy = Math.min(_npcBox.max.y - b.min.y, b.max.y - _npcBox.min.y);
+        var oz = Math.min(_npcBox.max.z - b.min.z, b.max.z - _npcBox.min.z);
+
+        // a ledge low enough to walk up is walked up, not walked into
+        var rise = b.max.y - (npc.y + PB.HIT.bottom);
+        if (rise > 0.001 && rise <= cfg.stepHeight && oy > 0.001) {
+          npc.y = b.max.y - PB.HIT.bottom;
+          npc.vy = 0;
+          npc.grounded = true;
+        } else if (oy <= ox && oy <= oz) {
+          // landing on top of it, or knocking a head on the underside
+          if (_npcBox.min.y + PB.HIT.height / 2 > (b.min.y + b.max.y) / 2) {
+            npc.y = b.max.y - PB.HIT.bottom;
+            npc.vy = 0;
+            npc.grounded = true;
+          } else {
+            npc.y -= oy;
+            if (npc.vy > 0) npc.vy = 0;
+          }
+        } else if (ox < oz) {
+          p.x += (p.x > (b.min.x + b.max.x) / 2) ? ox : -ox;
+        } else {
+          p.z += (p.z > (b.min.z + b.max.z) / 2) ? oz : -oz;
+        }
+        boxOf(npc, _npcBox);
+      }
+      if (!again) break;
+    }
+    p.y = npc.y;
+    return touched;
+  }
+
   // steering: pick a new heading when blocked, and now and then anyway
   function wanderThink(npc, dt) {
     npc.think -= dt;
@@ -445,13 +517,24 @@ PB.createNPCs = function (ctx) {
         n.heading += Math.PI * (0.6 + rand() * 0.8);
       }
 
-      // gravity
-      if (!n.grounded || n.vy !== 0) {
-        n.vy -= cfg.gravity * dt;
-        n.y += n.vy * dt;
-        if (n.y <= 0) { n.y = 0; n.vy = 0; n.grounded = true; }
-      }
+      /* Gravity, every frame rather than only while airborne. Standing on
+       * something used to mean it stopped being applied, which was fine while
+       * the only thing to stand on was the floor — but a figure that walks off
+       * the top of a crate has to come down, and it cannot if nothing is
+       * pulling it. */
+      n.vy -= cfg.gravity * dt;
+      n.y += n.vy * dt;
+      if (n.y <= 0) { n.y = 0; n.vy = 0; n.grounded = true; }
+      else n.grounded = false;
       p.y = n.y;
+
+      // and out of anything walked into, which may stand them on top of it
+      if (resolveNPC(n) && !n.hunter) {
+        // a wanderer that has bumped something turns away from it rather than
+        // grinding along it until its next think
+        n.heading += (rand() < 0.5 ? -1 : 1) * (0.6 + rand() * 0.9);
+        n.think = Math.min(n.think, 0.12);
+      }
       PB.faceHeading(n.root, n.heading);
 
       // keep the world matrix current: bullets raycast against the hitbox, and

@@ -118,6 +118,205 @@ PB.createWorld = function (ctx) {
     return m;
   }
 
+  /* --------------------------------------------------- built structures */
+  /* Everything below is made of boxes, and on purpose.
+   *
+   * What the player walks into is an axis-aligned box list, so a shape that is
+   * one mesh and one box can only ever be a box. An arch, a doorway or a room
+   * is several boxes with the gaps left out — which is also why they are worth
+   * having: you can walk through the hole, shoot through it, and be shot
+   * through it, none of which a solid crate offers.
+   *
+   * They go into obstacleBoxes as well as colliders, so spawns, health packs,
+   * sliders and NPCs all keep away from them, and so they are part of the
+   * arena fingerprint the two sides check.
+   */
+  var structures = [];        // {kind, parts: [mesh], box: overall footprint}
+
+  /* The air inside a room, which is not a collider and not solid, and which
+   * nothing may be spawned into.
+   *
+   * A target floating inside four walls is one that can only be shot through a
+   * doorway from exactly the right angle, if at all — the level cannot be
+   * cleared and the player has no way of knowing why. The space is worth
+   * having as somewhere to stand and fight over; it is not worth having as
+   * somewhere to hide a target. */
+  var interiors = [];
+
+  function insideAnything(x, z, y, pad) {
+    var m = pad || 0;
+    for (var i = 0; i < interiors.length; i++) {
+      var b = interiors[i];
+      if (x < b.min.x - m || x > b.max.x + m) continue;
+      if (z < b.min.z - m || z > b.max.z + m) continue;
+      if (typeof y === 'number' && (y < b.min.y - m || y > b.max.y + m)) continue;
+      return true;
+    }
+    return false;
+  }
+
+  function addPart(mat, x, y, z, w, h, d, name) {
+    var m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(x, y, z);
+    m.castShadow = m.receiveShadow = true;
+    m.name = name || 'structure';
+    scene.add(m);
+    m.updateMatrixWorld(true);
+    var box = new THREE.Box3().setFromObject(m);
+    colliders.push(box);
+    obstacleBoxes.push(box);
+    obstacleMeshes.push(m);
+    solidMeshes.push(m);
+    return m;
+  }
+
+  function structureOf(kind, parts) {
+    var box = new THREE.Box3();
+    for (var i = 0; i < parts.length; i++) box.expandByObject(parts[i]);
+    var s = { kind: kind, parts: parts, box: box };
+    structures.push(s);
+    return s;
+  }
+
+  function pickMat() {
+    return obstacleMats[Math.floor(rand() * obstacleMats.length)];
+  }
+
+  /* A ramp: solid at the back, sloping down to the floor at the front.
+   *
+   * The mesh is a true triangular prism, because a staircase of boxes reads as
+   * a staircase. The collider is a handful of steps *inscribed under* the
+   * slope — never above it, so nothing ever stops you in mid-air, and each one
+   * is short enough to walk up, which is the whole point of a ramp. The cost
+   * is sinking a few centimetres into the surface on the way up, which is a
+   * far better trade than being stopped by air, or than an axis-aligned box
+   * around the whole wedge — that is a wall you can see over and not climb.
+   */
+  function wedgeGeometry(w, h, d) {
+    var geo = new THREE.BufferGeometry();
+    var x = w / 2, z = d / 2;
+    // 0-3 bottom, 4-5 the top edge along the high side
+    var v = [
+      -x, 0, -z, x, 0, -z, x, 0, z, -x, 0, z,
+      -x, h, -z, x, h, -z,
+    ];
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+    geo.setIndex([
+      0, 2, 1, 0, 3, 2,          // floor
+      4, 1, 5, 4, 0, 1,          // the high back
+      4, 3, 0, 5, 1, 2,          // the two triangular sides
+      4, 5, 2, 4, 2, 3,          // the slope
+    ]);
+    geo.computeVertexNormals();
+    return geo;
+  }
+
+  function addWedge(x, z, w, h, d, turns) {
+    var m = new THREE.Mesh(wedgeGeometry(w, h, d), pickMat());
+    m.position.set(x, 0, z);
+    m.rotation.y = turns * (Math.PI / 2);       // quarter turns, as ever
+    m.castShadow = m.receiveShadow = true;
+    m.name = 'wedge';
+    scene.add(m);
+    m.updateMatrixWorld(true);
+    solidMeshes.push(m);
+    obstacleMeshes.push(m);
+    /* Its whole volume goes on the obstacle list, which is what spawning,
+     * targets and the sliders keep away from — nothing should be dropped
+     * inside a ramp even though a player can walk up the outside of it. That
+     * list stays one box per mesh; the stepped boxes below are what a player
+     * actually walks into, and they go on the collider list alone. */
+    obstacleBoxes.push(new THREE.Box3().setFromObject(m));
+
+    /* Steps under the slope. Each is as tall as the slope is at the far edge
+     * of that step, so the top of every step is on or below the surface. */
+    var steps = [];
+    var count = Math.max(2, Math.ceil(h / cfg.stepHeight));
+    var parts = [m];
+    var alongZ = turns % 2 === 0;
+    var run = (alongZ ? d : w) / count;
+    for (var s = 0; s < count; s++) {
+      var top = h * (s / count);                // the low edge of this step
+      if (top <= 0.001) continue;
+      var mid = (alongZ ? d : w) / 2 - run * (s + 0.5);
+      var flip = (turns === 0 || turns === 3) ? 1 : -1;
+      var px = alongZ ? x : x + mid * flip;
+      var pz = alongZ ? z + mid * flip : z;
+      var box = new THREE.Box3(
+        new THREE.Vector3(px - (alongZ ? w : run) / 2, 0, pz - (alongZ ? run : d) / 2),
+        new THREE.Vector3(px + (alongZ ? w : run) / 2, top, pz + (alongZ ? run : d) / 2)
+      );
+      colliders.push(box);
+      steps.push(box);
+    }
+    var s = structureOf('wedge', parts);
+    s.steps = steps;               // what a player actually walks up
+    return s;
+  }
+
+  /* Two posts and a lintel. Walk under it, shoot under it, take cover behind
+   * a post — the gap is the point, so it is sized for a player to pass. */
+  function addArch(x, z, span, height, thick) {
+    var mat = pickMat();
+    var post = Math.max(0.6, thick);
+    var clear = Math.max(2.1, height - 0.7);         // headroom under the lintel
+    var parts = [
+      addPart(mat, x - span / 2, clear / 2, z, post, clear, post, 'archPost'),
+      addPart(mat, x + span / 2, clear / 2, z, post, clear, post, 'archPost'),
+      addPart(mat, x, clear + 0.35, z, span + post, 0.7, post, 'archTop'),
+    ];
+    return structureOf('arch', parts);
+  }
+
+  /* A room with its top open: four walls, some of them with a doorway.
+   *
+   * Open above so light reaches inside and so it can be shot into from the
+   * balcony — a lid would make it a dark box that is safe to stand in, which
+   * is the opposite of what cover in this arena is for.
+   */
+  function addHollow(x, z, size, height, doorways) {
+    var mat = pickMat();
+    var t = 0.5;                                   // wall thickness
+    var doorW = 1.8;                               // a player is 0.84 across
+    var doorH = 2.1;
+    var parts = [];
+    var half2 = size / 2;
+
+    for (var side = 0; side < 4; side++) {
+      var alongX = side % 2 === 0;
+      var sign = side < 2 ? -1 : 1;
+      var cx = alongX ? 0 : sign * half2;
+      var cz = alongX ? sign * half2 : 0;
+      var w = alongX ? size : t;
+      var d = alongX ? t : size;
+
+      if (doorways.indexOf(side) === -1) {
+        parts.push(addPart(mat, x + cx, height / 2, z + cz, w, height, d, 'roomWall'));
+        continue;
+      }
+      // two pillars and the lintel over the gap between them
+      var run = (size - doorW) / 2;
+      var off = doorW / 2 + run / 2;
+      parts.push(addPart(mat, x + cx + (alongX ? -off : 0), height / 2,
+                         z + cz + (alongX ? 0 : -off),
+                         alongX ? run : t, height, alongX ? t : run, 'roomWall'));
+      parts.push(addPart(mat, x + cx + (alongX ? off : 0), height / 2,
+                         z + cz + (alongX ? 0 : off),
+                         alongX ? run : t, height, alongX ? t : run, 'roomWall'));
+      if (height > doorH + 0.2) {
+        parts.push(addPart(mat, x + cx, (height + doorH) / 2, z + cz,
+                           alongX ? doorW : t, height - doorH, alongX ? t : doorW,
+                           'roomLintel'));
+      }
+    }
+    // the air in the middle: somewhere to stand, nowhere to hang a target
+    interiors.push(new THREE.Box3(
+      new THREE.Vector3(x - half2 + t, 0, z - half2 + t),
+      new THREE.Vector3(x + half2 - t, height, z + half2 - t)
+    ));
+    return structureOf('room', parts);
+  }
+
   /* ------------------------------------------------------------ balcony */
   /* A raised deck along one wall with stairs up and a railing, so there is
    * somewhere to shoot from and somewhere to be shot from. */
@@ -209,21 +408,228 @@ PB.createWorld = function (ctx) {
     };
   })();
 
+  /* ---------------------------------------------------------- the house */
+  /* One per arena, on a random edge: a room you can go inside, a fence you
+   * have to get over, and a tree for company.
+   *
+   * It is the one landmark in a level otherwise made of scattered crates —
+   * somewhere to say "the house" about, somewhere to be cornered, and the only
+   * place with a roof over it. The fence is deliberately jumpable rather than
+   * gated: it slows an approach down and makes the way in a decision, without
+   * ever locking anybody out of anywhere.
+   */
+  var house = null;
+
+  var houseMats = {
+    wall: new THREE.MeshStandardMaterial({ color: 0x8a7a63, roughness: 0.9 }),
+    roof: new THREE.MeshStandardMaterial({ color: 0x5b3f36, roughness: 0.85,
+                                           flatShading: true }),
+    fence: new THREE.MeshStandardMaterial({ color: 0x6d5a44, roughness: 0.95 }),
+    trunk: new THREE.MeshStandardMaterial({ color: 0x4a3a2e, roughness: 1 }),
+    leaves: new THREE.MeshStandardMaterial({ color: 0x3f7a45, roughness: 0.95,
+                                             flatShading: true }),
+  };
+
+  (function buildHouse() {
+    if (!cfg.house) return null;
+    var W = 9, D = 8, H = 3.2;               // outside dimensions of the room
+    var t = 0.45;                            // wall thickness
+    var doorW = 1.9, doorH = 2.2;            // a player is 0.84 across, 1.75 tall
+    var yard = 4.2;                          // fence standoff from the walls
+
+    /* Pick an edge, but never the one the balcony runs along: the two would
+     * fight over the same ground and the stairs are the only way up. */
+    var edge = Math.floor(rand() * 3) + 1;   // 1..3, skipping the balcony's 0 (-Z)
+    var inset = half - (Math.max(W, D) / 2 + yard + 2);
+    var along = (rand() - 0.5) * (cfg.arena - Math.max(W, D) - yard * 2 - 10);
+    var cx, cz, turn;
+    if (edge === 1) { cx = along; cz = inset; turn = 0; }        // +Z wall
+    else if (edge === 2) { cx = -inset; cz = along; turn = 1; }  // -X wall
+    else { cx = inset; cz = along; turn = 3; }                   // +X wall
+
+    var w = turn % 2 === 0 ? W : D;          // footprint after the quarter turn
+    var d = turn % 2 === 0 ? D : W;
+    var parts = [];
+
+    /* Walls, with three doorways: one on each of three sides, so there is
+     * always a way in from wherever you came at it and always a way out that
+     * is not the way you came. The fourth side is solid, which is what makes
+     * the inside worth standing in. */
+    var sides = [
+      { dx: 0, dz: -d / 2, w: w, d: t, door: turn !== 0 },
+      { dx: 0, dz: d / 2, w: w, d: t, door: true },
+      { dx: -w / 2, dz: 0, w: t, d: d, door: true },
+      { dx: w / 2, dz: 0, w: t, d: d, door: turn === 0 },
+    ];
+    sides.forEach(function (s, i) {
+      var alongX = s.w > s.d;
+      if (!s.door) {
+        parts.push(addPart(houseMats.wall, cx + s.dx, H / 2, cz + s.dz,
+                           s.w, H, s.d, 'houseWall'));
+        return;
+      }
+      var span = alongX ? s.w : s.d;
+      var run = (span - doorW) / 2;
+      var off = doorW / 2 + run / 2;
+      parts.push(addPart(houseMats.wall,
+                         cx + s.dx + (alongX ? -off : 0), H / 2,
+                         cz + s.dz + (alongX ? 0 : -off),
+                         alongX ? run : t, H, alongX ? t : run, 'houseWall'));
+      parts.push(addPart(houseMats.wall,
+                         cx + s.dx + (alongX ? off : 0), H / 2,
+                         cz + s.dz + (alongX ? 0 : off),
+                         alongX ? run : t, H, alongX ? t : run, 'houseWall'));
+      parts.push(addPart(houseMats.wall, cx + s.dx, (H + doorH) / 2, cz + s.dz,
+                         alongX ? doorW : t, H - doorH, alongX ? t : doorW,
+                         'houseLintel'));
+      void i;
+    });
+
+    /* A roof, which is what makes it a house rather than a room. Two courses
+     * stepped inwards rather than a true pitch: the collider under a sloped
+     * mesh is the box around it, and a box around a pitched roof is a ceiling
+     * a metre above the ridge that rounds stop against in mid-air. */
+    parts.push(addPart(houseMats.roof, cx, H + 0.25, cz, w + 0.9, 0.5, d + 0.9,
+                       'houseRoof'));
+    parts.push(addPart(houseMats.roof, cx, H + 0.75, cz, w - 1.4, 0.5, d - 1.4,
+                       'houseRoofTop'));
+
+    /* The fence: posts and rails at a height a standing jump clears. Left open
+     * on the side the solid wall faces, so the yard is never a trap. */
+    var fenceH = 1.15;
+    var fx0 = cx - w / 2 - yard, fx1 = cx + w / 2 + yard;
+    var fz0 = cz - d / 2 - yard, fz1 = cz + d / 2 + yard;
+    var lim = half - 1.2;
+    fx0 = Math.max(-lim, fx0); fx1 = Math.min(lim, fx1);
+    fz0 = Math.max(-lim, fz0); fz1 = Math.min(lim, fz1);
+
+    /* Panels with real gaps between them, rather than one long low wall.
+     *
+     * The gap is 0.6 — wider than that and a player could walk through it
+     * instead of over, which would make the whole thing pointless; narrower
+     * and it does not read as a fence from the ground. Rounds pass through the
+     * gaps, so somebody sheltering behind it is not safe, only harder. */
+    function fenceRun(x0, z0, x1, z1) {
+      var len = Math.hypot(x1 - x0, z1 - z0);
+      var alongX = Math.abs(x1 - x0) > Math.abs(z1 - z0);
+      var gap = 0.6;
+      var panels = Math.max(1, Math.round(len / 2.2));
+      var panel = len / panels - gap;
+      if (panel < 0.5) return;
+      for (var p = 0; p < panels; p++) {
+        var f = (p + 0.5) / panels;
+        var px = x0 + (x1 - x0) * f;
+        var pz = z0 + (z1 - z0) * f;
+        parts.push(addPart(houseMats.fence, px, fenceH / 2, pz,
+                           alongX ? panel : 0.22, fenceH,
+                           alongX ? 0.22 : panel, 'fence'));
+      }
+    }
+    fenceRun(fx0, fz0, fx1, fz0);
+    fenceRun(fx0, fz1, fx1, fz1);
+    fenceRun(fx0, fz0, fx0, fz1);
+    fenceRun(fx1, fz0, fx1, fz1);
+
+    /* A tree, outside the fence. The trunk stops a round; the canopy does not,
+     * because a bush that eats bullets is a bush players will hate. */
+    var treeSide = rand() < 0.5 ? -1 : 1;
+    var tx = cx + (w / 2 + yard + 2.4) * (turn % 2 === 0 ? treeSide : 0);
+    var tz = cz + (d / 2 + yard + 2.4) * (turn % 2 === 0 ? 0 : treeSide);
+    tx = Math.max(-lim, Math.min(lim, tx));
+    tz = Math.max(-lim, Math.min(lim, tz));
+    parts.push(addPart(houseMats.trunk, tx, 1.5, tz, 0.55, 3, 0.55, 'treeTrunk'));
+    if (!cfg.headless) {
+      var canopy = new THREE.Mesh(new THREE.IcosahedronGeometry(2.1, 0), houseMats.leaves);
+      canopy.position.set(tx, 4.1, tz);
+      canopy.castShadow = true;
+      canopy.name = 'treeCanopy';
+      scene.add(canopy);
+      canopy.updateMatrixWorld(true);
+      parts.push(canopy);
+    }
+
+    // nothing else may be dropped in the yard or through the walls
+    keepClear.push(new THREE.Box3(
+      new THREE.Vector3(fx0 - 1, 0, fz0 - 1),
+      new THREE.Vector3(fx1 + 1, H + 2, fz1 + 1)
+    ));
+    interiors.push(new THREE.Box3(
+      new THREE.Vector3(cx - w / 2 + t, 0, cz - d / 2 + t),
+      new THREE.Vector3(cx + w / 2 - t, H, cz + d / 2 - t)
+    ));
+
+    house = structureOf('house', parts);
+    house.x = cx;
+    house.z = cz;
+    house.width = w;
+    house.depth = d;
+    house.height = H;
+    house.doorHeight = doorH;
+    house.doorWidth = doorW;
+    house.fence = { minX: fx0, maxX: fx1, minZ: fz0, maxZ: fz1, height: fenceH };
+    house.tree = { x: tx, z: tz };
+    house.edge = edge;
+    return house;
+  })();
+
   (function buildObstacles() {
-    var placed = [];
+    var placed = [];       // [x, z, extent] — how much room each one took
     var guard = 0;
-    while (placed.length < cfg.obstacles && guard++ < 4000) {
-      var x = (rand() - 0.5) * (cfg.arena - 8);
-      var z = (rand() - 0.5) * (cfg.arena - 8);
-      if (Math.hypot(x, z) < 7) continue;                    // keep the spawn clear
-      if (!isClearOfKeepOuts(x, z, 1.5)) continue;           // and the way onto the balcony
-      var clash = placed.some(function (p) { return Math.hypot(p[0] - x, p[1] - z) < 6; });
-      if (clash) continue;
-      placed.push([x, z]);
+    while (placed.length < cfg.obstacles && guard++ < 6000) {
+      /* Decide what is going here before deciding whether it fits. A crate and
+       * a room are not the same size, and the clearances below — from the
+       * spawn, from the balcony stairs, from each other — are all about how
+       * much ground a thing takes up. Judging every one of them as though it
+       * were a crate is how a room ended up reaching into the middle of the
+       * map with two players trying to shoot each other across it. */
       var kind = rand();
-      if (kind < 0.4)      addObstacle(x, z, 2 + rand() * 1.5, 2 + rand() * 1.4, 2 + rand() * 1.5);
-      else if (kind < 0.7) addObstacle(x, z, 1.4, 3.5 + rand() * 2.5, 1.4);
-      else                 addObstacle(x, z, 5 + rand() * 4, 1.6 + rand(), 1.1);
+      var plan;
+      if (kind < 0.28) {
+        plan = { what: 'box', w: 2 + rand() * 1.5, h: 2 + rand() * 1.4, d: 2 + rand() * 1.5 };
+      } else if (kind < 0.46) {
+        plan = { what: 'box', w: 1.4, h: 3.5 + rand() * 2.5, d: 1.4 };
+      } else if (kind < 0.62) {
+        plan = { what: 'box', w: 5 + rand() * 4, h: 1.6 + rand(), d: 1.1 };
+      } else if (kind < 0.76) {
+        // a ramp: cover from one side, a way up from the other
+        plan = { what: 'wedge', w: 3 + rand() * 2.5, h: 1.4 + rand() * 1.4,
+                 d: 3.5 + rand() * 2.5, turns: Math.floor(rand() * 4) };
+      } else if (kind < 0.88) {
+        plan = { what: 'arch', span: 3 + rand() * 2, h: 3.2 + rand() * 1.2,
+                 thick: 0.7 + rand() * 0.4 };
+      } else {
+        /* A room with two or three ways in. Two doorways on opposite sides is
+         * a passage; three is somewhere to be flanked in. */
+        var sides = [0, 1, 2, 3];
+        // seeded shuffle, so both sides of the wire cut the same doors
+        for (var s = sides.length - 1; s > 0; s--) {
+          var j = Math.floor(rand() * (s + 1));
+          var tmp = sides[s]; sides[s] = sides[j]; sides[j] = tmp;
+        }
+        plan = { what: 'room', size: 5.5 + rand() * 2.5, h: 2.9 + rand() * 0.8,
+                 doors: sides.slice(0, rand() < 0.5 ? 2 : 3) };
+      }
+
+      var extent = plan.what === 'room' ? plan.size
+        : plan.what === 'arch' ? plan.span + plan.thick
+        : Math.max(plan.w, plan.d);
+      var reach = extent / 2;
+
+      var x = (rand() - 0.5) * (cfg.arena - 8 - extent);
+      var z = (rand() - 0.5) * (cfg.arena - 8 - extent);
+      // the spawn stays clear of the whole of it, not of its centre
+      if (Math.hypot(x, z) < 7 + reach) continue;
+      if (!isClearOfKeepOuts(x, z, 1.5 + reach)) continue;
+      var clash = placed.some(function (p) {
+        return Math.hypot(p[0] - x, p[1] - z) < 4 + reach + p[2] / 2;
+      });
+      if (clash) continue;
+      placed.push([x, z, extent]);
+
+      if (plan.what === 'box') addObstacle(x, z, plan.w, plan.h, plan.d);
+      else if (plan.what === 'wedge') addWedge(x, z, plan.w, plan.h, plan.d, plan.turns);
+      else if (plan.what === 'arch') addArch(x, z, plan.span, plan.h, plan.thick);
+      else addHollow(x, z, plan.size, plan.h, plan.doors);
     }
   })();
 
@@ -279,19 +685,27 @@ PB.createWorld = function (ctx) {
       // keep the whole sweep inside the arena
       if (alongX && Math.abs(x) + amp > half - 4) continue;
       if (!alongX && Math.abs(z) + amp > half - 4) continue;
+      /* Nothing static in the ground it sweeps. Tested against the boxes
+       * themselves rather than against their centres within a radius: the
+       * arena is full of structures made of many small parts now, and a
+       * radius around every one of those centres rules out most of the map —
+       * which is how six sliders became two. */
+      var w = 2.2 + rand(), h = 1.8 + rand() * 1.2, d = 2.2 + rand();
+      var sweep = sweptFootprint(x, z, w, d, alongX, amp);
+      sweep.expandByScalar(1.2);
       var clash = false;
       for (var i = 0; i < obstacleBoxes.length; i++) {
-        var c = obstacleBoxes[i].getCenter(new THREE.Vector3());
-        if (Math.hypot(c.x - x, c.z - z) < amp + 4) { clash = true; break; }
+        var ob = obstacleBoxes[i];
+        if (sweep.max.x < ob.min.x || sweep.min.x > ob.max.x) continue;
+        if (sweep.max.z < ob.min.z || sweep.min.z > ob.max.z) continue;
+        clash = true;
+        break;
       }
       if (clash) continue;
 
       /* And never across another slider's path. Two of them sharing ground
        * pass straight through each other, and a player riding one gets picked
        * up by the other as it crosses. */
-      var w = 2.2 + rand(), h = 1.8 + rand() * 1.2, d = 2.2 + rand();
-      var sweep = sweptFootprint(x, z, w, d, alongX, amp);
-      sweep.expandByScalar(1.2);
       for (var sIdx = 0; sIdx < sweeps.length; sIdx++) {
         if (sweep.intersectsBox(sweeps[sIdx])) { clash = true; break; }
       }
@@ -462,6 +876,10 @@ PB.createWorld = function (ctx) {
 
   return {
     fingerprint: fingerprint,
+    structures: structures,
+    interiors: interiors,
+    insideAnything: insideAnything,
+    house: house,
     balcony: balcony,
     balconyParts: balconyParts,
     movers: movers,

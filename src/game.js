@@ -13,7 +13,12 @@
 var THREE = global.THREE;
 
 var DEFAULTS = {
-  arena: 60,
+  /* Eighty across rather than sixty: about eighty per cent more ground, which
+   * is the room the built structures need — a house with a yard around it is
+   * a tenth of the old arena on its own — and long enough sightlines that the
+   * hunter's forty-two units of vision is a real limit rather than the whole
+   * map. Cover scales with the area so it does not thin out. */
+  arena: 80,
   wallHeight: 7,
   eye: 1.7,
   radius: 0.42,
@@ -28,7 +33,8 @@ var DEFAULTS = {
   reloadMs: 950,
   fireMs: 130,
   bulletSpeed: 120,
-  obstacles: 26,
+  obstacles: 46,             // scaled with the area, so cover stays as dense
+  house: true,               // the one landmark: a room, a fence and a tree
   targetsPerLevel: 10,
   wanderingTargets: 0.6,      // fraction of targets that drift around
   npcsPerLevel: 4,            // level 1; one more per level after that
@@ -80,7 +86,7 @@ var DEFAULTS = {
   balconyWidth: 26,
   balconyDepth: 7,
   stepHeight: 0.45,           // how high a ledge can be and still be walked up
-  movingObstacles: 4,
+  movingObstacles: 6,
 
   perks: true,
   perkEvery: 12,              // seconds between spawn attempts
@@ -249,6 +255,10 @@ function createGame(options) {
   var movers = ctx.movers = world.movers;
   var balcony = ctx.balcony = world.balcony;
   var medkits = ctx.medkits = world.medkits;
+  /* The air inside the rooms and the house. Not solid, and not somewhere
+   * anything may be spawned: see world.js. */
+  ctx.interiors = world.interiors;
+  ctx.insideAnything = world.insideAnything;
   /* The boxes other players are shot at and drawn by, filled in by net.js as
    * they appear. One list for both jobs on purpose: an overlay that came from
    * somewhere other than what the rounds are tested against is an overlay that
@@ -1657,6 +1667,10 @@ function createGame(options) {
     },
     takeNpcRound: takeNpcRound, respawnSelf: respawnSelf, spawnPoint: spawnPoint,
     medkitAt: world.medkitAt,
+    /* The built furniture: the rooms, arches and ramps, the house, and the
+     * air inside anything that has an inside. */
+    structures: world.structures, house: world.house,
+    interiors: world.interiors, insideAnything: world.insideAnything,
     applyLook: applyLook, setPitch: setPitch,
     setLookDebug: function (on) { lookDebug = !!on; if (!on) lookLog.length = 0; },
     lookLog: function () { return lookLog.slice(); },

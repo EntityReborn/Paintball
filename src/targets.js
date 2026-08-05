@@ -78,6 +78,11 @@ PB.createTargets = function (ctx) {
       if (tooClose) continue;
       var buried = obstacleBoxes.some(function (b) { return b.distanceToPoint(_v) < 0.9; });
       if (buried) continue;
+      /* And never sealed inside one. A target hanging in the middle of a room
+       * is not cover to shoot around, it is a target that can only be hit
+       * through a doorway from exactly the right angle — the level cannot be
+       * cleared and nothing on screen explains why. */
+      if (ctx.insideAnything && ctx.insideAnything(x, z, y, 1.2)) continue;
       // a fixed share drift, so every level has both kinds
       spawnTarget(x, y, z, placed < Math.round(cfg.targetsPerLevel * cfg.wanderingTargets));
       placed++;
@@ -107,6 +112,9 @@ PB.createTargets = function (ctx) {
     for (var i = 0; i < obstacleBoxes.length; i++) {
       if (obstacleBoxes[i].distanceToPoint(_targetNext) < 1.1) { blocked = true; break; }
     }
+    // nor may one drift in through a doorway and become unshootable
+    if (!blocked && ctx.insideAnything &&
+        ctx.insideAnything(_targetNext.x, _targetNext.z, t.base, 1.2)) blocked = true;
     if (blocked) {
       t.vel.x *= -1;
       t.vel.z *= -1;

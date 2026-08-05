@@ -200,15 +200,27 @@ function aimedAt(room, player, point, claim) {
 }
 
 // stand somewhere with a clear line to a point
+/* Put the player somewhere with a clear line to `point`.
+ *
+ * The bound used to be a hard-coded ±26, which was inside a sixty-unit arena
+ * and is a ring of dead ground in an eighty-unit one: every spot around an NPC
+ * out towards the edge was rejected for being outside a limit that had nothing
+ * to do with the arena any more, and the whole rewind suite skipped itself for
+ * want of a line of sight. It comes off the arena now, and there is more than
+ * one distance to try. */
 function standClear(room, player, point) {
   const THREE = globalThis.THREE;
   const g = room.game;
-  for (let a = 0; a < Math.PI * 2; a += Math.PI / 12) {
-    const eye = new THREE.Vector3(point.x + Math.sin(a) * 4, g.cfg.eye, point.z + Math.cos(a) * 4);
-    if (Math.abs(eye.x) > 26 || Math.abs(eye.z) > 26) continue;
-    if (!g.hasLineOfSight(eye, point)) continue;
-    player.x = eye.x; player.y = g.cfg.eye; player.z = eye.z;
-    return true;
+  const lim = g.cfg.arena / 2 - 4;
+  for (const reach of [4, 7, 11]) {
+    for (let a = 0; a < Math.PI * 2; a += Math.PI / 12) {
+      const eye = new THREE.Vector3(
+        point.x + Math.sin(a) * reach, g.cfg.eye, point.z + Math.cos(a) * reach);
+      if (Math.abs(eye.x) > lim || Math.abs(eye.z) > lim) continue;
+      if (!g.hasLineOfSight(eye, point)) continue;
+      player.x = eye.x; player.y = g.cfg.eye; player.z = eye.z;
+      return true;
+    }
   }
   return false;
 }
@@ -1817,9 +1829,12 @@ test('a player out of the fight does not stop other rounds either', () => {
   const cid = room.join('cid');
   const g = room.game;
 
-  // bo stands between ana and cid, and is out of the fight
-  ana.x = 12; ana.z = 0; ana.y = g.cfg.eye;
-  bo.x = 6; bo.z = 0; bo.y = g.cfg.eye;
+  /* Bo stands between ana and cid, and is out of the fight. All three inside
+   * the disc the arena keeps clear around the spawn — cover is placed by its
+   * whole extent now, and a line drawn further out than that can have a room
+   * in the middle of it. */
+  ana.x = 6; ana.z = 0; ana.y = g.cfg.eye;
+  bo.x = 3; bo.z = 0; bo.y = g.cfg.eye;
   cid.x = 0; cid.z = 0; cid.y = g.cfg.eye;
   ana.shieldUntil = 0; bo.shieldUntil = 0; cid.shieldUntil = 0;
   room.setPrefs(bo.id, { pvp: false });
