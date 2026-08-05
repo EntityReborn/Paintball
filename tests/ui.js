@@ -268,6 +268,31 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
           'no lifetime shot count in the summary');
     await page.screenshot({ path: path.join(SHOTS, 'menu-summary.png') });
 
+    /* ------------------------------------------- the scoreboard, offline */
+    /* There is no room to list, so it lists the only player there is and says
+     * why the rest of the table is empty. It has to work here at all: a key
+     * that does nothing reads as a broken key, not as an online-only feature. */
+    const alone = await page.evaluate(async () => {
+      game.state.score = 4321;
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Tab', bubbles: true }));
+      await new Promise(r => setTimeout(r, 60));
+      const el = document.getElementById('board');
+      const shown = !el.hidden;
+      const rows = [...el.querySelectorAll('.row')].map(r => r.textContent);
+      const note = el.querySelector('.lonely');
+      window.dispatchEvent(new KeyboardEvent('keyup', { code: 'Tab', bubbles: true }));
+      await new Promise(r => setTimeout(r, 60));
+      return { shown, rows, note: note ? note.textContent : null, gone: el.hidden };
+    });
+    check('TAB shows the scoreboard offline too', alone.shown && alone.gone,
+          `shown ${alone.shown}, hidden again ${alone.gone}`);
+    check('with one row for the only player in it, and their score',
+          alone.rows.length === 1 && /4321/.test(alone.rows[0]),
+          alone.rows.join(' | ') || 'no rows');
+    check('and says why there is nobody else on it',
+          !!alone.note && /OFFLINE/.test(alone.note), alone.note || 'no note');
+    await page.screenshot({ path: path.join(SHOTS, 'menu-scoreboard.png') });
+
     /* ------------------------------------- asking a new player their name */
     await page.evaluate(() => { localStorage.removeItem('paintball.options'); });
     await page.goto(`${BASE}/index.html?mp`, { waitUntil: 'load' });

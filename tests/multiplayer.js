@@ -1301,6 +1301,52 @@ async function advance(page, seconds, timeout = 60000) {
     check('and the shield shows on them for everyone else', whole.bubble === true,
           `bubble drawn: ${whole.bubble}`);
 
+    /* --------------------------------------------------- the scoreboard */
+    /* By now ana has killed bo once, so the table has something to say. Held
+     * on TAB, filled from the server's own count — not from either client's
+     * idea of how it went. */
+    await sleep(1200);                       // one turn of the scoreboard clock
+    const opened = await ana.evaluate(async () => {
+      const el = document.getElementById('board');
+      const before = el.hidden;
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Tab', bubbles: true }));
+      await new Promise(r => setTimeout(r, 60));
+      return {
+        before, shown: !el.hidden,
+        rows: [...document.querySelectorAll('#board .row')].map(row => ({
+          who: row.querySelector('.who').textContent,
+          cells: [...row.querySelectorAll('.n')].map(n => n.textContent),
+          you: row.classList.contains('you'),
+        })),
+      };
+    });
+    await ana.screenshot({ path: path.join(SHOTS, 'mp-scoreboard.png') }).catch(() => {});
+    const boardGone = await ana.evaluate(async () => {
+      window.dispatchEvent(new KeyboardEvent('keyup', { code: 'Tab', bubbles: true }));
+      await new Promise(r => setTimeout(r, 60));
+      return document.getElementById('board').hidden;
+    });
+    const board = { ...opened, hiddenAfter: boardGone };
+
+    check('TAB puts the scoreboard up, and letting go takes it away',
+          board.before === true && board.shown === true && board.hiddenAfter === true,
+          `hidden before ${board.before}, shown ${board.shown}, hidden after ${board.hiddenAfter}`);
+    check('it lists everybody in the room by name',
+          board.rows.length === 2 &&
+          board.rows.some(r => r.who.startsWith('ana')) &&
+          board.rows.some(r => r.who.startsWith('bo')),
+          board.rows.map(r => r.who).join(', ') || 'no rows');
+    check('and marks which one is you', board.rows.filter(r => r.you).length === 1,
+          `${board.rows.filter(r => r.you).length} rows marked as ours`);
+
+    const anaRow = board.rows.find(r => r.who.startsWith('ana'));
+    const boRow = board.rows.find(r => r.who.startsWith('bo'));
+    check('with the kill and the death the server actually counted',
+          !!anaRow && !!boRow && anaRow.cells[1] === '1' && boRow.cells[2] === '1',
+          anaRow && boRow
+            ? `ana ${anaRow.cells.join('/')}, bo ${boRow.cells.join('/')}`
+            : 'a row is missing');
+
     /* -------------------------------------- stepping out of the fight */
     await bo.evaluate(() => { options.set('pvp', false); net.setPvp(false); });
     await sleep(700);

@@ -250,6 +250,38 @@ canvas { display: block; position: fixed; inset: 0; }
 
 /* nothing to aim while you are on the floor */
 #hud.dead #crosshair { opacity: 0; }
+
+/* who is in the room and how they are doing — held on TAB */
+#board[hidden] { display: none; }
+#board {
+  position: absolute; left: 50%; top: 15%; transform: translateX(-50%);
+  min-width: 380px; max-width: 76vw; max-height: 70vh; overflow-y: auto;
+  padding: 14px 18px;
+  background: rgba(10,14,20,.88); border: 1px solid #26344a; border-radius: 4px;
+  box-shadow: 0 18px 50px rgba(0,0,0,.55);
+}
+#board .head, #board .row {
+  display: grid; grid-template-columns: 1fr 72px 60px 66px;
+  gap: 8px; align-items: baseline;
+}
+#board .head {
+  font-size: 10.5px; letter-spacing: .2em; color: #6f8098;
+  padding-bottom: 8px; margin-bottom: 6px; border-bottom: 1px solid #26344a;
+}
+#board .row {
+  font-size: 14px; letter-spacing: .06em; color: #cdd9e8; padding: 4px 0;
+}
+#board .row.you { color: #8ef2ff; }
+#board .row.down .who { opacity: .45; }
+#board .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#board .n { text-align: right; font-variant-numeric: tabular-nums; }
+#board .row .n:first-of-type { color: #fff; font-weight: 700; }
+#board .waiting {
+  font-size: 10px; letter-spacing: .16em; color: #ff9d9d; margin-left: 8px;
+}
+#board .lonely {
+  font-size: 11.5px; letter-spacing: .14em; color: #6f8098; padding-top: 8px;
+}
 #dead .big {
   font-size: 40px; letter-spacing: .16em; font-weight: 700; color: #ff6b6b;
   text-shadow: 0 3px 26px rgba(0,0,0,.85);

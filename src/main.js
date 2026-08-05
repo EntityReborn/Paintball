@@ -92,7 +92,62 @@ var el = {
   dead: document.getElementById('dead'),
   deadBy: document.getElementById('dead-by'),
   deadCount: document.getElementById('dead-count'),
+  board: document.getElementById('board'),
+  boardRows: document.getElementById('board-rows'),
 };
+
+/* ------------------------------------------------------------ scoreboard */
+/* Held on TAB. Online the rows are the server's, sorted its way so everybody
+ * is looking at the same table; offline there is only ever one of us, and it
+ * is built here from what the session already knows. */
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+  });
+}
+
+function boardRows() {
+  if (net && net.self && net.self.id) {
+    return net.scores().map(function (row) {
+      return {
+        id: row[0], name: row[1], score: row[2], kills: row[3], deaths: row[4],
+        down: !!row[5], you: row[0] === net.self.id,
+      };
+    });
+  }
+  if (!game) return [];
+  var s = game.stats();
+  return [{
+    id: 0, name: options.get('name') || 'you', score: game.state.score,
+    kills: s.kills, deaths: s.deaths, down: game.state.dead, you: true,
+  }];
+}
+
+function renderBoard() {
+  if (!el.board || el.board.hidden) return;
+  var rows = boardRows();
+  var html = rows.map(function (r) {
+    return '<div class="row' + (r.you ? ' you' : '') + (r.down ? ' down' : '') + '">' +
+      '<span class="who">' + escapeHtml(r.name) +
+        (r.down ? '<span class="waiting">DOWN</span>' : '') + '</span>' +
+      '<span class="n">' + r.score + '</span>' +
+      '<span class="n">' + r.kills + '</span>' +
+      '<span class="n">' + r.deaths + '</span>' +
+      '</div>';
+  }).join('');
+  if (rows.length < 2) {
+    html += '<div class="lonely">' +
+      (net && net.self && net.self.id ? 'NOBODY ELSE IS HERE' : 'OFFLINE — PLAYING ALONE') +
+      '</div>';
+  }
+  el.boardRows.innerHTML = html;
+}
+
+function showBoard(on) {
+  if (!el.board || el.board.hidden === !on) return;
+  el.board.hidden = !on;
+  if (on) renderBoard();
+}
 
 // own health: only worth showing once there is damage to worry about
 function renderHealth(d) {
@@ -256,7 +311,7 @@ function toast(text) {
 }
 
 function wire() {
-game.on('score', function (d) { refresh(); flashScore(d.delta); });
+game.on('score', function (d) { refresh(); flashScore(d.delta); renderBoard(); });
 game.on('ammo', refresh);
 game.on('hit', function (d) {
   refresh();
@@ -353,7 +408,21 @@ window.addEventListener('keydown', function (e) {
     ui.close();
     e.stopPropagation();
   }
+  /* Held, not toggled — the same as everywhere else this key does this job.
+   * The default has to go either way: with the pointer unlocked TAB walks the
+   * focus ring through the menu buttons behind the board. */
+  if (e.code === 'Tab') {
+    e.preventDefault();
+    if (!e.repeat) showBoard(true);
+  }
 }, true);
+
+window.addEventListener('keyup', function (e) {
+  if (e.code === 'Tab') { e.preventDefault(); showBoard(false); }
+}, true);
+
+// and if the window goes away with it held, it must not stick open
+window.addEventListener('blur', function () { showBoard(false); });
 
 ui = window.PB.createUI({
   options: options,
@@ -453,6 +522,9 @@ if (!wantsNet) {
       toast('KILLED ' + (msg.victimName || '') + '  +' + game.cfg.scoreKill);
     }
   });
+
+  // the room's table, as often as it is sent
+  net.on('scores', renderBoard);
 
   net.on('disconnected', function () {
     el.menuScore.textContent = 'DISCONNECTED';

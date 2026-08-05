@@ -38,6 +38,11 @@ const MAX_REWIND_MS = 700;
  * still nowhere near enough to cross a sixty-unit arena with. */
 const MOVE_BURST = 4;
 
+/* How often the scoreboard goes out. A table of names and totals that moves a
+ * few times a match does not need the snapshot rate; once a second is faster
+ * than anybody can read it. */
+const SCORES_MS = 1000;
+
 class Room {
   constructor(opts = {}) {
     // A pinned seed is for tuning and for tests that need the same arena every
@@ -50,6 +55,7 @@ class Room {
     this.simMs = 1000 / SIM_HZ;
     this.snapshotMs = 1000 / SNAPSHOT_HZ;
     this.sinceSnapshot = 0;
+    this.sinceScores = 0;
     this.timers = null;
     this.history = [];              // recent entity positions, for lag compensation
     this.onBroadcast = opts.onBroadcast || function () {};
@@ -804,6 +810,30 @@ class Room {
     };
   }
 
+  /* --------------------------------------------------------- scoreboard */
+  /* Who is in the room and how they are doing, on its own message rather than
+   * in the snapshot.
+   *
+   * The snapshot already carries a score, but not a name, and not kills or
+   * deaths — and those change a handful of times a match, so paying for them
+   * thirty times a second to watch them not change would be silly. This goes
+   * out once a second instead, which is as often as a table anybody is reading
+   * needs to move.
+   *
+   * Kills and deaths are the server's own count, taken where the damage is
+   * done. Clients send their own accounting too — see the `stats` message —
+   * but that is their word for their own figures, and this table is the one
+   * everybody sees.
+   *
+   * Sorted here, so every client shows the same order rather than each
+   * inventing its own tie-break. */
+  scoreboard() {
+    const rows = [...this.players.values()]
+      .map(p => ([p.id, p.name, p.score, p.kills, p.deaths, p.deadUntil ? 1 : 0]))
+      .sort((a, b) => b[2] - a[2] || b[3] - a[3] || a[1].localeCompare(b[1]));
+    return { t: 'scores', players: rows };
+  }
+
   /* ----------------------------------------------------------------- loop */
   step(dtMs, now = Date.now()) {
     this.tick++;
@@ -816,6 +846,12 @@ class Room {
     for (const msg of this.collectPerks(now)) this.onBroadcast(msg);
     for (const msg of this.updateMedkits(now)) this.onBroadcast(msg);
     for (const msg of this.updateHealth(now)) this.onBroadcast(msg);
+
+    this.sinceScores += dtMs;
+    if (this.sinceScores >= SCORES_MS) {
+      this.sinceScores -= SCORES_MS;
+      if (this.players.size) this.onBroadcast(this.scoreboard());
+    }
 
     this.sinceSnapshot += dtMs;
     if (this.sinceSnapshot >= this.snapshotMs) {

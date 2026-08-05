@@ -1421,6 +1421,79 @@ test('a hunter kills without crediting anybody', () => {
   assert.equal(ana.score, 500, 'the score moved for being killed');
 });
 
+/* --------------------------------------------------------- scoreboard */
+test('the scoreboard says who is in the room and how they are doing', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  ana.score = 900;
+  bo.score = 250;
+
+  const board = room.scoreboard();
+  assert.equal(board.t, 'scores');
+  assert.equal(board.players.length, 2, 'somebody is missing from the table');
+
+  const [top, next] = board.players;
+  assert.equal(top[0], ana.id, 'the table is not sorted by score');
+  assert.equal(top[1], 'ana', 'a name did not travel');
+  assert.equal(top[2], 900);
+  assert.equal(next[0], bo.id);
+
+  // and it follows the score rather than the joining order
+  bo.score = 5000;
+  assert.equal(room.scoreboard().players[0][0], bo.id, 'the lead did not change hands');
+});
+
+test('the scoreboard counts kills and deaths the server saw itself', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  const shot = faceOff(room, ana, bo);
+  bo.shieldUntil = 0;
+
+  let t = Date.now();
+  for (let i = 0; i < room.game.cfg.playerHealth; i++) {
+    room.applyShot(ana.id, shot(), t);
+    t += 200;
+  }
+
+  const row = id => room.scoreboard().players.find(r => r[0] === id);
+  assert.equal(row(ana.id)[3], 1, 'the kill was not counted');
+  assert.equal(row(ana.id)[4], 0, 'the killer was credited with a death');
+  assert.equal(row(bo.id)[4], 1, 'the death was not counted');
+  assert.equal(row(bo.id)[5], 1, 'the table does not show who is waiting to respawn');
+
+  // a hunter's kill belongs to nobody, but the death is still theirs
+  const ana2 = room.join('cass');
+  ana2.shieldUntil = 0;
+  for (let i = 0; i < room.game.cfg.playerHealth; i++) {
+    room.applyNpcShot({
+      npc: room.game.hunters()[0], index: 0,
+      origin: { x: ana2.x, y: ana2.y + 6, z: ana2.z },
+      dir: { x: 0, y: -1, z: 0 },
+      point: { x: ana2.x, y: ana2.y - 2, z: ana2.z }, distance: 12,
+    });
+  }
+  assert.equal(row(ana2.id)[4], 1, 'a death to the hunter was not counted');
+  const kills = room.scoreboard().players.reduce((n, r) => n + r[3], 0);
+  assert.equal(kills, 1, 'the hunter was credited with a kill');
+});
+
+test('the room sends the scoreboard on its own slower clock', () => {
+  const sent = [];
+  const room = new Room({ seed: 4242, onBroadcast: m => sent.push(m) });
+  room.join('ana');
+
+  const step = () => room.step(1000 / 30, Date.now());
+  for (let i = 0; i < 30; i++) step();          // one second of ticks
+
+  const boards = sent.filter(m => m.t === 'scores');
+  const snapshots = sent.filter(m => m.t === 'snapshot');
+  assert.equal(boards.length, 1, `${boards.length} scoreboards in a second`);
+  assert.ok(snapshots.length > 25, 'the snapshots stopped');
+  assert.ok(boards[0].players.length === 1, 'the table came out empty');
+});
+
 test('the arena has two health packs, in the same places on both sides', () => {
   const a = createHeadlessGame({ seed: 321 });
   const b = createHeadlessGame({ seed: 321 });

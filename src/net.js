@@ -47,6 +47,7 @@ PB.createNet = function (opts) {
   var remotes = new Map();      // id -> {fig, phase, name, last}
   var departed = new Set();     // ids that have left, so a stale snapshot cannot revive them
   var names = new Map();        // id -> display name, for the tags over their heads
+  var scores = [];              // the room's scoreboard, newest the server sent
   var showNames = true;
   var maxHealth = 10;
   var lastArrival = 0;          // when the last snapshot turned up
@@ -220,6 +221,15 @@ PB.createNet = function (opts) {
         game.setShield(game.cfg.spawnShield);
       }
       emit('respawn', msg);
+      return;
+    }
+    /* The room's own table of who is doing what to whom. Kept whole rather
+     * than merged into what we already know: the server sorted it, and every
+     * client showing the same order matters more than saving the copy. */
+    if (msg.t === 'scores') {
+      scores = msg.players || [];
+      (msg.players || []).forEach(function (row) { names.set(row[0], row[1]); });
+      emit('scores', msg);
       return;
     }
     if (msg.t === 'shotRejected') {
@@ -599,6 +609,8 @@ PB.createNet = function (opts) {
     close: function () { stopSending(); if (socket) socket.close(); },
     remoteCount: function () { return remotes.size; },
     names: names,
+    // rows of [id, name, score, kills, deaths, waitingToRespawn]
+    scores: function () { return scores.slice(); },
     setName: function (v) {
       name = (v || 'player').toString().slice(0, 16);
       // before joining this travels with the join; afterwards it goes out on
