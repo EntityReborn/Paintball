@@ -1590,6 +1590,35 @@ test('somebody who is not in the room cannot say anything', () => {
 });
 
 /* --------------------------------------------------------- scoreboard */
+test('the scoreboard carries what each machine says it is managing', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+
+  room.reportFps(ana.id, 144, 12);
+  room.reportFps(bo.id, 28, 180);
+  const row = id => room.scoreboard().players.find(r => r[0] === id);
+  assert.equal(row(ana.id)[7], 144, 'the frame rate did not reach the table');
+  assert.equal(row(ana.id)[8], 12, 'the round trip did not reach the table');
+  assert.equal(row(bo.id)[7], 28);
+  assert.equal(row(bo.id)[8], 180);
+
+  // it is their word for it, so it is held to something sane
+  room.reportFps(ana.id, 1e9, 1e9);
+  assert.equal(row(ana.id)[7], 999, 'an absurd frame rate went on the table');
+  assert.equal(row(ana.id)[8], 9999, 'an absurd round trip went on the table');
+
+  room.reportFps(ana.id, -5, -5);
+  assert.equal(row(ana.id)[7], 999, 'a negative frame rate was taken');
+  assert.equal(row(ana.id)[8], 9999, 'a negative round trip was taken');
+
+  room.reportFps(ana.id, 'fast', null);
+  assert.equal(row(ana.id)[7], 999, 'a frame rate that is not a number was taken');
+
+  // and nobody can report for somebody who is not here
+  assert.equal(room.reportFps(9999, 60, 10), null, 'a stranger reported a frame rate');
+});
+
 test('the scoreboard says who is in the room and how they are doing', () => {
   const room = new Room({ seed: 4242 });
   const ana = room.join('ana');

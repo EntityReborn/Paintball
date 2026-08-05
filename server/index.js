@@ -220,6 +220,12 @@ wss.on('connection', socket => {
       return;
     }
 
+    // what their machine is drawing at, for the scoreboard
+    if (msg.t === 'fps') {
+      room.reportFps(player.id, msg.fps);
+      return;
+    }
+
     if (msg.t === 'stats') {
       // the client's own accounting, kept for the leaderboard work to come
       player.clientStats = msg.stats;

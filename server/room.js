@@ -198,6 +198,8 @@ class Room {
        * standing between somebody and another player's score. */
       token: newToken(),
       goneAt: 0,                 // when the socket dropped, 0 while connected
+      fps: 0,                    // what their machine says it is drawing at
+      ping: 0,                   // and the round trip it last measured to here
     };
     player.health = this.game.cfg.playerHealth;
     player.healAt = Date.now() + this.game.cfg.healEvery * 1000;
@@ -893,6 +895,22 @@ class Room {
     };
   }
 
+  /* How a client says it is doing: what it is drawing at, and the round trip
+   * it last measured to here. Both are its own word for itself — the server
+   * cannot see somebody else's frame rate, and the round trip is only
+   * measurable from the end that started it — so both are held to a sane range
+   * and treated as what they are: numbers for the scoreboard that no rule
+   * depends on. */
+  reportFps(id, fps, ping) {
+    const player = this.players.get(id);
+    if (!player) return null;
+    const f = Math.round(Number(fps));
+    if (isFinite(f) && f >= 0) player.fps = Math.min(999, f);
+    const p = Math.round(Number(ping));
+    if (isFinite(p) && p >= 0) player.ping = Math.min(9999, p);
+    return player.fps;
+  }
+
   /* --------------------------------------------------------------- chat */
   /* What somebody typed, cleaned up and stamped.
    *
@@ -952,7 +970,7 @@ class Room {
       // being kept: their score is still theirs, and the room can see that
       // they are away rather than watching them vanish and reappear
       .map(p => ([p.id, p.name, p.score, p.kills, p.deaths,
-                  p.deadUntil ? 1 : 0, p.goneAt ? 1 : 0]))
+                  p.deadUntil ? 1 : 0, p.goneAt ? 1 : 0, p.fps || 0, p.ping || 0]))
       .sort((a, b) => b[2] - a[2] || b[3] - a[3] || a[1].localeCompare(b[1]));
     return { t: 'scores', players: rows };
   }

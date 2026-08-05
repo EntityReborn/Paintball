@@ -87,6 +87,7 @@ var el = {
   healthFill: document.getElementById('health-fill'),
   healthText: document.getElementById('health-text'),
   damage: document.getElementById('damage'),
+  hurtMarks: document.getElementById('hurt-marks'),
   shield: document.getElementById('shield'),
   shieldTime: document.getElementById('shield-time'),
   dead: document.getElementById('dead'),
@@ -215,12 +216,42 @@ function escapeHtml(s) {
   });
 }
 
+/* Our own frame rate, counted over the last second and sent to the room once
+ * a second. Everybody's is on the scoreboard, because on a game decided by
+ * who saw whom first it is worth knowing who is drawing at fifteen frames and
+ * who is at a hundred and forty. It is each machine's word for itself: the
+ * server cannot measure somebody else's, and nothing depends on the number. */
+var myFps = 0;
+var framesSince = 0;
+var fpsCountedAt = 0;
+
+function countFrame() {
+  framesSince++;
+  var now = performance.now();
+  if (!fpsCountedAt) { fpsCountedAt = now; return; }
+  var span = now - fpsCountedAt;
+  if (span < 1000) return;
+  myFps = Math.round((framesSince * 1000) / span);
+  framesSince = 0;
+  fpsCountedAt = now;
+  if (net && net.self && net.self.connected) net.sendFps(myFps);
+  renderBoard();
+}
+
 function boardRows() {
   if (net && net.self && net.self.id) {
     return net.scores().map(function (row) {
+      var mine = row[0] === net.self.id;
       return {
         id: row[0], name: row[1], score: row[2], kills: row[3], deaths: row[4],
-        down: !!row[5], away: !!row[6], you: row[0] === net.self.id,
+        down: !!row[5], away: !!row[6], you: mine,
+        // ours are the ones we measured a moment ago rather than the ones that
+        // went out a second ago and came back
+        fps: mine ? myFps : (row[7] || 0),
+        /* Ours is the one measured a moment ago; theirs came back through the
+         * server. Nothing measured yet reads as nothing rather than as zero,
+         * which is a real and very fast answer on a local server. */
+        ping: mine ? (net.latency() || 0) : (row[8] === undefined ? null : row[8]),
       };
     });
   }
@@ -229,6 +260,7 @@ function boardRows() {
   return [{
     id: 0, name: options.get('name') || 'you', score: game.state.score,
     kills: s.kills, deaths: s.deaths, down: game.state.dead, you: true,
+    fps: myFps, ping: null,       // nothing to be a round trip to
   }];
 }
 
@@ -244,6 +276,13 @@ function renderBoard() {
       '<span class="n">' + r.score + '</span>' +
       '<span class="n">' + r.kills + '</span>' +
       '<span class="n">' + r.deaths + '</span>' +
+      '<span class="n' + (r.fps && r.fps < 30 ? ' poor' : '') + '">' +
+        (r.fps ? r.fps : '–') + '</span>' +
+      /* A round trip of zero is a local server answering inside a
+       * millisecond, not a missing measurement — say which. */
+      '<span class="n' + (r.ping > 120 ? ' poor' : '') + '">' +
+        (r.ping === null ? '–' : (r.ping >= 1 ? Math.round(r.ping) + 'ms' : '<1ms')) +
+        '</span>' +
       '</div>';
   }).join('');
   if (rows.length < 2) {
@@ -278,6 +317,51 @@ function flashDamage() {
   el.damage.classList.add('on');
   clearTimeout(damageTimer);
   damageTimer = setTimeout(function () { el.damage.classList.remove('on'); }, 90);
+}
+
+/* Which way the round came from.
+ *
+ * The red flash says you are being shot; this says where to look, which is
+ * the part that lets you do something about it. A wedge around the crosshair
+ * at the bearing the engine worked out, fading over a second and a half.
+ *
+ * The bearing is fixed at the moment of the hit rather than followed round as
+ * you turn: it marks where the shot came from, not where the shooter is now,
+ * and a marker that swings while you turn to face it is one you can never
+ * quite line up on. */
+var HURT_MARK_LIFE = 1.5;
+var HURT_MARKS_MAX = 5;
+var hurtMarks = [];
+
+function markHurtFrom(d) {
+  if (!el.hurtMarks || typeof d.bearing !== 'number') return null;
+  var mark = document.createElement('div');
+  mark.className = 'mark';
+  mark.style.transform = 'rotate(' + d.bearing + 'rad)';
+  mark.innerHTML = '<div class="wedge"></div>';
+  el.hurtMarks.appendChild(mark);
+  hurtMarks.push({ node: mark, life: HURT_MARK_LIFE });
+  while (hurtMarks.length > HURT_MARKS_MAX) {
+    var old = hurtMarks.shift();
+    if (old.node.parentNode) old.node.parentNode.removeChild(old.node);
+  }
+  return mark;
+}
+
+// on the frame clock, so it fades at the same rate the game runs at
+function fadeHurtMarks(dt) {
+  if (!hurtMarks.length) return;
+  dt = Math.min(0.1, dt || 1 / 60);
+  for (var i = hurtMarks.length - 1; i >= 0; i--) {
+    var m = hurtMarks[i];
+    m.life -= dt;
+    if (m.life <= 0) {
+      if (m.node.parentNode) m.node.parentNode.removeChild(m.node);
+      hurtMarks.splice(i, 1);
+      continue;
+    }
+    m.node.style.opacity = Math.min(1, m.life / (HURT_MARK_LIFE * 0.6));
+  }
 }
 
 /* How long we cannot be hurt for, counted down in the corner. Covers both the
@@ -454,7 +538,14 @@ game.on('perk', function (d) {
   renderPerks();
 });
 game.on('perkExpired', renderPerks);
-game.on('frame', function () { renderPerks(); renderShield(); renderDeath(); });
+game.on('frame', function (dt) {
+  countFrame();
+  renderPerks();
+  renderShield();
+  renderDeath();
+  fadeHurtMarks(dt);
+});
+game.on('hurtFrom', markHurtFrom);
 game.on('medkit', function (d) { if (d.mine) toast('HEALTH RESTORED'); });
 game.on('shield', function () { toast('SHIELDED'); });
 /* Learning it from our own health alone means no killer's name, which happens

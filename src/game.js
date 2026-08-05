@@ -1352,6 +1352,10 @@ function createGame(options) {
     // it stopped on the world before it got to us
     if (_npcFrom.distanceTo(_npcAt) > shot.distance + 0.01) return null;
 
+    /* Before the shield is considered: a round that hit us and did nothing is
+     * still somebody shooting at us from somewhere, and which way to look is
+     * exactly as worth knowing when it did not hurt. */
+    hurtFrom(shot.origin);
     if (shielded()) return { blocked: 'shield' };
     setHealth(state.health - 1, state.maxHealth);
     return { hit: true, health: state.health, killed: state.dead };
@@ -1464,6 +1468,44 @@ function createGame(options) {
       emit('health', { health: state.health, max: state.maxHealth, dead: state.dead });
     }
     return state.health;
+  }
+
+  /* Where a round that hit us came from, as a bearing rather than a place.
+   *
+   * Being shot from somewhere you cannot see is the whole of it: the screen
+   * flashes red and you have no idea which way to turn. The world position is
+   * turned into an angle here, against the view at the moment it landed —
+   * anything drawing it only has to rotate by that. Zero is straight ahead and
+   * positive is to the right, the way a compass bearing reads.
+   *
+   * Who fired it does not come into this. The server decides that, and by the
+   * time it is being drawn all that matters is which way to look. */
+  var _hurtFrom = new THREE.Vector3();
+  var _hurtEye = new THREE.Vector3();
+
+  function hurtFrom(from) {
+    if (!from) return null;
+    _hurtFrom.set(from.x, from.y === undefined ? 0 : from.y, from.z);
+    camera.getWorldPosition(_hurtEye);
+    var dx = _hurtFrom.x - _hurtEye.x;
+    var dz = _hurtFrom.z - _hurtEye.z;
+    var range = Math.hypot(dx, dz);
+    if (range < 0.01) return null;         // right on top of us: no direction
+    dx /= range;
+    dz /= range;
+
+    /* The view's own axes: a yaw of 0 looks down -Z, so forward is
+     * (-sin, -cos) and the right hand of it is (cos, -sin). */
+    var yaw = yawObj.rotation.y;
+    var ahead = dx * -Math.sin(yaw) + dz * -Math.cos(yaw);
+    var right = dx * Math.cos(yaw) + dz * -Math.sin(yaw);
+    var bearing = Math.atan2(right, ahead);
+
+    emit('hurtFrom', {
+      bearing: bearing, range: range,
+      x: _hurtFrom.x, y: _hurtFrom.y, z: _hurtFrom.z,
+    });
+    return bearing;
   }
 
   /* Seconds of protection left. Set on coming back from a death, and by the
@@ -1599,7 +1641,7 @@ function createGame(options) {
     stats: stats, resetStats: resetStats, recordHit: recordHit, FEET_PER_UNIT: FEET_PER_UNIT,
     applyServerHit: applyServerHit, showRemoteShot: showRemoteShot,
     setScore: setScore, setHealth: setHealth, breakTarget: breakTarget,
-    setShield: setShield, shielded: shielded,
+    setShield: setShield, shielded: shielded, hurtFrom: hurtFrom,
     medkits: medkits, applyMedkits: applyMedkits, takeMedkit: takeMedkit,
     /* The hunters, and who they may come after. The server hands in its own
      * list of players; offline the default answer is the one at the camera. */

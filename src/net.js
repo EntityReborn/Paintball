@@ -284,6 +284,12 @@ PB.createNet = function (opts) {
         if (mine) game.setScore(msg.score);
         else game.showRemoteShot(msg);      // their tracer and the sound of it
         game.applyServerHit(msg, mine);
+        /* Shot at, and by somebody we may never have seen. The round came
+         * from their muzzle, which is the direction worth knowing; a round
+         * that was stopped by a shield still says which way to look. */
+        if (msg.kind === 'player' && msg.victim === self.id && msg.origin) {
+          game.hurtFrom(msg.origin);
+        }
       }
       emit('hit', msg);
       return;
@@ -728,6 +734,20 @@ PB.createNet = function (opts) {
       return true;
     },
     reconnecting: function () { return attempts > 0; },
+    /* What this machine is drawing at, and the round trip it last measured,
+     * for everybody else's scoreboard. Both are ours to report: nobody else
+     * can see our frame rate, and a round trip is only measurable from the
+     * end that started it. */
+    sendFps: function (fps) {
+      return send({
+        t: 'fps',
+        fps: Math.round(fps),
+        ping: Math.round(stats.lastLatency || 0),
+      });
+    },
+    // the raw measurement: a local server answers inside a millisecond, and
+    // rounding that to zero loses the difference between fast and unmeasured
+    latency: function () { return stats.lastLatency || 0; },
     remoteCount: function () { return remotes.size; },
     names: names,
     // rows of [id, name, score, kills, deaths, waitingToRespawn]

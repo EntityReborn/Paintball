@@ -3637,6 +3637,97 @@ describe('Being dead', function () {
   });
 });
 
+describe('Where the shot came from', function () {
+  /* A bearing relative to the view: 0 straight ahead, positive to the right,
+   * the way a compass reads. Everything drawing it just rotates by this, so
+   * the sign and the wrap are the whole of it. */
+  function bearingOf(from) {
+    var seen = null;
+    var off = g.on('hurtFrom', function (d) { seen = d; });
+    g.hurtFrom(from);
+    // the bus has no unsubscribe; the next call overwrites what we read
+    void off;
+    return seen;
+  }
+
+  it('reads zero for a round from straight ahead', function () {
+    freshLevel();
+    g.teleport(0, g.cfg.eye, 0);
+    g.yawObj.rotation.y = 0;                 // a yaw of 0 looks down -Z
+    var d = bearingOf({ x: 0, y: 1.5, z: -20 });
+    assert.ok(d, 'nothing was said about where it came from');
+    assert.close(d.bearing, 0, 0.02, 'straight ahead did not read as ahead');
+    assert.close(d.range, 20, 0.5, 'the range is wrong');
+  });
+
+  it('reads a quarter turn for a round from either side', function () {
+    freshLevel();
+    g.teleport(0, g.cfg.eye, 0);
+    g.yawObj.rotation.y = 0;
+    assert.close(bearingOf({ x: 20, y: 1.5, z: 0 }).bearing, Math.PI / 2, 0.02,
+                 'a round from the right did not read as from the right');
+    assert.close(bearingOf({ x: -20, y: 1.5, z: 0 }).bearing, -Math.PI / 2, 0.02,
+                 'a round from the left did not read as from the left');
+  });
+
+  it('reads a half turn for a round from behind', function () {
+    freshLevel();
+    g.teleport(0, g.cfg.eye, 0);
+    g.yawObj.rotation.y = 0;
+    var d = bearingOf({ x: 0, y: 1.5, z: 20 });
+    assert.close(Math.abs(d.bearing), Math.PI, 0.02, 'a shot in the back read as ahead');
+  });
+
+  it('is measured against where the player is looking', function () {
+    freshLevel();
+    g.teleport(0, g.cfg.eye, 0);
+    // turn a quarter to the left, and what was on our right is now ahead
+    g.yawObj.rotation.y = -Math.PI / 2;
+    assert.close(bearingOf({ x: 20, y: 1.5, z: 0 }).bearing, 0, 0.02,
+                 'the bearing ignored which way we were facing');
+    g.yawObj.rotation.y = Math.PI / 2;
+    assert.close(Math.abs(bearingOf({ x: 20, y: 1.5, z: 0 }).bearing), Math.PI, 0.02,
+                 'the bearing ignored which way we were facing');
+    g.yawObj.rotation.y = 0;
+  });
+
+  it('says nothing about a round with nowhere to have come from', function () {
+    freshLevel();
+    g.teleport(0, g.cfg.eye, 0);
+    var seen = 0;
+    g.on('hurtFrom', function () { seen++; });
+    g.hurtFrom(null);
+    g.hurtFrom({ x: 0, y: g.cfg.eye, z: 0 });      // exactly on top of us
+    assert.equal(seen, 0, 'a bearing was invented out of nothing');
+  });
+
+  it('comes with a hunter round that lands, and not one that misses', function () {
+    freshLevel();
+    g.setActive(true);
+    g.setHealth(g.cfg.playerHealth, g.cfg.playerHealth);
+    g.setShield(0);
+    g.state.perks = {};              // whatever an earlier suite left running
+    g.teleport(0, g.cfg.eye, 0);
+    var marks = [];
+    g.on('hurtFrom', function (d) { marks.push(d); });
+
+    // straight down the middle of the player, from twelve units in front
+    g.takeNpcRound({
+      origin: { x: 0, y: 1.5, z: -12 }, dir: { x: 0, y: 0, z: 1 },
+      point: { x: 0, y: 1.5, z: 30 }, distance: 42,
+    });
+    assert.equal(marks.length, 1, 'a round that hit said nothing about itself');
+    assert.close(marks[0].bearing, 0, 0.05, 'it came from in front of us');
+
+    // and one that goes wide says nothing
+    g.takeNpcRound({
+      origin: { x: 0, y: 1.5, z: -12 }, dir: { x: 1, y: 0, z: 0 },
+      point: { x: 30, y: 1.5, z: -12 }, distance: 42,
+    });
+    assert.equal(marks.length, 1, 'a round that missed still marked the screen');
+  });
+});
+
 describe('Hunters', function () {
   /* Its own world, with the red one in it and nothing else moving: the shared
    * game deliberately has no hunter, and a wandering crowd would decide these

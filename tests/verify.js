@@ -251,12 +251,21 @@ async function shot(page, name) {
     await page.evaluate('game.state.score = 0');
   }
 
-  check('left click fires (real mouse event)', midShot.mag === preShot.mag - 1,
+  /* A click is one round unless the browser stalls between the button going
+   * down and coming up for longer than the weapon's own interval, which a
+   * loaded machine does — the game is holding a button down as far as it can
+   * tell, and firing again is the correct answer to that. So: rounds left the
+   * magazine, and the score is read against however many actually did. */
+  const fired = preShot.mag - midShot.mag;
+  check('left click fires (real mouse event)', fired >= 1 && fired <= 2,
         `magazine ${preShot.mag} -> ${midShot.mag}`);
   check('the bullet broke the target', postShot.left === preShot.left - 1,
         `${preShot.left} -> ${postShot.left} targets`);
-  check('breaking scored 100', postShot.score === preShot.score + 100,
-        `score ${preShot.score} -> ${postShot.score}`);
+  // one of them broke a target, and anything else it sent was a miss
+  const wanted = preShot.score + 100 + (fired - 1) * -25;
+  check('breaking scored 100', postShot.score === wanted,
+        `score ${preShot.score} -> ${postShot.score} over ${fired} round(s)` +
+        (postShot.score === wanted ? '' : `, wanted ${wanted}`));
   check('the break threw debris', postShot.debris > 5, `${postShot.debris} shards`);
   await shot(page, '05-target-broken.png');
 
@@ -361,17 +370,24 @@ async function shot(page, name) {
   const afterTargets = await page.evaluate(async () => {
     // Stand somewhere with an actual line to each target: a fixed offset can
     // drop you inside cover, and then the same target is shot at forever.
+    /* Several rings of them, not one: a target tucked against a wall has
+     * nowhere to stand three and a half units away that is both clear of
+     * cover and has a line to it, and one target nobody can shoot leaves the
+     * level uncleared and everything below it failing for the wrong reason. */
     const standClearOf = point => {
-      for (let a = 0; a < Math.PI * 2; a += Math.PI / 10) {
-        const eye = new THREE.Vector3(
-          point.x + Math.sin(a) * 3.5, game.cfg.eye, point.z + Math.cos(a) * 3.5);
-        if (Math.abs(eye.x) > 28 || Math.abs(eye.z) > 28) continue;
-        const box = game.playerBox(eye, new THREE.Box3());
-        if (game.colliders.some(c => c.intersectsBox(box))) continue;
-        if (!game.hasLineOfSight(eye, point)) continue;
-        game.teleport(eye.x, game.cfg.eye, eye.z);
-        game.aimAt(point);
-        return true;
+      for (const reach of [3.5, 5.5, 8, 11]) {
+        for (let a = 0; a < Math.PI * 2; a += Math.PI / 16) {
+          const eye = new THREE.Vector3(
+            point.x + Math.sin(a) * reach, game.cfg.eye, point.z + Math.cos(a) * reach);
+          const lim = game.cfg.arena / 2 - 2;
+          if (Math.abs(eye.x) > lim || Math.abs(eye.z) > lim) continue;
+          const box = game.playerBox(eye, new THREE.Box3());
+          if (game.colliders.some(c => c.intersectsBox(box))) continue;
+          if (!game.hasLineOfSight(eye, point)) continue;
+          game.teleport(eye.x, game.cfg.eye, eye.z);
+          game.aimAt(point);
+          return true;
+        }
       }
       return false;
     };
