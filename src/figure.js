@@ -36,6 +36,43 @@ PB.HIT = {
 PB.HIT.height = PB.HIT.top - PB.HIT.bottom;
 PB.HIT.midY = (PB.HIT.top + PB.HIT.bottom) / 2;
 
+/* Draw a figure as one box instead of seven.
+ *
+ * A figure is a torso, a head and four limbs, and every one of them is a draw
+ * call — twice over where it casts a shadow. That is nothing for the handful a
+ * level normally holds and it is most of a frame for hundreds of them.
+ *
+ * At a distance a low-poly figure already reads as an upright box, so far
+ * enough away it becomes one: the torso is stretched to cover the whole body
+ * and everything else is hidden. The silhouette is what survives at that size,
+ * and the silhouette is what this keeps. Nothing is created to do it — the
+ * torso was already there — so the switch is free in both directions.
+ *
+ * Anything not drawn in full must not be posed either: the run cycle writes to
+ * the torso's own position and rotation, which would undo this every frame.
+ */
+PB.setFigureDetail = function (fig, full) {
+  if (!fig || fig.detailed === full) return false;
+  fig.detailed = full;
+  fig.head.visible = full;
+  fig.armL.visible = full;
+  fig.armR.visible = full;
+  fig.legL.visible = full;
+  fig.legR.visible = full;
+  if (fig.extras) fig.extras.forEach(function (e) { e.visible = full; });
+  if (full) {
+    fig.torso.scale.set(1, 1, 1);
+    fig.torso.position.y = 1.16;
+    fig.torso.rotation.x = 0;
+  } else {
+    // one box a person's size: 0.51 across, 1.74 tall, standing on the ground
+    fig.torso.scale.set(1.1, 2.9, 1.1);
+    fig.torso.position.y = 0.95;
+    fig.torso.rotation.x = 0;
+  }
+  return true;
+};
+
 /* Turn a figure to face the way it is going.
  *
  * A heading is a direction of travel — (sin h, cos h) — while a figure's front
@@ -158,6 +195,8 @@ PB.buildFigure = function (opts) {
     isPlayer: isPlayer,
     extras: extras,
     materials: materials,
+    // drawn in full until something decides otherwise; see setFigureDetail
+    detailed: true,
   };
 };
 

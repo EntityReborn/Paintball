@@ -54,6 +54,17 @@ var DEFAULTS = {
 
   /* The red one, added to every level on top of the wanderers. It hunts and
    * shoots; everything below is the shape of how well. */
+  /* How many figures may cast a shadow at once. Every mesh that casts one is
+   * drawn twice, and a figure is seven meshes: at three hundred of them the
+   * shadow pass alone was a quarter of the frame. The nearest few keep theirs,
+   * which is where a shadow is doing any work; -1 lifts the limit. */
+  shadowFigures: 30,
+  /* Beyond this a figure is drawn as one box rather than seven, and only once
+   * there are more of them about than the shadow budget allows. At thirty-odd
+   * units a figure is a few dozen pixels tall and its limbs are two — the
+   * silhouette is all that survives, and the silhouette is what is kept. */
+  figureDetailRange: 34,
+
   hunters: 1,                 // how many the first levels get
   hunterEvery: 4,             // and one more every this many levels
   hunterMax: 4,               // never more than this at once
@@ -1188,6 +1199,10 @@ function createGame(options) {
 
   function updateFx(dt) {
     camera.getWorldPosition(_camWorld);
+    // who is close enough to be worth a shadow; see npcs.js. Here rather than
+    // in the NPC loop because a networked client never runs that loop, and a
+    // networked client is exactly where a crowd this size turns up.
+    N.updateShadowBudget(_camWorld, state.elapsed);
 
     for (var i = 0; i < targets.length; i++) {
       var t = targets[i];

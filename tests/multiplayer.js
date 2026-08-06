@@ -1725,6 +1725,49 @@ async function advance(page, seconds, timeout = 60000) {
     await ana.screenshot({ path: path.join(SHOTS, 'mp-ana.png') });
     await bo.screenshot({ path: path.join(SHOTS, 'mp-bo.png') });
 
+    /* --------------------------------------------- a stale round trip */
+    /* A round trip is measured against this page's own clock, so anything
+     * that stops the page counts as time in flight — which is how a
+     * scoreboard came to show twenty-six seconds of ping. An old measurement
+     * is not a statement about the connection any more. */
+    const staleness = await ana.evaluate(async () => {
+      const fresh = net.latency();
+      // put the last measurement far enough into the past to be meaningless
+      net.stats.lastLatencyAt = performance.now() - 30000;
+      const stale = net.latency();
+      // what the scoreboard makes of it
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'Tab', bubbles: true }));
+      await new Promise(r => setTimeout(r, 80));
+      const cells = [...document.querySelectorAll('#board .row')]
+        .filter(r => r.classList.contains('you'))
+        .map(r => [...r.querySelectorAll('.n')].map(n => n.textContent));
+      window.dispatchEvent(new KeyboardEvent('keyup', { code: 'Tab', bubbles: true }));
+      return { fresh, stale, shown: cells[0] ? cells[0][4] : null };
+    });
+    check('a round trip is a number while it is fresh',
+          staleness.fresh !== null, `measured ${staleness.fresh}`);
+    check('and nothing once it is old', staleness.stale === null,
+          `still reporting ${staleness.stale}`);
+    check('the scoreboard shows it as unknown rather than as a huge ping',
+          staleness.shown === '–', `showed "${staleness.shown}"`);
+
+    /* And the buffer has a ceiling, so a page that was not running for a
+     * while catches up rather than working through a minute of queued world. */
+    const buffered = await ana.evaluate(async () => {
+      const newest = net.snapshots[net.snapshots.length - 1];
+      // a backlog, stamped as though it had all arrived at once — which is
+      // what a stalled page hands itself when it starts running again
+      for (let i = 0; i < 400; i++) {
+        net.snapshots.push(Object.assign({}, newest, { at: performance.now() }));
+      }
+      const piled = net.snapshots.length;
+      await new Promise(r => setTimeout(r, 900));      // a few real snapshots
+      return { piled, after: net.snapshots.length };
+    });
+    check('a pile of snapshots is cut back to what can be drawn',
+          buffered.after < buffered.piled && buffered.after <= 95,
+          `${buffered.piled} buffered -> ${buffered.after}`);
+
     /* ------------------------------------------- the match controls */
     /* Adding is the room's, not one client's: what ana asks for has to turn
      * up in bo's arena too, or it is a figure nobody else can see and nobody

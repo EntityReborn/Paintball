@@ -480,6 +480,77 @@ PB.createNPCs = function (ctx) {
     }
   }
 
+  /* ---------------------------------------------------- what casts a shadow */
+  /* Every figure is seven meshes, and every mesh that casts a shadow is drawn
+   * twice: once into the shadow map and once into the picture. That is a fair
+   * trade for the handful a level normally holds and a bad one for hundreds —
+   * measured at three hundred figures, the shadow pass alone was a quarter of
+   * the frame.
+   *
+   * So there is a budget. The figures nearest the camera keep their shadows,
+   * because those are the ones being fought and the ones whose shadow says
+   * where they are standing; the rest go without, which at that distance and
+   * that population nobody can pick out anyway. Bodies never cast: a level
+   * that has been fought through is mostly bodies, and they are scenery.
+   *
+   * Chosen a few times a second rather than every frame — it is a decision
+   * about a crowd, and a crowd does not reshuffle in sixteen milliseconds.
+   */
+  var _shadowAt = 0;
+  var _shadowFrom = new THREE.Vector3();
+
+  function setCasting(npc, on) {
+    if (npc.casting === on) return;
+    npc.casting = on;
+    npc.root.traverse(function (o) {
+      if (o.isMesh && o !== npc.hitbox) o.castShadow = on;
+    });
+  }
+
+  function updateShadowBudget(from, now) {
+    if (cfg.headless || !cfg.shadows) return 0;
+    if (now - _shadowAt < 0.25) return 0;
+    _shadowAt = now;
+    _shadowFrom.copy(from);
+
+    var budget = cfg.shadowFigures;
+    if (budget < 0 || npcs.length <= budget) {
+      // few enough that everything standing can afford one, and all of them
+      // are worth drawing in full
+      for (var a = 0; a < npcs.length; a++) {
+        setCasting(npcs[a], npcs[a].alive);
+        PB.setFigureDetail(npcs[a].fig, true);
+      }
+      return npcs.length;
+    }
+
+    /* Nearest first, without sorting the whole crowd: take the distance of
+     * each, find the cut-off by a partial selection, and hand shadows to
+     * whatever falls inside it. */
+    var dists = [];
+    for (var i = 0; i < npcs.length; i++) {
+      var p = npcs[i].root.position;
+      npcs[i].camDist = npcs[i].alive
+        ? (p.x - _shadowFrom.x) * (p.x - _shadowFrom.x) +
+          (p.z - _shadowFrom.z) * (p.z - _shadowFrom.z)
+        : Infinity;
+      if (npcs[i].alive) dists.push(npcs[i].camDist);
+    }
+    dists.sort(function (x, y) { return x - y; });
+    var cut = dists.length > budget ? dists[budget - 1] : Infinity;
+    /* And how much of each is drawn. Far enough away a figure is a few pixels
+     * of silhouette, so out there it is drawn as one box rather than seven —
+     * see PB.setFigureDetail. Only once there is a crowd: with a handful about
+     * there is nothing to save and every reason to draw them properly. */
+    var far = cfg.figureDetailRange * cfg.figureDetailRange;
+    for (var k = 0; k < npcs.length; k++) {
+      var npc = npcs[k];
+      setCasting(npc, npc.alive && npc.camDist <= cut);
+      PB.setFigureDetail(npc.fig, npc.camDist <= far);
+    }
+    return Math.min(budget, dists.length);
+  }
+
   function npcsAlive() {
     var n = 0;
     for (var i = 0; i < npcs.length; i++) if (npcs[i].alive) n++;
@@ -544,7 +615,11 @@ PB.createNPCs = function (ctx) {
       if (n.bar) n.bar.set(n.alive ? n.health : 0, n.maxHealth);
 
       if (!n.alive) {
-        // topple over and stay down for the rest of the level
+        /* Topple over and stay down for the rest of the level — and once it
+         * has finished falling, stop touching it at all. A level that has
+         * been fought through is mostly bodies, and posing a crowd of them
+         * every frame is work nobody can see. */
+        if (n.settled) continue;
         n.downFor += dt;
         n.vy -= cfg.gravity * dt;
         n.y = Math.max(0, n.y + n.vy * dt);
@@ -552,6 +627,7 @@ PB.createNPCs = function (ctx) {
         n.root.rotation.x = Math.min(Math.PI / 2, n.root.rotation.x + dt * 4.5);
         n.torso.rotation.x = 0;
         n.root.updateMatrixWorld(true);
+        if (n.y <= 0 && n.root.rotation.x >= Math.PI / 2 - 0.001) n.settled = true;
         continue;
       }
 
@@ -606,9 +682,13 @@ PB.createNPCs = function (ctx) {
       // register against where the figure was on the previous frame
       n.root.updateMatrixWorld(true);
 
-      /* animation */
+      /* animation, for the ones being drawn in full. A run cycle writes to
+       * the torso's own position and rotation, which is exactly what the
+       * distant single-box form is using. */
       if (n.grounded) n.phase += dt * n.speed * 2.4;
-      PB.poseFigure(n.fig, { phase: n.phase, grounded: n.grounded, vy: n.vy });
+      if (n.fig.detailed) {
+        PB.poseFigure(n.fig, { phase: n.phase, grounded: n.grounded, vy: n.vy });
+      }
     }
   }
 
@@ -616,6 +696,7 @@ PB.createNPCs = function (ctx) {
     npcs: npcs, makeNPC: makeNPC, placeNPC: placeNPC,
     npcsAlive: npcsAlive, knockDownNPC: knockDownNPC, hitNPC: hitNPC,
     huntersFor: huntersFor, updateNPCs: updateNPCs,
+    updateShadowBudget: updateShadowBudget,
   };
 };
 

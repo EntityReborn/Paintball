@@ -3969,6 +3969,84 @@ describe('Built structures', function () {
   });
 });
 
+describe('A crowd', function () {
+  /* Hundreds of figures is a thing the match controls make easy, so it has to
+   * cost what it has to cost and no more. */
+  function casting(npc) {
+    var on = false;
+    npc.root.traverse(function (o) {
+      if (o.isMesh && o !== npc.hitbox && o.castShadow) on = true;
+    });
+    return on;
+  }
+
+  it('lets every figure cast a shadow while there are few of them', function () {
+    freshLevel();
+    assert.less(g.npcs.length, g.cfg.shadowFigures, 'this level is already a crowd');
+    g.update(1 / 60);
+    g.state.elapsed += 1;                       // past the budget's own clock
+    g.update(1 / 60);
+    var lit = g.npcs.filter(casting).length;
+    assert.equal(lit, g.npcsAlive(), 'not everything standing is casting one');
+  });
+
+  it('hands shadows to the nearest few once there is a crowd', function () {
+    freshLevel();
+    g.addToLevel('npc', g.cfg.shadowFigures + 40);
+    g.teleport(0, g.cfg.eye, 0);
+    g.state.elapsed += 1;
+    g.update(1 / 60);
+
+    var lit = g.npcs.filter(casting);
+    assert.equal(lit.length, g.cfg.shadowFigures,
+                 'the budget was ignored: ' + lit.length + ' casting');
+
+    // and they are the near ones, not an arbitrary handful
+    var here = new THREE.Vector3();
+    g.camera.getWorldPosition(here);
+    var far = 0;
+    lit.forEach(function (n) {
+      far = Math.max(far, Math.hypot(n.root.position.x - here.x,
+                                     n.root.position.z - here.z));
+    });
+    var nearestDark = Infinity;
+    g.npcs.filter(function (n) { return n.alive && !casting(n); }).forEach(function (n) {
+      nearestDark = Math.min(nearestDark, Math.hypot(n.root.position.x - here.x,
+                                                     n.root.position.z - here.z));
+    });
+    assert.ok(nearestDark >= far - 0.01,
+              'a nearer figure went without while a further one kept its shadow');
+    freshLevel();
+  });
+
+  it('never casts one from a body', function () {
+    freshLevel();
+    g.addToLevel('npc', g.cfg.shadowFigures + 5);
+    g.teleport(0, g.cfg.eye, 0);
+    var victim = g.npcs.filter(function (n) { return n.alive; })[0];
+    victim.root.position.set(0.5, 0, 0.5);          // right under the camera
+    g.knockDownNPC(victim);
+    g.state.elapsed += 1;
+    g.update(1 / 60);
+    assert.ok(!casting(victim), 'a body is still casting a shadow');
+    freshLevel();
+  });
+
+  it('stops working on a body once it has finished falling', function () {
+    freshLevel();
+    var victim = g.npcs.filter(function (n) { return n.alive; })[0];
+    g.knockDownNPC(victim);
+    step(4);
+    assert.ok(victim.settled, 'the body never settled');
+    var where = victim.root.position.clone();
+    var lean = victim.root.rotation.x;
+    step(2);
+    assert.close(victim.root.position.y, where.y, 1e-6, 'a settled body is still moving');
+    assert.close(victim.root.rotation.x, lean, 1e-6, 'a settled body is still turning');
+    freshLevel();
+  });
+});
+
 describe('Where the shot came from', function () {
   /* A bearing relative to the view: 0 straight ahead, positive to the right,
    * the way a compass reads. Everything drawing it just rotates by this, so

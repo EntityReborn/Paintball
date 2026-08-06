@@ -27,6 +27,11 @@ var JITTER_MARGIN = 2.5;      // multiples of measured jitter to keep in hand
 
 var BUFFER_MS = 1200;
 
+/* At the snapshot rate, a second and a bit of world is about forty of them.
+ * Twice that is room for any honest jitter and a ceiling on what a stalled
+ * page can pile up while it is not running. */
+var MAX_BUFFERED = 90;
+
 /* Radians of run cycle per unit travelled. An NPC deciding its own path uses
  * `dt * speed * 2.4`, and speed * dt is exactly the distance it covered, so
  * matching that here keeps a figure's stride identical whether it is being
@@ -66,7 +71,7 @@ PB.createNet = function (opts) {
   var lastUpdateAt = 0;
   var figureGeo = null;
   var stats = { sent: 0, received: 0, corrections: 0, lastCorrection: null,
-                lastLatency: 0, transit: 0, frames: 0,
+                lastLatency: 0, lastLatencyAt: 0, transit: 0, frames: 0,
                 hits: 0, shots: 0, rejected: 0, lastRejection: null };
 
   function on(evt, cb) { (listeners[evt] || (listeners[evt] = [])).push(cb); return api; }
@@ -232,6 +237,16 @@ PB.createNet = function (opts) {
       snapshots.push(msg);
       var cutoff = now() - BUFFER_MS;
       while (snapshots.length > 2 && snapshots[0].at < cutoff) snapshots.shift();
+      /* And a hard ceiling on the buffer itself. The trim above is by arrival
+       * time, which is stamped as each one is picked up — so a page that has
+       * been stopped and then handed a minute of queued messages stamps them
+       * all with nearly the same moment, keeps every one of them, and then
+       * has a minute of world to work through. However far behind we are, the
+       * newest few are the only ones anybody can see. */
+      if (snapshots.length > MAX_BUFFERED) {
+        snapshots.splice(0, snapshots.length - MAX_BUFFERED);
+        renderClock = null;                 // and pick the clock up from here
+      }
       return;
     }
     if (msg.t === 'joined') {
@@ -339,6 +354,7 @@ PB.createNet = function (opts) {
     }
     if (msg.t === 'pong') {
       stats.lastLatency = now() - msg.c;
+      stats.lastLatencyAt = now();
       return;
     }
   }
@@ -677,9 +693,13 @@ PB.createNet = function (opts) {
           : 0;
         n.netLast = { x: nx, z: nz };
         n.netPhase = (n.netPhase || 0) + stepped * PHASE_PER_UNIT;
-        PB.poseFigure(n.fig, {
-          phase: n.netPhase, grounded: n.grounded, moving: stepped > 0.0008, vy: n.vy,
-        });
+        // and only for the ones drawn in full: posing writes to the torso,
+        // which is the whole of the distant single-box form
+        if (n.fig.detailed) {
+          PB.poseFigure(n.fig, {
+            phase: n.netPhase, grounded: n.grounded, moving: stepped > 0.0008, vy: n.vy,
+          });
+        }
       }
       if (nb.length > 7) n.root.rotation.x = nb[7];      // toppled when downed
       n.root.updateMatrixWorld(true);
@@ -758,15 +778,31 @@ PB.createNet = function (opts) {
      * can see our frame rate, and a round trip is only measurable from the
      * end that started it. */
     sendFps: function (fps) {
+      var ping = api.latency();
       return send({
         t: 'fps',
         fps: Math.round(fps),
-        ping: Math.round(stats.lastLatency || 0),
+        // nothing rather than a number from a page that was not running
+        ping: ping === null ? 0 : Math.round(ping),
       });
     },
-    // the raw measurement: a local server answers inside a millisecond, and
-    // rounding that to zero loses the difference between fast and unmeasured
-    latency: function () { return stats.lastLatency || 0; },
+    /* The raw measurement, and only while it still means something.
+     *
+     * A round trip is measured from this page's own clock, so anything that
+     * stops this page — a hidden tab, a stall, a machine put to sleep — is
+     * counted as time in flight. That is how a scoreboard came to show
+     * twenty-six seconds of ping: not a connection, a page that had not been
+     * running. A measurement older than a few pings is no longer a statement
+     * about the connection, so it is not offered as one.
+     *
+     * Kept raw rather than rounded: a local server answers inside a
+     * millisecond, and rounding that to zero loses the difference between
+     * fast and unmeasured. */
+    latency: function () {
+      if (!stats.lastLatencyAt) return null;
+      if (now() - stats.lastLatencyAt > 8000) return null;
+      return stats.lastLatency;
+    },
     // the controls on the pause screen; the room decides and tells everyone
     restart: function () { return send({ t: 'restart' }); },
     addToLevel: function (what, count) {

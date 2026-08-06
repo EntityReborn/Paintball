@@ -251,7 +251,9 @@ function boardRows() {
         /* Ours is the one measured a moment ago; theirs came back through the
          * server. Nothing measured yet reads as nothing rather than as zero,
          * which is a real and very fast answer on a local server. */
-        ping: mine ? (net.latency() || 0) : (row[8] === undefined ? null : row[8]),
+        // null where there is no fresh measurement, which is not the same as
+        // a fast one — see net.latency()
+        ping: mine ? net.latency() : (row[8] === undefined ? null : row[8]),
       };
     });
   }
