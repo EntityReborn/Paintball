@@ -773,8 +773,31 @@ test('snapshots carry the world clock and whatever perks are out', () => {
   const snap = room.snapshot();
   assert.ok(typeof snap.wt === 'number', 'no world clock in the snapshot');
   assert.ok(snap.wt > 0, 'the world clock is not running');
-  assert.equal(snap.perks.length, 1, 'the perk is not in the snapshot');
-  assert.equal(snap.perks[0][1], 'doubleJump', 'wrong perk kind');
+  /* Not the only one out there: the secret rooms stock themselves as soon as
+   * the room starts stepping, and they are the server's perks like any other. */
+  const mine = snap.perks.filter(p => p[1] === 'doubleJump');
+  assert.equal(mine.length, 1, 'the perk is not in the snapshot');
+  assert.equal(mine[0][2], 3, 'the perk moved');
+});
+
+test('the server stocks the secret rooms, so everyone finds the same thing', () => {
+  /* Perks are the server's to hand out online, and a room that only stocked
+   * itself on the client would be empty for everybody who walked into it. */
+  const room = new Room({ seed: 88 });
+  room.join('ana');
+  room.game.perkSystem.clear();
+  for (let i = 0; i < 10; i++) room.step(1000 / 30);
+
+  const good = globalThis.PB.perksOfTier('good').map(d => d.kind);
+  const secrets = room.game.secrets;
+  assert.ok(secrets.length > 0, 'the arena has no secret rooms');
+  for (const s of secrets) {
+    const inside = room.snapshot().perks.filter(
+      p => Math.hypot(p[2] - s.x, p[4] - s.z) < 1);
+    assert.equal(inside.length, 1, `nothing in the room at ${s.x.toFixed(0)},${s.z.toFixed(0)}`);
+    assert.ok(good.includes(inside[0][1]),
+              `the room holds a ${inside[0][1]}, which is not worth finding`);
+  }
 });
 
 test('the sliders are in the same place on the server as on a client', () => {
@@ -2037,18 +2060,156 @@ test('a player out of the fight does not stop other rounds either', () => {
 test('the snapshot says who is shielded and who is out of the fight', () => {
   const room = new Room({ seed: 4242 });
   const p = room.join('ana');
+  const PB = globalThis.PB;
   let entry = room.snapshot().players[0];
   assert.equal(entry[11], 1, 'a player who just arrived should be shielded');
-  assert.equal(entry[12], 1, 'and in the fight');
+  assert.equal(entry[12], PB.modeIndex('pvp'), 'and in the fight');
 
+  /* The field carries which of the three modes, not a boolean — a client has
+   * to be able to tell a peaceful player from a PVE one, because it draws them
+   * differently. An old client that reads it as truthy still sees PVP as 0. */
   p.shieldUntil = 0;
-  room.setPrefs(p.id, { pvp: false });
+  room.setPrefs(p.id, { mode: 'pve' });
   entry = room.snapshot().players[0];
   assert.equal(entry[11], 0, 'still shielded');
-  assert.equal(entry[12], 0, 'still in the fight');
+  assert.equal(entry[12], PB.modeIndex('pve'), 'not shown as pve');
+
+  room.setPrefs(p.id, { mode: 'peaceful' });
+  assert.equal(room.snapshot().players[0][12], PB.modeIndex('peaceful'),
+               'not shown as peaceful');
+
+  // and a client from before modes, which sends only the boolean
+  room.setPrefs(p.id, { pvp: false });
+  assert.equal(room.snapshot().players[0][12], PB.modeIndex('pve'),
+               'an old client opting out of pvp should land in pve');
 });
 
 /* --------------------------------------------------------------- server */
+test('a hunter leaves a peaceful player alone and still comes after a PVE one', () => {
+  /* The bug this exists for: opting out of PvP was only ever about other
+   * players, so the level's own enemy carried on hunting somebody who had
+   * asked to be left alone. There are two questions now and huntable() answers
+   * the second one. */
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+
+  assert.equal(room.huntable().length, 2, 'both should be huntable to begin with');
+
+  room.setPrefs(bo.id, { mode: 'pve' });
+  assert.equal(room.huntable().length, 2, 'pve is about players, not hunters');
+
+  room.setPrefs(bo.id, { mode: 'peaceful' });
+  const list = room.huntable();
+  assert.equal(list.length, 1, 'a hunter can still see a peaceful player');
+  assert.equal(list[0].id, ana.id, 'it dropped the wrong one');
+});
+
+test('a hunter round cannot hurt a peaceful player even once it is in the air', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  ana.shieldUntil = 0;
+
+  // damage() with no shooter is the level itself firing
+  room.setPrefs(ana.id, { mode: 'pve' });
+  const took = room.damage(ana, null);
+  assert.ok(took && !took.blocked, 'a pve player should still be hurt by the level');
+  assert.equal(ana.health, room.game.cfg.playerHealth - 1, 'no health came off');
+
+  room.setPrefs(ana.id, { mode: 'peaceful' });
+  const before = ana.health;
+  const stopped = room.damage(ana, null);
+  assert.equal(stopped.blocked, 'peaceful', `blocked as ${stopped.blocked}`);
+  assert.equal(ana.health, before, 'a peaceful player lost health');
+});
+
+test('peaceful players cannot hurt anybody either', () => {
+  const room = new Room({ seed: 4242 });
+  const ana = room.join('ana');
+  const bo = room.join('bo');
+  ana.shieldUntil = 0; bo.shieldUntil = 0;
+
+  room.setPrefs(ana.id, { mode: 'peaceful' });
+  assert.equal(room.canHurt(ana, bo), false, 'a peaceful player hurt somebody');
+  assert.equal(room.canHurt(bo, ana), false, 'somebody hurt a peaceful player');
+
+  room.setPrefs(ana.id, { mode: 'pvp' });
+  assert.equal(room.canHurt(ana, bo), true, 'back in the fight and still blocked');
+});
+
+test('a mode change reaches everyone, and an old client is understood', () => {
+  const room = new Room({ seed: 4242 });
+  const p = room.join('ana');
+
+  const out = room.setPrefs(p.id, { mode: 'peaceful' });
+  assert.equal(out.mode, 'peaceful', 'the broadcast does not carry the mode');
+  assert.equal(out.pvp, false, 'and it should still carry the old boolean');
+  assert.equal(room.publicPlayer(p).mode, 'peaceful', 'the public record is stale');
+
+  // a client from before modes existed sends nothing but the boolean
+  const older = room.setPrefs(p.id, { pvp: true });
+  assert.equal(older.mode, 'pvp', 'an old client could not get back into the fight');
+});
+
+test('a warp pad throws a player to the far corner, once', () => {
+  const room = new Room({ seed: 4242 });
+  const p = room.join('ana');
+  const pad = room.game.warps[0];
+  const dest = room.game.warpDestination(pad);
+
+  // standing on it
+  p.x = pad.x; p.z = pad.z; p.y = room.game.cfg.eye;
+  const out = room.warp(p.id, pad.index);
+  assert.ok(out, 'the server refused a player standing on the pad');
+  assert.equal(out.to, dest.index, 'sent to the wrong corner');
+  assert.ok(Math.hypot(p.x - dest.x, p.z - dest.z) < room.game.cfg.warpRadius + 2,
+            'the server did not move them');
+
+  // and not again while it is cooling down
+  assert.equal(room.warp(p.id, pad.index), null, 'it warped twice in a row');
+});
+
+test('a warp has to be asked for from the pad it claims', () => {
+  /* Otherwise it is a free teleport: send the message from anywhere and the
+   * server puts you wherever that pad goes. */
+  const room = new Room({ seed: 4242 });
+  const p = room.join('ana');
+  const pad = room.game.warps[0];
+
+  p.x = 0; p.z = 0; p.y = room.game.cfg.eye;
+  assert.equal(room.warp(p.id, pad.index), null, 'warped from the middle of the map');
+
+  // and a pad that does not exist
+  p.x = pad.x; p.z = pad.z;
+  assert.equal(room.warp(p.id, 99), null, 'warped from a pad that is not there');
+  assert.equal(room.warp(p.id, -1), null, 'warped from a negative pad');
+});
+
+test('a warp does not spend the arriving player their move budget', () => {
+  /* Forty metres in a frame is exactly what the plausibility check rejects, so
+   * a player who has just been warped by the server must not then be punished
+   * for the states already on their way here. */
+  const room = new Room({ seed: 4242 });
+  const p = room.join('ana');
+  const pad = room.game.warps[0];
+  p.x = pad.x; p.z = pad.z; p.y = room.game.cfg.eye;
+  const before = p.violations;
+
+  room.warp(p.id, pad.index);
+  // a state describing the corner they left, arriving late
+  room.applyState(p.id, { t: 'state', x: pad.x, y: room.game.cfg.eye, z: pad.z, yaw: 0 });
+  assert.equal(p.violations, before, 'the warp was held against them');
+});
+
+test('a dead player does not warp', () => {
+  const room = new Room({ seed: 4242 });
+  const p = room.join('ana');
+  const pad = room.game.warps[0];
+  p.x = pad.x; p.z = pad.z; p.y = room.game.cfg.eye;
+  p.deadUntil = Date.now() + 5000;
+  assert.equal(room.warp(p.id, pad.index), null, 'a body used a warp pad');
+});
+
 test('the http server serves the client and a health check', async () => {
   process.env.PORT = '0';
   const { server, room } = require('../server/index.js');

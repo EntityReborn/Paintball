@@ -1623,19 +1623,21 @@ async function advance(page, seconds, timeout = 60000) {
           `${flowing.sent} sent, ${flowing.received} snapshots buffered`);
 
     /* -------------------------------------- stepping out of the fight */
-    await bo.evaluate(() => { options.set('pvp', false); net.setPvp(false); });
+    await bo.evaluate(() => { options.set('mode', 'pve'); net.setMode('pve'); });
     await sleep(700);
     const out = await ana.evaluate(() => {
       const r = [...net.remotes.values()][0];
       return {
+        mode: r.mode,
         pvp: r.pvp,
         seeThrough: r.fig.torso.material.transparent,
         opacity: r.fig.torso.material.opacity,
       };
     });
     check('a player out of the fight is drawn see-through for everyone',
-          out.pvp === false && out.seeThrough === true && out.opacity < 1,
-          `pvp=${out.pvp}, transparent=${out.seeThrough}, opacity=${out.opacity}`);
+          out.mode === 'pve' && out.pvp === false &&
+          out.seeThrough === true && out.opacity < 1,
+          `mode=${out.mode}, transparent=${out.seeThrough}, opacity=${out.opacity}`);
 
     const spared = await ana.evaluate(async () => {
       const before = [...net.remotes.values()][0];
@@ -1655,15 +1657,29 @@ async function advance(page, seconds, timeout = 60000) {
     check('and cannot be shot', spared && unhurt.health === 10 && !unhurt.dead,
           `bo is on ${unhurt.health}, dead=${unhurt.dead}`);
 
-    await bo.evaluate(() => { options.set('pvp', true); net.setPvp(true); });
+    /* Peaceful is a third thing, and has to look like one: PVE and peaceful
+     * are both see-through, so somebody who cannot be shot at all reads as
+     * fainter still rather than identical to somebody who merely cannot be
+     * shot by you. */
+    await bo.evaluate(() => { options.set('mode', 'peaceful'); net.setMode('peaceful'); });
+    await sleep(700);
+    const quiet = await ana.evaluate(() => {
+      const r = [...net.remotes.values()][0];
+      return { mode: r.mode, opacity: r.fig.torso.material.opacity };
+    });
+    check('and a peaceful player is fainter still than a PVE one',
+          quiet.mode === 'peaceful' && quiet.opacity < out.opacity,
+          `peaceful ${quiet.opacity} vs pve ${out.opacity}`);
+
+    await bo.evaluate(() => { options.set('mode', 'pvp'); net.setMode('pvp'); });
     await sleep(600);
     const backIn = await ana.evaluate(() => {
       const r = [...net.remotes.values()][0];
-      return { pvp: r.pvp, transparent: r.fig.torso.material.transparent };
+      return { mode: r.mode, pvp: r.pvp, transparent: r.fig.torso.material.transparent };
     });
     check('stepping back in makes them solid again',
-          backIn.pvp === true && backIn.transparent === false,
-          `pvp=${backIn.pvp}, transparent=${backIn.transparent}`);
+          backIn.mode === 'pvp' && backIn.pvp === true && backIn.transparent === false,
+          `mode=${backIn.mode}, transparent=${backIn.transparent}`);
 
     /* --------------------------------------------- levels the server ran */
     /* The server decides when a level is done, so the client never sees its

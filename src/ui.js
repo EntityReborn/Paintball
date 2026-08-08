@@ -70,9 +70,16 @@ PB.createUI = function (opts) {
       var net = getNet();
       if (net && net.setShowNames) net.setShowNames(v);
     },
-    pvp: function (v) {
+    /* Both sides of it: the room has to be told, because it decides who may
+     * hurt whom, and our own world has to be told, because its hunters are
+     * ours and there is no server in a single-player game to ask. */
+    mode: function (v) {
       var net = getNet();
-      if (net && net.setPvp) net.setPvp(v);
+      if (net && net.setMode) net.setMode(v);
+      var game = getGame();
+      if (game && game.setMode) game.setMode(v);
+      var note = el('mode-note');
+      if (note) note.textContent = PB.modeOf(v).hint;
     },
     hitboxes: function (v) {
       var game = getGame();
@@ -113,6 +120,17 @@ PB.createUI = function (opts) {
     input.addEventListener('change', function () {
       options.set(key, input.checked);
       input.checked = !!options.get(key);
+      apply[key](options.get(key));
+    });
+  }
+
+  function bindSelect(id, key) {
+    var input = el(id);
+    if (!input) return;
+    input.value = options.get(key);
+    input.addEventListener('change', function () {
+      options.set(key, input.value);
+      input.value = options.get(key);       // show what was actually kept
       apply[key](options.get(key));
     });
   }
@@ -272,7 +290,7 @@ PB.createUI = function (opts) {
     bindRange('opt-gun', 'gunVolume', function (v) { return Math.round(v * 100) + '%'; });
     bindToggle('opt-invert', 'invertY');
     bindToggle('opt-names', 'showNames');
-    bindToggle('opt-pvp', 'pvp');
+    bindSelect('opt-mode', 'mode');
     bindToggle('dbg-hitboxes', 'hitboxes');
     bindToggle('dbg-colliders', 'colliders');
     wireMatch();
@@ -292,7 +310,7 @@ PB.createUI = function (opts) {
     set('opt-gun', all.gunVolume);
     set('opt-invert', all.invertY, true);
     set('opt-names', all.showNames, true);
-    set('opt-pvp', all.pvp, true);
+    set('opt-mode', all.mode);
     set('dbg-hitboxes', all.hitboxes, true);
     set('dbg-colliders', all.colliders, true);
 

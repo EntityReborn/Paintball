@@ -43,7 +43,7 @@ PB.createNet = function (opts) {
   var url = opts.url;
   var name = opts.name || 'player';
 
-  var pvp = opts.pvp !== false;
+  var mode = PB.modeFrom(opts);
 
   var socket = null;
   var self = { id: null, seed: null, connected: false, error: null, arenaMatch: null,
@@ -100,7 +100,9 @@ PB.createNet = function (opts) {
        * so a lid closing or a redeploy costs a couple of seconds rather than
        * a score. Without one — the first connection of a session — this is an
        * ordinary join. */
-      send({ t: 'join', name: name, pvp: pvp, token: self.token || undefined });
+      // both, so that a server from before modes still understands the join
+      send({ t: 'join', name: name, mode: mode, pvp: PB.openToPlayers(mode),
+             token: self.token || undefined });
     };
 
     socket.onmessage = function (ev) {
@@ -149,7 +151,7 @@ PB.createNet = function (opts) {
 
   function sendPrefs() {
     if (!self.id) return false;         // it will travel with the join instead
-    return send({ t: 'prefs', name: name, pvp: pvp });
+    return send({ t: 'prefs', name: name, mode: mode, pvp: PB.openToPlayers(mode) });
   }
 
   function handle(msg) {
@@ -263,7 +265,7 @@ PB.createNet = function (opts) {
       var who = remotes.get(msg.id);
       if (who) {
         if (who.tag) who.tag.set(msg.name);
-        setRemotePvp(who, msg.pvp !== false);
+        setRemoteMode(who, PB.modeFrom(msg));
       }
       emit('prefs', msg);
       return;
@@ -287,6 +289,23 @@ PB.createNet = function (opts) {
       stats.lastCorrection = msg.reason || null;
       if (game) game.teleport(msg.x, msg.y, msg.z);
       emit('correction', msg);
+      return;
+    }
+    /* A corner pad fired, ours or somebody else's.
+     *
+     * Ours is the move itself: we asked, the server agreed, and this is where
+     * we now are. Somebody else's only needs the remote's interpolation cut,
+     * or it walks them across the arena at running pace over the next second —
+     * the snapshots either side of a warp are a straight line through
+     * everything in between. */
+    if (msg.t === 'warp') {
+      if (msg.id === self.id) {
+        if (game) game.warpTo({ x: msg.x, z: msg.z, index: msg.to });
+      } else {
+        var moved = remotes.get(msg.id);
+        if (moved) moved.last = null;
+      }
+      emit('warp', msg);
       return;
     }
     if (msg.t === 'hit') {
@@ -393,6 +412,12 @@ PB.createNet = function (opts) {
         t: 'shot', origin: d.origin, dir: d.dir,
         lag: Math.round(behind), claim: d.claim || null,
       });
+    });
+
+    /* Stepped on a corner pad. Only ever a request: the server owns where we
+     * are, and it hands the move back as an instruction if it agrees. */
+    game.on('warpRequest', function (d) {
+      send({ t: 'warp', from: d.from });
     });
 
     return startTimers();
@@ -524,6 +549,7 @@ PB.createNet = function (opts) {
     fig.root.add(r.tag.sprite);
     r.health = PB.createHealthBar();
     fig.root.add(r.health.sprite);
+    r.mode = 'pvp';
     r.pvp = true;
 
     /* Rounds are raycast against this box as well as drawn from it, so it has
@@ -541,16 +567,21 @@ PB.createNet = function (opts) {
   }
 
   /* Somebody out of the fight is drawn see-through, so it is obvious at a
-   * glance that shooting them is a waste of a round. */
-  function setRemotePvp(r, on) {
-    if (!r || r.pvp === on) return;
-    r.pvp = on;
+   * glance that shooting them is a waste of a round — and the further out they
+   * are the fainter they get, so PVE and peaceful can be told apart without
+   * reading anything. */
+  function setRemoteMode(r, mode) {
+    if (!r || r.mode === mode) return;
+    r.mode = mode;
+    var open = PB.openToPlayers(mode);
+    r.pvp = open;
     // the raycast reads this off the box itself, not off the remote
-    if (r.fig.hitbox) r.fig.hitbox.userData.pvp = on;
+    if (r.fig.hitbox) r.fig.hitbox.userData.pvp = open;
+    var opacity = open ? 1 : (mode === 'peaceful' ? 0.2 : 0.34);
     r.fig.materials.forEach(function (m) {
       if (m.name === 'shieldMat') return;
-      m.transparent = !on;
-      m.opacity = on ? 1 : 0.34;
+      m.transparent = !open;
+      m.opacity = opacity;
       m.needsUpdate = true;
     });
   }
@@ -624,7 +655,7 @@ PB.createNet = function (opts) {
       r.fig.root.visible = !down;
       if (r.health && pb.length > 9) r.health.set(down ? 0 : pb[9], maxHealth);
       if (r.fig.shield) r.fig.shield.visible = !down && pb.length > 11 && !!pb[11];
-      if (pb.length > 12) setRemotePvp(r, !!pb[12]);
+      if (pb.length > 12) setRemoteMode(r, PB.modeAt(pb[12]));
       // cheap when nothing changed, and it covers a name that arrived after
       // the body did
       if (r.tag) r.tag.set(names.get(id) || '');
@@ -820,12 +851,12 @@ PB.createNet = function (opts) {
       return name;
     },
     getName: function () { return name; },
-    setPvp: function (v) {
-      pvp = v !== false;
+    setMode: function (v) {
+      mode = PB.modeOf(v).mode;
       sendPrefs();
-      return pvp;
+      return mode;
     },
-    getPvp: function () { return pvp; },
+    getMode: function () { return mode; },
     setShowNames: function (on) {
       showNames = !!on;
       remotes.forEach(function (r) { if (r.tag) r.tag.sprite.visible = showNames; });

@@ -18,7 +18,10 @@ PB.createNPCs = function (ctx) {
   var solidMeshes = ctx.solidMeshes, obstacleBoxes = ctx.obstacleBoxes, floor = ctx.floor;
   // what a figure may not walk through: cover, the balcony, the walls, the
   // sliders — the same list the player is resolved against
-  var colliders = ctx.colliders;
+  /* Not ctx.colliders: a figure is stopped by everything a player is stopped
+   * by and by the secret rooms' ways in as well. See world.js — the whole
+   * point of a wall you can walk through is that only a player can. */
+  var colliders = ctx.npcColliders || ctx.colliders;
   var addScore = ctx.addScore, checkLevel = function () { return ctx.checkLevel(); };
   var _v = new THREE.Vector3();
 

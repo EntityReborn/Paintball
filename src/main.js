@@ -46,6 +46,8 @@ function build(seed) {
     audio: true,
     sensitivity: options.get('sensitivity'),
     invertY: options.get('invertY'),
+    // the hunters in our own world read this; online the room keeps its own
+    mode: options.get('mode'),
   };
   if (seed !== undefined) settings.seed = seed;
   // ?hunters=0 takes the red enemy out, for scripted runs that need an arena
@@ -696,7 +698,7 @@ if (!wantsNet) {
 } else {
   // wait for the server's map seed so every client builds the same arena
   net = window.PB.createNet({
-    url: netUrl, name: options.get('name'), pvp: options.get('pvp'),
+    url: netUrl, name: options.get('name'), mode: options.get('mode'),
   });
   window.net = net;
   el.menuScore.textContent = 'CONNECTING…';

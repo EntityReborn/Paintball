@@ -7,7 +7,16 @@
  */
 'use strict';
 
-const { createHeadlessGame } = require('./engine.js');
+const { createHeadlessGame, load } = require('./engine.js');
+
+/* The engine's shared namespace, loaded now rather than on the first room.
+ *
+ * The rules about who may hurt whom are in src/options.js, and the server reads
+ * that table rather than keeping a second copy of it — a mode that means one
+ * thing in the menu and another on the server is a bug nobody would ever find
+ * by reading either half. Same reason the name sanitiser is shared. */
+load();
+const PB = globalThis.PB;
 
 const SIM_HZ = 30;
 
@@ -101,17 +110,22 @@ class Room {
     return this.seed;
   }
 
-  /* Everyone a hunter may come after: alive, and in the world. Positions are
-   * eye height, which is how a player is kept on both sides.
+  /* Everyone a hunter may come after: alive, in the world, and open to being
+   * come after. Positions are eye height, which is how a player is kept on
+   * both sides.
    *
    * Health travels with them because the hunter weighs it — somebody nearly
-   * finished is worth turning to. Opting out of PvP does not take anyone off
-   * this list: that setting is about other players, and the level's own enemy
-   * is not one. */
+   * finished is worth turning to.
+   *
+   * Peaceful players are not on this list at all, rather than being on it and
+   * immune. A hunter that can see you, walks towards you and empties a magazine
+   * at you has not left you alone in any sense that matters, whatever the
+   * damage numbers say. PVE players are on it: that is what PVE is for. */
   huntable() {
     const out = [];
     for (const p of this.players.values()) {
       if (p.deadUntil || p.goneAt) continue;
+      if (!PB.openToEnemies(p.mode)) continue;
       out.push({
         id: p.id, x: p.x, y: p.y, z: p.z,
         health: p.health, maxHealth: this.game.cfg.playerHealth,
@@ -182,7 +196,11 @@ class Room {
       violations: 0,
       joinedAt: Date.now(),
       score: 0,
-      pvp: true,                 // players may opt out of hurting or being hurt
+      /* Who may hurt them: other players, the level's enemies, or nobody.
+       * `pvp` is a readout of it, kept for clients from before there were
+       * modes — PB.openToPlayers is what derives it. */
+      mode: 'pvp',
+      pvp: true,
       health: 0,                 // set from the world's config just below
       deadUntil: 0,              // waiting to respawn
       shieldUntil: 0,            // no damage until this passes
@@ -318,7 +336,7 @@ class Room {
     return {
       id: p.id, name: p.name, x: p.x, y: p.y, z: p.z, yaw: p.yaw,
       score: p.score, health: p.health, maxHealth: this.game.cfg.playerHealth,
-      pvp: p.pvp,
+      mode: p.mode, pvp: p.pvp,
     };
   }
 
@@ -331,16 +349,67 @@ class Room {
     if (prefs && typeof prefs.name === 'string') {
       player.name = cleanName(prefs.name);
     }
-    if (prefs && typeof prefs.pvp === 'boolean') {
-      player.pvp = prefs.pvp;
+    /* A mode wins over the boolean when both turn up, and the boolean is still
+     * read on its own so that a client from before modes existed keeps working.
+     * PB.modeFrom is what decides, on both sides of the wire. */
+    if (prefs && (typeof prefs.mode === 'string' || typeof prefs.pvp === 'boolean')) {
+      player.mode = PB.modeFrom(prefs);
+      player.pvp = PB.openToPlayers(player.mode);
     }
-    return { t: 'prefs', id: player.id, name: player.name, pvp: player.pvp };
+    return { t: 'prefs', id: player.id, name: player.name,
+             mode: player.mode, pvp: player.pvp };
   }
 
-  // Can `shooter` hurt `victim` at all? Either one opting out is enough.
+  /* Can `shooter` hurt `victim` at all? Either one being out of PvP is enough,
+   * and peaceful is out of everything. */
   canHurt(shooter, victim) {
     if (!shooter || !victim || shooter === victim) return false;
-    return shooter.pvp !== false && victim.pvp !== false;
+    return PB.openToPlayers(shooter.mode) && PB.openToPlayers(victim.mode);
+  }
+
+  /* Somebody has stepped on a corner pad and wants to be somewhere else.
+   *
+   * The client asks rather than moves, because the server owns where everybody
+   * is for the purposes of being shot at, and forty metres in one frame is
+   * exactly what the move-credit check exists to reject. Checked here: they
+   * have to actually be standing on the pad they claim, and not have used one
+   * a moment ago. The move is applied to the server's copy and the instruction
+   * goes back, so both sides agree about where they now are.
+   */
+  warp(id, from, now = Date.now()) {
+    const player = this.players.get(id);
+    if (!player || player.deadUntil || player.goneAt) return null;
+    if (now < (player.warpUntil || 0)) return null;
+
+    const pads = this.game.warps;
+    const pad = pads && pads[from];
+    if (!pad) return null;
+    // where they say they are is where they have to be
+    const feet = player.y - this.game.cfg.eye;
+    if (Math.hypot(pad.x - player.x, pad.z - player.z) > this.game.cfg.warpRadius + 1) {
+      return null;
+    }
+    if (Math.abs(feet) > 1.5) return null;
+
+    const dest = this.game.warpDestination(pad);
+    const inward = Math.hypot(dest.x, dest.z) || 1;
+    const off = this.game.cfg.warpRadius + 0.9;
+    player.x = dest.x - (dest.x / inward) * off;
+    player.z = dest.z - (dest.z / inward) * off;
+    player.y = this.game.cfg.eye;
+    player.vy = 0;
+    player.warpUntil = now + this.game.cfg.warpCooldown * 1000;
+    /* The same grace a respawn gets, and for the same reason: states already
+     * on their way here describe the corner they left from, and refusing those
+     * as impossible moves would be holding a warp against the person who took
+     * it. The credit is spent rather than refilled — a full budget on arrival
+     * would let the next few frames cover the distance the warp just did. */
+    player.moveCredit = 0;
+    player.settleUntil = now + 1000;
+    return {
+      t: 'warp', id: player.id, to: dest.index,
+      x: r3(player.x), y: r3(player.y), z: r3(player.z),
+    };
   }
 
   shielded(player, now = Date.now()) {
@@ -390,6 +459,13 @@ class Room {
     if (victim.deadUntil) return null;
     if (shooter && !this.canHurt(shooter, victim)) {
       return { blocked: 'pvp', killed: false, health: victim.health };
+    }
+    /* No shooter means the level's own enemy fired it, and the mode says
+     * whether that reaches them. Checked here as well as in huntable(), because
+     * a round already in flight when somebody switched to peaceful must not
+     * land — and because this is the one place damage is actually taken off. */
+    if (!shooter && !PB.openToEnemies(victim.mode)) {
+      return { blocked: 'peaceful', killed: false, health: victim.health };
     }
     if (this.shielded(victim, now)) {
       return { blocked: 'shield', killed: false, health: victim.health };
@@ -891,7 +967,7 @@ class Room {
         round(p.x), round(p.y), round(p.z),
         round(p.yaw), p.moving ? 1 : 0, p.grounded ? 1 : 0, round(p.vy),
         p.score, p.health, p.deadUntil ? 1 : 0,
-        this.shielded(p) ? 1 : 0, p.pvp === false ? 0 : 1,
+        this.shielded(p) ? 1 : 0, PB.modeIndex(p.mode),
       ])),
       npcs: g.npcs.map(n => ([
         round(n.root.position.x), round(n.root.position.y), round(n.root.position.z),

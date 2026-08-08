@@ -199,28 +199,64 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
           afterReset.field === 'player',
           `sensitivity ${afterReset.sensitivity}, name ${afterReset.name}`);
 
-    /* ------------------------------------------- opting out of the fight */
+    /* --------------------------------------- how much of the fight to be in */
     await page.click('#btn-options');
     await sleep(150);
-    const pvpDefault = await page.evaluate(() => ({
-      checked: document.getElementById('opt-pvp').checked,
-      stored: options.get('pvp'),
+    const modeDefault = await page.evaluate(() => ({
+      shown: document.getElementById('opt-mode').value,
+      stored: options.get('mode'),
+      choices: [...document.getElementById('opt-mode').options].map(o => o.value).join(','),
     }));
-    check('the fight switch is on to start with',
-          pvpDefault.checked === true && pvpDefault.stored === true,
-          `checkbox ${pvpDefault.checked}, stored ${pvpDefault.stored}`);
+    check('the fight starts as pvp, with three to choose from',
+          modeDefault.shown === 'pvp' && modeDefault.stored === 'pvp' &&
+          modeDefault.choices === 'pvp,pve,peaceful',
+          `showing ${modeDefault.shown}, stored ${modeDefault.stored}, ` +
+          `choices ${modeDefault.choices}`);
 
-    await page.click('#opt-pvp');
-    await sleep(200);
-    const pvpOff = await page.evaluate(() => ({
-      stored: options.get('pvp'),
-      written: JSON.parse(localStorage.getItem('paintball.options') || '{}').pvp,
+    // the select does not respond to a click the way a checkbox does
+    const pickMode = async (mode) => {
+      await page.select('#opt-mode', mode);
+      await sleep(200);
+      return page.evaluate(() => ({
+        stored: options.get('mode'),
+        pvp: options.get('pvp'),
+        written: JSON.parse(localStorage.getItem('paintball.options') || '{}').mode,
+        game: window.game && window.game.state.mode,
+        note: (document.getElementById('mode-note') || {}).textContent,
+      }));
+    };
+
+    const pve = await pickMode('pve');
+    check('choosing PVE is remembered and reaches the game',
+          pve.stored === 'pve' && pve.written === 'pve' && pve.game === 'pve',
+          `stored ${pve.stored}, written ${pve.written}, game ${pve.game}`);
+    check('and the old boolean follows the mode rather than leading it',
+          pve.pvp === false, `pvp reads ${pve.pvp}`);
+
+    const peaceful = await pickMode('peaceful');
+    check('choosing PEACEFUL reaches the game too',
+          peaceful.stored === 'peaceful' && peaceful.game === 'peaceful',
+          `stored ${peaceful.stored}, game ${peaceful.game}`);
+    check('and the panel says what the mode does',
+          /nothing/i.test(peaceful.note || ''), `note "${peaceful.note}"`);
+
+    /* The bug the whole mode exists for: a hunter came after somebody who had
+     * asked to be left alone, because opting out was only ever about players. */
+    const hunted = await page.evaluate(() => {
+      const was = window.game.hunterTargets();
+      window.game.setActive(true);
+      return { peaceful: (window.game.hunterTargets() || []).length };
+    });
+    check('a hunter has nobody to come after when the player is peaceful',
+          hunted.peaceful === 0, `${hunted.peaceful} target(s)`);
+
+    await pickMode('pvp');
+    const back = await page.evaluate(() => ({
+      hunted: (window.game.hunterTargets() || []).length,
     }));
-    check('turning it off is remembered',
-          pvpOff.stored === false && pvpOff.written === false,
-          `stored ${pvpOff.stored}, written ${pvpOff.written}`);
-    await page.click('#opt-pvp');
-    await sleep(150);
+    check('and comes back when the player rejoins the fight',
+          back.hunted === 1, `${back.hunted} target(s)`);
+
     await page.click('#close-options');
     await sleep(150);
 

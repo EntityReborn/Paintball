@@ -128,7 +128,7 @@ wss.on('connection', socket => {
       const resumed = msg.token ? room.resume(msg.token, msg.name) : null;
       if (resumed) {
         player = resumed;
-        if (typeof msg.pvp === 'boolean') player.pvp = msg.pvp;
+        room.setPrefs(player.id, msg);
         /* Whatever socket was on this id is gone, but say so rather than
          * assume: two sockets on one seat would both be sent everything and
          * only one of them would ever be read. */
@@ -143,7 +143,8 @@ wss.on('connection', socket => {
 
       const matchesBefore = room.matches;
       player = room.join(msg.name);
-      if (typeof msg.pvp === 'boolean') player.pvp = msg.pvp;
+      // whichever of mode and pvp the client sent; setPrefs knows both
+      room.setPrefs(player.id, msg);
       if (room.matches !== matchesBefore) {
         log(`new match — map seed ${room.seed}`);
       }
@@ -179,10 +180,10 @@ wss.on('connection', socket => {
      * else — a tag over a head, a translucent body — so both go out at once
      * rather than waiting for whoever it is to reconnect. */
     if (msg.t === 'prefs') {
-      const was = { name: player.name, pvp: player.pvp };
+      const was = { name: player.name, mode: player.mode };
       const out = room.setPrefs(player.id, msg);
       if (!out) return;
-      if (out.name !== was.name || out.pvp !== was.pvp) {
+      if (out.name !== was.name || out.mode !== was.mode) {
         broadcast(out);
         if (out.name !== was.name) log(`player ${player.id} is now ${out.name}`);
       }
@@ -236,6 +237,16 @@ wss.on('connection', socket => {
       log(`${out.note.name} added ${out.made} ${out.what}(s)`);
       broadcast(out.note);
       broadcast(out.level);
+      return;
+    }
+
+    /* A corner pad. Everyone is told, not just the one who stepped on it:
+     * somebody vanishing from one corner and appearing in the other is a
+     * forty-metre jump, and a client that has not been told treats it as one
+     * of the things it is supposed to smooth over. */
+    if (msg.t === 'warp') {
+      const out = room.warp(player.id, msg.from);
+      if (out) broadcast(out);
       return;
     }
 

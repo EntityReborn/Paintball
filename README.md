@@ -73,6 +73,52 @@ makes the way in a decision without ever locking anyone out; the gaps between
 its panels are too narrow to walk through and wide enough for a round, so
 sheltering behind it is harder rather than safe. `house: false` leaves it out.
 
+**A warp pad in each of the four corners**, throwing you to the corner
+diagonally opposite. The corners are the dead ground of an arena this size — a
+long walk from everything with nothing to go there for — and a way straight
+across the map gives them a reason to exist and gives anybody being chased
+somewhere to run to. Diagonal rather than clockwise because the distance is the
+whole point: it is the one move that cannot be walked in the time it takes.
+Stepping off and back on does nothing for three seconds, so a pad is never
+something you cannot get away from. Nothing else is ever placed on one.
+`warps: false` leaves them out.
+
+Online the client asks and the server moves you. It owns where everybody is for
+the purposes of being shot at, and forty metres in a frame is exactly what the
+plausibility check exists to reject, so a warp that the client simply took would
+be snapped straight back. The server checks you are actually standing on the pad
+you claim before it agrees.
+
+**Secret rooms**, three of them, out in the quiet parts of the map. Each is a
+crate with five solid faces and one you can walk straight through, with one of
+the two good perks waiting inside.
+
+The face that opens is an ordinary wall in every way that can be seen: same
+mesh, same material, same size, same shadow, and a round stops on it exactly as
+it would on any of the others. There is no angle and no shot that gives it
+away — you find one by walking into walls. It does stop NPCs, which is not
+physics but is the point: a wanderer strolling out of a solid crate would tell
+everybody where the secret was, and one strolling in would get stuck. So there
+are two collider lists, `colliders` and `npcColliders`, and the difference
+between them is exactly these three faces.
+
+The ordinary crates were widened to match. A hidden room has to be big enough
+to stand inside, so it is around four across; if every honest crate were three
+at most, the secret would be the only large cube in the arena and you could find
+all three from the spawn without moving.
+
+What is inside does not rot the way a perk in the open does, and it restocks
+forty seconds after it is taken rather than forty seconds after it appeared —
+otherwise one that sat untouched for an hour comes back the instant it is
+collected, which is not a restock. Hidden perks are left out of the limit on how
+many may be out at once, or three sealed rooms would hold every perk the arena
+is allowed and the ordinary spawner would never run again.
+
+**Weak perks drop from what you shoot** — about one body or target in seven
+leaves one, and it waits twelve seconds. Only the weak tiers: a body dropping a
+shield would make the arena's own spawns pointless, and the good ones are behind
+the secret walls for a reason.
+
 A ramp is a true triangular prism to look at and a flight of very short steps
 to walk on, each one inscribed *under* the slope — never above it, because a
 collider poking out of a ramp stops a player in mid-air on nothing. The rise is
@@ -89,13 +135,20 @@ if at all — the level cannot be cleared and nothing on screen explains why.
 **Perks** appear from time to time, each wearing its name so you know what you
 are running for:
 
-| Perk | Effect | Lasts |
-| --- | --- | --- |
-| RAPID FIRE | twice the rate of fire | 15s |
-| SPRINTER | around half again as fast | 15s |
-| BIG CLIP | double the magazine | 15s |
-| DOUBLE JUMP | one extra jump in the air | 15s |
-| SHIELD | nothing can hurt you | 6s |
+| Perk | Effect | Lasts | Tier |
+| --- | --- | --- | --- |
+| RAPID FIRE | twice the rate of fire | 15s | good |
+| SHIELD | nothing can hurt you | 6s | good |
+| SPRINTER | around half again as fast | 15s | weak |
+| BIG CLIP | double the magazine | 15s | weak |
+| DOUBLE JUMP | one extra jump in the air | 15s | weak |
+
+The tier decides where a perk can be found. The good ones change a fight on
+their own — nothing can hurt you, or you fire twice as fast — so they are worth
+going somewhere for, and they are what is hidden behind the walls that are not
+walls. The weak ones are worth picking up and not worth crossing the arena for,
+so they are what falls out of whatever you have just shot. Either can still turn
+up on the arena's own schedule.
 
 Walk over one to collect it; what you are holding is listed above the ammo
 readout with the time left. The shield is deliberately the short one — there is
@@ -155,9 +208,12 @@ shoot is not one.
 
 Who its rounds hit is settled by whoever owns the players: the room, online,
 testing them against the same box a player's round is tested against. Nobody is
-credited with those kills and nobody pays for them, and opting out of PvP does
-not take you off its list — that setting is an agreement between players, and
-the level's own enemy is not one.
+credited with those kills and nobody pays for them.
+
+**A peaceful player is not on its list at all** — see below. Being shot at by
+something that cannot hurt you is still being shot at, so the mode takes you
+off the list rather than making the rounds pass through you. A PVE player stays
+on it: that is what PVE is for.
 
 | | |
 | --- | --- |
@@ -455,10 +511,38 @@ The pause screen has two panels. Both open without grabbing the pointer, so
 reaching for a slider does not drop you into the game.
 
 **Options** — player name, mouse sensitivity, inverted look, master and gunfire
-volume, and whether to show names over other players. Everything is kept in
-local storage under `paintball.options` and applied the moment it changes.
-Values are validated on the way in: storage is editable by hand, and a
-sensitivity of zero or a NaN volume would leave the game unplayable.
+volume, whether to show names over other players, and how much of the fight to
+be in. Everything is kept in local storage under `paintball.options` and applied
+the moment it changes. Values are validated on the way in: storage is editable
+by hand, and a sensitivity of zero or a NaN volume would leave the game
+unplayable.
+
+### Who can hurt you
+
+Three modes, because there are two separate questions and the old checkbox only
+answered one of them.
+
+| Mode | Other players | The level's enemies |
+| --- | --- | --- |
+| **PVP** | yes | yes |
+| **PVE** | no | yes |
+| **PEACEFUL** | no | no |
+
+It is symmetric: anyone who cannot hurt you cannot be hurt by you either, and
+you are drawn see-through to them — fainter still if you are peaceful, so the
+two can be told apart without reading anything. Nothing here stops you shooting.
+What you may do to targets, NPCs and hunters is the same in all three; this is
+only about what may be done to you.
+
+The old boolean used to be the whole setting, and it was only ever about other
+players — so a hunter came after somebody who had asked to be left alone, which
+is defensible right until you meet them. `PB.MODES` in `src/options.js` is the
+one table both sides read, and settings saved before modes existed migrate:
+`pvp: false` meant exactly PVE. The boolean is still written and still sent, as
+a readout of the mode rather than a second source of truth, so a client or a
+server from before this understands the other.
+
+The setting takes effect straight away for the whole room.
 
 **Match** — the controls. Add targets, NPCs, hunters or perks to the level
 that is running, one to ten at a press; they arrive under the rules a level's
@@ -490,11 +574,12 @@ index.html      markup only: HUD, menu, script tags
 src/main.js     page wiring — builds the game, drives the HUD and pointer lock
 src/style.css   HUD and menu styling
 src/game.js     createGame(): composes the modules, owns state, input and the loop
-src/world.js    arena: floor, walls, cover, ramps, arches, rooms, the house
+src/world.js    arena: floor, walls, cover, ramps, arches, rooms, the house,
+                secret rooms and the corner warp pads
 src/targets.js  target spawning, drifting, breaking
 src/npcs.js     low-poly figures: build, wander, and the hunter that comes for you
 src/perks.js    pickups and the rules they bend while they last
-src/options.js  settings, validated and kept in local storage
+src/options.js  settings and the PVP/PVE/PEACEFUL table, read by both sides
 src/debug.js    the hitbox and collider overlays
 src/ui.js       the pause-screen panels
 src/weapon.js   the viewmodel and its reload animation
@@ -653,6 +738,41 @@ re-entering the window rather than a real flick.
   of the far side. Its bottom face also lay in the same plane as the floor and
   flickered against it from across the arena; there is nothing under a ramp to
   see, so it does not have one now.
+- **Ramps were mirrored, two rotations out of four.** The mesh sloped one way
+  and the collider steps climbed the other, so a ramp was walkable from the
+  wrong side and a wall from the right one. The steps were placed by working out
+  where each one lands for each of the four rotations, and two of those four
+  cases had the sign wrong and used the width where the depth belonged. They are
+  laid out in the shape's own space and turned with it now.
+
+  What made it survive so long is that **every test compared the steps against
+  the bounding box, and the bounding box is symmetric** — a mirrored ramp fits
+  inside it exactly as well as a correct one. The test that catches it drops a
+  ray on the middle of each step and asks the mesh where its surface actually
+  is, for all four quarter turns; on a mirrored ramp half the steps stand in the
+  air above nothing, the worst by most of the ramp's height. If a shape and its
+  colliders are generated by separate arithmetic, only asking the shape can tell
+  you they agree.
+- **Grey smears along every join.** Shadow acne. The shadow map has to cover the
+  whole arena, so its resolution is a distance: 1024 texels over the old sixty
+  units was about seven centimetres each, and the same map over eighty was nine
+  and a half — enough that a flat face compares its own depth against a texel's
+  worth of somewhere else and shadows itself. Enlarging the arena is what made it
+  visible. The map scales with the arena now, and the bias that actually suits it
+  is `normalBias`, which offsets along the surface normal: a flat depth bias big
+  enough to stop acne on glancing faces also lifts shadows off the feet of what
+  casts them.
+- **Three sealed rooms ate the entire perk budget.** The hidden perks went on
+  the same list as the ones lying about, and the spawner stops once
+  `perkMax` are out — so with three secrets and a limit of three, the arena
+  never spawned another perk. Hidden ones are excluded from that count. It
+  surfaced as two unrelated-looking test failures, which is what a shared budget
+  does.
+- **A test turned perks off and a failure left them off.** One test sets
+  `cfg.perks = false` and restores it on the last line, so when an assertion in
+  the middle threw, every test after it ran in a game with no perks. Worth
+  knowing when a single change makes several distant tests fail: the second
+  failure may only be the first one's litter.
 - **NPCs walked through cover.** They never had collision at all: they steered
   with a raycast on a think tick a few times a second, which turns them away
   from most things most of the time, and in between they walked straight

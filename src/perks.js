@@ -12,16 +12,27 @@ var PB = global.PB = global.PB || {};
 /* Each kind says how it changes the rules. The engine asks through
  * perkFactor()/perkFlag() rather than reading these directly, so a perk can
  * be added here without touching movement or shooting. */
+/* `tier` says what a perk is worth having, which decides where it can be found.
+ *
+ * The good ones change a fight on their own: nothing can hurt you, or you fire
+ * twice as fast. Those are worth going somewhere for, so they are what is
+ * hidden behind the walls that are not walls. The weak ones are worth picking
+ * up and not worth crossing the arena for, so they are what falls out of
+ * whatever you have just shot. */
 PB.PERK_KINDS = [
-  { kind: 'fireRate', label: 'RAPID FIRE', color: 0xffb03a, fireRate: 0.5 },
-  { kind: 'speed', label: 'SPRINTER', color: 0x6ee7ff, speed: 1.45 },
-  { kind: 'clip', label: 'BIG CLIP', color: 0xa78bfa, clip: 2 },
-  { kind: 'doubleJump', label: 'DOUBLE JUMP', color: 0x8ef2a0, airJumps: 1 },
+  { kind: 'fireRate', label: 'RAPID FIRE', color: 0xffb03a, fireRate: 0.5, tier: 'good' },
+  { kind: 'speed', label: 'SPRINTER', color: 0x6ee7ff, speed: 1.45, tier: 'weak' },
+  { kind: 'clip', label: 'BIG CLIP', color: 0xa78bfa, clip: 2, tier: 'weak' },
+  { kind: 'doubleJump', label: 'DOUBLE JUMP', color: 0x8ef2a0, airJumps: 1, tier: 'weak' },
   /* Shielded is shielded — there is no partial version of not being hurt, so
    * this one is deliberately short. Fifteen seconds of it, the length of every
    * other perk, is most of a firefight. */
-  { kind: 'shield', label: 'SHIELD', color: 0x8ef2ff, shield: 1, duration: 6 },
+  { kind: 'shield', label: 'SHIELD', color: 0x8ef2ff, shield: 1, duration: 6, tier: 'good' },
 ];
+
+PB.perksOfTier = function (tier) {
+  return PB.PERK_KINDS.filter(function (d) { return d.tier === tier; });
+};
 
 PB.createPerks = function (ctx) {
   var THREE = global.THREE;
@@ -105,6 +116,9 @@ PB.createPerks = function (ctx) {
       }
       if (clash) continue;
       for (var p = 0; p < perks.length; p++) {
+        // a hidden one is inside a sealed room; standing six units from the
+        // outside of it is not standing near it in any sense that matters
+        if (perks[p].hidden) continue;
         if (Math.hypot(perks[p].x - x, perks[p].z - z) < 6) { clash = true; break; }
       }
       if (clash) continue;
@@ -113,10 +127,15 @@ PB.createPerks = function (ctx) {
     return null;
   }
 
-  // Put one out. `spec` lets the server replay an exact perk onto a client.
+  /* Put one out. `spec` lets the server replay an exact perk onto a client, and
+   * `spec.tier` asks for one of a kind rather than one in particular — what
+   * falls out of a body is any of the weak ones, and what waits behind a
+   * secret wall is any of the good ones. */
   function spawn(spec) {
+    var pool = spec && spec.tier ? PB.perksOfTier(spec.tier) : PB.PERK_KINDS;
+    if (!pool.length) pool = PB.PERK_KINDS;
     var def = spec && spec.kind ? kindByName(spec.kind)
-      : PB.PERK_KINDS[Math.floor(rand() * PB.PERK_KINDS.length)];
+      : pool[Math.floor(rand() * pool.length)];
     if (!def) return null;
 
     var at = spec && typeof spec.x === 'number'
@@ -128,6 +147,12 @@ PB.createPerks = function (ctx) {
     var perk = {
       id: spec && spec.id ? spec.id : nextId++,
       kind: def.kind, def: def,
+      /* Hidden ones are the arena's furniture rather than its schedule: one
+       * waits inside each secret room until somebody finds it. They are left
+       * out of the count below, or three sealed rooms would hold every perk
+       * the arena is allowed to have out at once and the ordinary spawner
+       * would never run again. */
+      hidden: !!(spec && spec.hidden),
       x: at.x, y: y, z: at.z,
       life: spec && spec.life ? spec.life : cfg.perkLife,
       phase: rand() * 6.28,
@@ -137,6 +162,14 @@ PB.createPerks = function (ctx) {
     perks.push(perk);
     emit('perkSpawn', perk);
     return perk;
+  }
+
+  // How many are actually lying around to be walked over, which is what the
+  // spawn limit is about — see `hidden` above.
+  function openCount() {
+    var n = 0;
+    for (var i = 0; i < perks.length; i++) if (!perks[i].hidden) n++;
+    return n;
   }
 
   function remove(perk) {
@@ -230,7 +263,7 @@ PB.createPerks = function (ctx) {
     sinceSpawn += dt;
     if (sinceSpawn >= cfg.perkEvery) {
       sinceSpawn = 0;
-      if (perks.length < cfg.perkMax) spawn();
+      if (openCount() < cfg.perkMax) spawn();
     }
 
     for (var i = perks.length - 1; i >= 0; i--) {
@@ -261,7 +294,7 @@ PB.createPerks = function (ctx) {
   function describe() {
     return perks.map(function (p) {
       return [p.id, p.kind, +p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2),
-              +p.life.toFixed(1)];
+              +p.life.toFixed(1), p.hidden ? 1 : 0];
     });
   }
 
@@ -279,7 +312,7 @@ PB.createPerks = function (ctx) {
       var have = byId(entry[0]);
       if (have) { have.life = entry[5]; continue; }
       spawn({ id: entry[0], kind: entry[1], x: entry[2], y: entry[3], z: entry[4],
-              life: entry[5] });
+              life: entry[5], hidden: !!entry[6] });
     }
   }
 
@@ -291,6 +324,7 @@ PB.createPerks = function (ctx) {
     perks: perks, kinds: PB.PERK_KINDS, kindByName: kindByName,
     spawn: spawn, remove: remove, byId: byId, clear: clear,
     grant: grant, tickHolder: tickHolder, held: held, durationOf: durationOf,
+    openCount: openCount,
     factor: factor, bonus: bonus, pickUpAt: pickUpAt,
     update: update, describe: describe, applyList: applyList,
   };

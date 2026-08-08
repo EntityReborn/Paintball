@@ -12,6 +12,63 @@ var PB = global.PB = global.PB || {};
 
 var KEY = 'paintball.options';
 
+/* How much of the fight a player is in.
+ *
+ * There are two separate questions — may other players hurt me, and may the
+ * level's own enemies — and the old boolean only answered the first. A hunter
+ * came after somebody who had opted out of PvP because opting out of PvP was
+ * never about hunters, which is defensible right up until you meet somebody
+ * who wanted to be left alone and got shot anyway.
+ *
+ * So: two answers, three sensible combinations, and one word for each.
+ * Peaceful takes you off the hunters' list entirely rather than making their
+ * rounds pass through you — being shot at by something that cannot hurt you is
+ * still being shot at, and the point of the mode is not to be.
+ *
+ * Nothing here stops anybody shooting. What you may do to targets, NPCs and
+ * hunters is the same in all three; this is only about what may be done to you,
+ * and it is symmetric — a player nobody can hurt cannot hurt anybody either.
+ */
+PB.MODES = [
+  { mode: 'pvp', label: 'PVP', hint: 'players and enemies can hurt you',
+    players: true, enemies: true },
+  { mode: 'pve', label: 'PVE', hint: 'only the enemies can hurt you',
+    players: false, enemies: true },
+  { mode: 'peaceful', label: 'PEACEFUL', hint: 'nothing can hurt you',
+    players: false, enemies: false },
+];
+
+PB.modeOf = function (v) {
+  for (var i = 0; i < PB.MODES.length; i++) {
+    if (PB.MODES[i].mode === v) return PB.MODES[i];
+  }
+  return PB.MODES[0];
+};
+
+/* On the wire a mode is its position in that table, because it rides in the
+ * snapshot next to a dozen rounded numbers and a string there would be the
+ * largest field in it. Unknown indices read as PVP, which is the mode that
+ * assumes the least about a client we do not understand. */
+PB.modeIndex = function (v) { return PB.MODES.indexOf(PB.modeOf(v)); };
+PB.modeAt = function (i) { return (PB.MODES[i] || PB.MODES[0]).mode; };
+
+// May other players' rounds count against this one?
+PB.openToPlayers = function (v) { return PB.modeOf(v).players; };
+// May the level's own enemies come after them at all?
+PB.openToEnemies = function (v) { return PB.modeOf(v).enemies; };
+
+/* What a record means, whichever of the two it carries.
+ *
+ * Older clients send the boolean and nothing else, and older saved settings
+ * hold one; both have to keep working. A missing mode with pvp explicitly off
+ * means the player asked not to be shot by people, which is PVE. */
+PB.modeFrom = function (rec) {
+  if (!rec) return 'pvp';
+  if (typeof rec.mode === 'string') return PB.modeOf(rec.mode).mode;
+  if (rec.pvp === false) return 'pve';
+  return 'pvp';
+};
+
 PB.OPTION_SPEC = {
   name: { type: 'string', def: 'player', max: 16 },
   sensitivity: { type: 'number', def: 1.0, min: 0.1, max: 5 },
@@ -19,6 +76,10 @@ PB.OPTION_SPEC = {
   gunVolume: { type: 'number', def: 0.8, min: 0, max: 1 },
   invertY: { type: 'boolean', def: false },
   showNames: { type: 'boolean', def: true },
+  mode: { type: 'enum', def: 'pvp', values: ['pvp', 'pve', 'peaceful'] },
+  /* Kept so that settings saved before there were modes still mean something,
+   * and so that anything still asking the old question gets the right answer.
+   * cleanOptions derives it from the mode — it is never the source of truth. */
   pvp: { type: 'boolean', def: true },
   hitboxes: { type: 'boolean', def: false },
   colliders: { type: 'boolean', def: false },
@@ -43,6 +104,9 @@ PB.cleanOption = function (key, value) {
     var n = typeof value === 'string' ? parseFloat(value) : value;
     if (typeof n !== 'number' || !isFinite(n)) return spec.def;
     return Math.min(spec.max, Math.max(spec.min, n));
+  }
+  if (spec.type === 'enum') {
+    return spec.values.indexOf(value) === -1 ? spec.def : value;
   }
   if (spec.type === 'boolean') {
     if (typeof value === 'boolean') return value;
@@ -70,6 +134,11 @@ PB.cleanOptions = function (raw) {
       out[k] = PB.cleanOption(k, raw[k]);
     }
   }
+  /* Settings saved before there were modes carry the boolean and no mode, so
+   * the mode comes from it. Afterwards the boolean is only ever a readout of
+   * the mode, so nothing can end up saying two different things at once. */
+  out.mode = PB.modeFrom(Object.prototype.hasOwnProperty.call(raw, 'mode') ? out : raw);
+  out.pvp = PB.openToPlayers(out.mode);
   return out;
 };
 
@@ -125,6 +194,8 @@ PB.createOptions = function (storage) {
     chosen[key] = true;
     if (values[key] === cleaned && !first) return false;
     values[key] = cleaned;
+    // the boolean is a readout of the mode and never set on its own
+    if (key === 'mode') values.pvp = PB.openToPlayers(cleaned);
     save();
     for (var i = 0; i < listeners.length; i++) listeners[i](key, cleaned, all());
     return true;

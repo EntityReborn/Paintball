@@ -445,10 +445,15 @@ describe('World', function () {
       rampSteps += r.steps.length;
     });
     var ramps = g.obstacleMeshes.filter(function (m) { return m.name === 'wedge'; }).length;
-    assert.equal(g.colliders.length,
-                 4 + (g.obstacleMeshes.length - ramps) + rampSteps +
-                 g.movers.length + g.balcony.parts.length,
-                 'collider count');
+    /* Minus the ways into the secret rooms. Those are obstacle meshes like any
+     * other — drawn, shot at, and stopping an NPC — and are deliberately the
+     * one kind of solid that is not on the player's list. */
+    var ways = g.secrets.length;
+    var expected = 4 + (g.obstacleMeshes.length - ramps) + rampSteps +
+                   g.movers.length + g.balcony.parts.length;
+    assert.equal(g.colliders.length, expected - ways, 'collider count');
+    // and the NPCs' list is the same thing with those ways back in it
+    assert.equal(g.npcColliders.length, expected, 'npc collider count');
   });
 
   it('adds every solid to the scene graph', function () {
@@ -1982,7 +1987,10 @@ describe('Perks', function () {
     step(0.2);
     assert.ok(got, 'walking over it did nothing');
     assert.equal(got.kind, 'speed');
-    assert.equal(g.perkSystem.perks.length, 0, 'it was left on the ground');
+    /* What is lying around to be walked over, not what exists: the secret rooms
+     * restock themselves as soon as the level starts, and those are behind
+     * walls rather than on the ground. */
+    assert.equal(g.perkSystem.openCount(), 0, 'it was left on the ground');
     clearPerks();
   });
 
@@ -3803,6 +3811,70 @@ describe('Built structures', function () {
     assert.equal(flat, 0, 'the ramp has a face lying in the floor');
   });
 
+  it('slopes every ramp the same way its steps climb', function () {
+    /* The bug this exists for: the mesh sloped one way and the collider steps
+     * the other, on two of the four quarter turns. Both sat inside the same
+     * bounding box, which is symmetric, so every test that compared the steps
+     * against the box passed while a ramp was climbable from the wrong side
+     * and a wall from the right one.
+     *
+     * The only test that can tell is one that asks the mesh itself. Drop a ray
+     * on the middle of each step and see where the surface is: on a ramp that
+     * agrees with itself the surface is at or just above the step you would be
+     * standing on. On a mirrored one, half the steps stand in the air above
+     * nothing, the worst of them by most of the ramp's height.
+     */
+    var ramps = g.structures.filter(function (s) { return s.kind === 'wedge'; });
+    assert.greater(ramps.length, 0, 'no ramps to check');
+    var ray = new THREE.Raycaster();
+    var down = new THREE.Vector3(0, -1, 0);
+    var checked = 0;
+
+    ramps.forEach(function (r, ri) {
+      var mesh = r.parts[0];
+      mesh.updateMatrixWorld(true);
+      var c = new THREE.Vector3();
+      r.steps.forEach(function (step, si) {
+        step.getCenter(c);
+        var top = step.max.y;
+        ray.set(new THREE.Vector3(c.x, top + 6, c.z), down);
+        var hit = ray.intersectObject(mesh, false);
+        assert.greater(hit.length, 0,
+          'ramp ' + ri + ' step ' + si + ': no ramp above the step at all');
+        assert.greater(hit[0].point.y, top - 0.16,
+          'ramp ' + ri + ' at ' + r.turns + ' quarter turns, step ' + si +
+          ': the step tops out at ' + top.toFixed(2) + ' and the slope above it ' +
+          'is at ' + hit[0].point.y.toFixed(2) + ' — the two are mirrored');
+        checked++;
+      });
+    });
+    assert.greater(checked, 12, 'too few steps checked to mean anything');
+  });
+
+  it('builds a ramp at every quarter turn that agrees with itself', function () {
+    /* The scattered ones are whatever the seed gave us, which on a bad day is
+     * four ramps all facing the same way — and the bug was in two rotations
+     * out of four. This asks for one of each. */
+    var ray = new THREE.Raycaster();
+    var down = new THREE.Vector3(0, -1, 0);
+    var c = new THREE.Vector3();
+    [0, 1, 2, 3].forEach(function (turns) {
+      var r = g.addWedge(-14 + turns * 9, 34, 4, 2, 5, turns);
+      r.parts[0].updateMatrixWorld(true);
+      var worst = 0;
+      r.steps.forEach(function (step) {
+        step.getCenter(c);
+        ray.set(new THREE.Vector3(c.x, step.max.y + 6, c.z), down);
+        var hit = ray.intersectObject(r.parts[0], false);
+        var gap = hit.length ? step.max.y - hit[0].point.y : 99;
+        if (gap > worst) worst = gap;
+      });
+      assert.less(worst, 0.16,
+        'the ramp at ' + turns + ' quarter turns is mirrored: its steps stand ' +
+        worst.toFixed(2) + ' above its own slope');
+    });
+  });
+
   it('sizes the hunter to the arena it is in', function () {
     /* Not a fixed number of units: the same figure would see most of a small
      * map and a third of a large one. */
@@ -3966,6 +4038,270 @@ describe('Built structures', function () {
       }
     }
     assert.less(worst, 0.05, 'an NPC was ' + worst.toFixed(2) + 'u inside cover');
+  });
+});
+
+describe('Secret rooms', function () {
+  it('puts hidden rooms in the arena, spread out', function () {
+    assert.greater(g.secrets.length, 0, 'no secret rooms');
+    for (var i = 0; i < g.secrets.length; i++) {
+      for (var j = i + 1; j < g.secrets.length; j++) {
+        var d = Math.hypot(g.secrets[i].x - g.secrets[j].x,
+                           g.secrets[i].z - g.secrets[j].z);
+        assert.greater(d, g.cfg.arena * 0.3,
+          'two secrets within ' + d.toFixed(1) + ' of each other');
+      }
+    }
+  });
+
+  it('lets a player through one wall and nothing else through any of them', function () {
+    /* The whole feature in one test. Every face of the room is drawn, is shot
+     * at and stops an NPC; exactly one of them lets a player past. If the way
+     * in ever appeared on the player's collider list the room would be sealed,
+     * and if it ever came off the NPC list a wanderer would walk out of one
+     * and give the room away. */
+    var s = g.secrets[0];
+    assert.ok(s, 'no secret room to test');
+
+    var walls = s.parts.filter(function (p) { return p.name === 'secretWall'; });
+    assert.equal(walls.length, 4, 'a secret room should have four faces');
+
+    var inColliders = 0, inNpc = 0, inSolid = 0;
+    walls.forEach(function (wall) {
+      var box = new THREE.Box3().setFromObject(wall);
+      var near = function (list) {
+        return list.some(function (b) {
+          return b.min.distanceTo(box.min) < 0.01 && b.max.distanceTo(box.max) < 0.01;
+        });
+      };
+      if (near(g.colliders)) inColliders++;
+      if (near(g.npcColliders)) inNpc++;
+      if (g.solidMeshes.indexOf(wall) !== -1) inSolid++;
+    });
+
+    assert.equal(inColliders, 3, 'a player should be stopped by three of the four');
+    assert.equal(inNpc, 4, 'an NPC should be stopped by all four');
+    assert.equal(inSolid, 4, 'every face should stop a round, the way in included');
+  });
+
+  it('walks a player in through the wall that is not one', function () {
+    var s = g.secrets[0];
+    // the middle of the face that opens, and the way in through it
+    var side = s.door;
+    var alongX = side % 2 === 0;
+    var sign = side < 2 ? -1 : 1;
+    var dx = alongX ? 0 : sign;
+    var dz = alongX ? sign : 0;
+
+    g.setActive(true);
+    Object.keys(g.keys).forEach(function (k) { g.keys[k] = false; });
+    g.teleport(s.x + dx * (s.size / 2 + 2.2), g.cfg.eye, s.z + dz * (s.size / 2 + 2.2));
+    g.yawObj.rotation.y = Math.atan2(dx, dz);          // facing the room
+    g.setKey('KeyW', true);
+    for (var t = 0; t < 3; t += 1 / 60) g.update(1 / 60);
+    g.setKey('KeyW', false);
+
+    var inside = Math.abs(g.state.pos.x - s.x) < s.size / 2 &&
+                 Math.abs(g.state.pos.z - s.z) < s.size / 2;
+    assert.ok(inside, 'could not walk through the way in: ended at ' +
+      g.state.pos.x.toFixed(1) + ',' + g.state.pos.z.toFixed(1) +
+      ' with the room at ' + s.x.toFixed(1) + ',' + s.z.toFixed(1));
+  });
+
+  it('stops a player at the three walls that are walls', function () {
+    var s = g.secrets[0];
+    var blocked = 0;
+    for (var side = 0; side < 4; side++) {
+      if (side === s.door) continue;
+      var alongX = side % 2 === 0;
+      var sign = side < 2 ? -1 : 1;
+      var dx = alongX ? 0 : sign;
+      var dz = alongX ? sign : 0;
+
+      g.setActive(true);
+      Object.keys(g.keys).forEach(function (k) { g.keys[k] = false; });
+      g.teleport(s.x + dx * (s.size / 2 + 2.2), g.cfg.eye, s.z + dz * (s.size / 2 + 2.2));
+      g.yawObj.rotation.y = Math.atan2(dx, dz);
+      g.setKey('KeyW', true);
+      for (var t = 0; t < 3; t += 1 / 60) g.update(1 / 60);
+      g.setKey('KeyW', false);
+
+      var inside = Math.abs(g.state.pos.x - s.x) < s.size / 2 - 0.3 &&
+                   Math.abs(g.state.pos.z - s.z) < s.size / 2 - 0.3;
+      if (!inside) blocked++;
+    }
+    assert.equal(blocked, 3, 'a face that should be solid let a player through');
+  });
+
+  it('hides a good perk in each room and nothing weaker', function () {
+    g.setActive(true);
+    for (var t = 0; t < 2; t += 1 / 60) g.update(1 / 60);
+    var good = PB.perksOfTier('good').map(function (d) { return d.kind; });
+    g.secrets.forEach(function (s) {
+      var found = g.perkSystem.perks.filter(function (p) {
+        return Math.hypot(p.x - s.x, p.z - s.z) < 1;
+      });
+      assert.greater(found.length, 0, 'nothing hidden in the room at ' +
+        s.x.toFixed(0) + ',' + s.z.toFixed(0));
+      assert.ok(good.indexOf(found[0].kind) !== -1,
+        'the room holds a ' + found[0].kind + ', which is not worth finding');
+    });
+  });
+
+  it('never drops an ordinary perk inside a room nobody can shoot into', function () {
+    var bad = [];
+    for (var i = 0; i < 150; i++) {
+      var p = g.perkSystem.spawn({});
+      if (!p) continue;
+      var inSecret = g.secrets.some(function (s) {
+        return Math.abs(p.x - s.x) < s.size / 2 && Math.abs(p.z - s.z) < s.size / 2;
+      });
+      if (inSecret) bad.push(p.x.toFixed(1) + ',' + p.z.toFixed(1));
+      g.perkSystem.remove(p);
+    }
+    assert.equal(bad.length, 0, 'perks spawned inside secret rooms: ' + bad.join(' '));
+  });
+
+  it('only ever drops weak perks off a body', function () {
+    // offline, and with pickups on: online the server decides what falls
+    g.state.networked = false;
+    g.cfg.perks = true;
+    var weak = PB.perksOfTier('weak').map(function (d) { return d.kind; });
+    var made = 0;
+    for (var i = 0; i < 300; i++) {
+      var p = g.dropFrom(0, 12);
+      if (!p) continue;
+      made++;
+      assert.ok(weak.indexOf(p.kind) !== -1,
+                'a body dropped a ' + p.kind + ', which is a good one');
+      g.perkSystem.remove(p);
+    }
+    assert.greater(made, 0, 'nothing ever dropped in three hundred tries');
+    assert.less(made, 300, 'everything dropped something, which is not a chance');
+  });
+});
+
+describe('Warp pads', function () {
+  it('stands one pad in each corner', function () {
+    assert.equal(g.warps.length, 4, 'wrong number of pads');
+    var corners = g.warps.map(function (w) {
+      return (w.x < 0 ? 'n' : 'p') + (w.z < 0 ? 'n' : 'p');
+    }).sort().join(' ');
+    assert.equal(corners, 'nn np pn pp', 'the pads are not one to a corner');
+    g.warps.forEach(function (w) {
+      assert.greater(Math.abs(w.x), g.cfg.arena * 0.3, 'a pad is not in a corner');
+      assert.greater(Math.abs(w.z), g.cfg.arena * 0.3, 'a pad is not in a corner');
+    });
+  });
+
+  it('sends each pad to the far corner rather than the next one along', function () {
+    g.warps.forEach(function (w) {
+      var to = g.warpDestination(w);
+      // diagonally opposite: both signs flip
+      assert.less(w.x * to.x, 0, 'pad ' + w.index + ' does not cross the map in x');
+      assert.less(w.z * to.z, 0, 'pad ' + w.index + ' does not cross the map in z');
+      var d = Math.hypot(to.x - w.x, to.z - w.z);
+      assert.greater(d, g.cfg.arena, 'the trip is shorter than the arena is wide');
+    });
+  });
+
+  it('carries a player across the map and leaves them off the pad', function () {
+    var pad = g.warps[0];
+    var to = g.warpDestination(pad);
+    g.setActive(true);
+    g.teleport(pad.x, g.cfg.eye, pad.z);
+    g.update(1 / 60);
+
+    var d = Math.hypot(g.state.pos.x - to.x, g.state.pos.z - to.z);
+    assert.less(d, g.cfg.warpRadius + 2, 'did not arrive at the far pad');
+    assert.greater(d, g.cfg.warpRadius,
+      'arrived standing on the pad, which is how a player ends up bouncing');
+  });
+
+  it('does not throw the same player straight back', function () {
+    /* Landing beside a pad and being sent back the moment you touch it is how
+     * a warp turns into something you cannot get away from. */
+    var pad = g.warps[1];
+    g.setActive(true);
+    g.teleport(pad.x, g.cfg.eye, pad.z);
+    g.update(1 / 60);
+    var landed = { x: g.state.pos.x, z: g.state.pos.z };
+    for (var t = 0; t < 1; t += 1 / 60) g.update(1 / 60);
+    var moved = Math.hypot(g.state.pos.x - landed.x, g.state.pos.z - landed.z);
+    assert.less(moved, 2, 'it warped again inside the cooldown');
+  });
+
+  it('keeps the pads clear of cover', function () {
+    g.warps.forEach(function (w) {
+      g.obstacleBoxes.forEach(function (b) {
+        var d = Math.hypot(
+          Math.max(b.min.x - w.x, 0, w.x - b.max.x),
+          Math.max(b.min.z - w.z, 0, w.z - b.max.z));
+        assert.greater(d, 0.5, 'cover is sitting on the pad at ' +
+                       w.x.toFixed(0) + ',' + w.z.toFixed(0));
+      });
+    });
+  });
+});
+
+describe('Who can hurt you', function () {
+  it('agrees on what the three modes mean', function () {
+    assert.equal(PB.MODES.length, 3, 'there should be three');
+    assert.ok(PB.openToPlayers('pvp') && PB.openToEnemies('pvp'), 'pvp');
+    assert.ok(!PB.openToPlayers('pve') && PB.openToEnemies('pve'), 'pve');
+    assert.ok(!PB.openToPlayers('peaceful') && !PB.openToEnemies('peaceful'), 'peaceful');
+    // anything unrecognised has to mean the ordinary game, never immunity
+    assert.equal(PB.modeOf('nonsense').mode, 'pvp', 'junk should read as pvp');
+    assert.equal(PB.modeAt(99), 'pvp', 'an index off the end should read as pvp');
+    assert.equal(PB.modeAt(PB.modeIndex('peaceful')), 'peaceful', 'it should round-trip');
+  });
+
+  it('reads settings saved before there were modes', function () {
+    assert.equal(PB.cleanOptions({ pvp: false }).mode, 'pve',
+                 'opting out of pvp used to mean exactly pve');
+    assert.equal(PB.cleanOptions({ pvp: true }).mode, 'pvp');
+    // and the boolean is a readout of the mode from then on, never the reverse
+    assert.equal(PB.cleanOptions({ mode: 'peaceful' }).pvp, false);
+    assert.equal(PB.cleanOptions({ mode: 'peaceful', pvp: true }).mode, 'peaceful',
+                 'the mode should win when both are present');
+  });
+
+  it('takes a peaceful player off the hunters list', function () {
+    g.setActive(true);
+    g.setMode('pvp');
+    assert.greater(g.hunterTargets().length, 0, 'pvp should be huntable');
+    g.setMode('pve');
+    assert.greater(g.hunterTargets().length, 0,
+                   'pve is about other players, not about hunters');
+    g.setMode('peaceful');
+    var list = g.hunterTargets();
+    assert.equal(list ? list.length : 0, 0, 'a hunter can still see a peaceful player');
+    g.setMode('pvp');
+  });
+
+  it('stops a hunter round hurting a peaceful player', function () {
+    g.setActive(true);
+    g.teleport(0, g.cfg.eye, 0);
+    g.setHealth(3, 3);
+    var round = {
+      origin: { x: 0, y: 1.5, z: -6 },
+      dir: { x: 0, y: 0, z: 1 },
+      point: { x: 0, y: 1.5, z: 6 },
+      distance: 12,
+      index: 0,
+    };
+
+    g.setMode('pvp');
+    var landed = g.takeNpcRound(round);
+    assert.ok(landed && landed.hit, 'the round should land in pvp');
+
+    g.setHealth(3, 3);
+    g.setMode('peaceful');
+    var stopped = g.takeNpcRound(round);
+    assert.equal(stopped, null, 'the round landed on a peaceful player');
+    assert.equal(g.state.health, 3, 'a peaceful player lost health');
+
+    g.setMode('pvp');
   });
 });
 

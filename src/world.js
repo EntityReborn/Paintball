@@ -17,6 +17,11 @@ PB.createWorld = function (ctx) {
 
   /* -------------------------------------------------------------- world */
   var colliders = [];        // Box3 list used by the player
+  /* What a figure may not walk through: every collider, plus the walls that
+   * are not walls. A secret room's way in is solid to everything in the world
+   * except a player — see addSecret — so NPCs get their own list rather than a
+   * flag on the box, because the difference between the two is the feature. */
+  var npcColliders = [];
   var solidMeshes = [];      // meshes bullets can stop against
   var obstacleBoxes = [];
   var obstacleMeshes = [];
@@ -66,7 +71,7 @@ PB.createWorld = function (ctx) {
     m.castShadow = m.receiveShadow = true;
     m.name = 'wall' + i;
     scene.add(m);
-    colliders.push(new THREE.Box3().setFromObject(m));
+    addCollider(new THREE.Box3().setFromObject(m));
     solidMeshes.push(m);
     wallMeshes.push(m);
   });
@@ -111,7 +116,7 @@ PB.createWorld = function (ctx) {
       box.setFromObject(m);
     }
 
-    colliders.push(box);
+    addCollider(box);
     obstacleBoxes.push(box);
     obstacleMeshes.push(m);
     solidMeshes.push(m);
@@ -144,6 +149,14 @@ PB.createWorld = function (ctx) {
    * somewhere to hide a target. */
   var interiors = [];
 
+  /* Anything solid goes in through here, so the two lists cannot drift apart.
+   * The only caller that skips it is the one that means to. */
+  function addCollider(box) {
+    colliders.push(box);
+    npcColliders.push(box);
+    return box;
+  }
+
   function insideAnything(x, z, y, pad) {
     var m = pad || 0;
     for (var i = 0; i < interiors.length; i++) {
@@ -164,7 +177,7 @@ PB.createWorld = function (ctx) {
     scene.add(m);
     m.updateMatrixWorld(true);
     var box = new THREE.Box3().setFromObject(m);
-    colliders.push(box);
+    addCollider(box);
     obstacleBoxes.push(box);
     obstacleMeshes.push(m);
     solidMeshes.push(m);
@@ -253,24 +266,42 @@ PB.createWorld = function (ctx) {
     var steps = [];
     var count = Math.max(4, Math.ceil(h / RAMP_RISE));
     var parts = [m];
-    var alongZ = turns % 2 === 0;
-    var run = (alongZ ? d : w) / count;
+
+    /* Laid out in the shape's own space and then turned, rather than by
+     * working out where each one lands for each of the four rotations. That
+     * second way had two of the four mirrored — the mesh sloping one way and
+     * the steps the other, so a ramp was climbable from the wrong side and a
+     * wall from the right one. The bounding box is symmetric, which is why a
+     * test that only checked the steps against it saw nothing wrong.
+     *
+     * Locally the slope always runs along z: full height at -d/2, ground at
+     * +d/2. Step s counts up from the low end and its top is the height of the
+     * surface at the *low* edge of its own span, which is what keeps every one
+     * of them under the slope rather than poking through it.
+     */
+    var run = d / count;
     for (var s = 0; s < count; s++) {
-      var top = h * (s / count);                // the low edge of this step
+      var top = h * (s / count);
       if (top <= 0.001) continue;
-      var mid = (alongZ ? d : w) / 2 - run * (s + 0.5);
-      var flip = (turns === 0 || turns === 3) ? 1 : -1;
-      var px = alongZ ? x : x + mid * flip;
-      var pz = alongZ ? z + mid * flip : z;
+      var mid = d / 2 - run * (s + 0.5);        // centre of this step, locally
+
+      // and where a quarter turn puts it: (lx, lz) -> (lx·cos + lz·sin, lz·cos - lx·sin)
+      var px = x, pz = z, ex = w, ez = run;
+      if (turns === 0) { pz = z + mid; }
+      else if (turns === 1) { px = x + mid; ex = run; ez = w; }
+      else if (turns === 2) { pz = z - mid; }
+      else { px = x - mid; ex = run; ez = w; }
+
       var box = new THREE.Box3(
-        new THREE.Vector3(px - (alongZ ? w : run) / 2, 0, pz - (alongZ ? run : d) / 2),
-        new THREE.Vector3(px + (alongZ ? w : run) / 2, top, pz + (alongZ ? run : d) / 2)
+        new THREE.Vector3(px - ex / 2, 0, pz - ez / 2),
+        new THREE.Vector3(px + ex / 2, top, pz + ez / 2)
       );
-      colliders.push(box);
+      addCollider(box);
       steps.push(box);
     }
     var s = structureOf('wedge', parts);
     s.steps = steps;               // what a player actually walks up
+    s.turns = turns;               // which way it faces, for anything checking
     return s;
   }
 
@@ -362,7 +393,7 @@ PB.createWorld = function (ctx) {
     scene.add(m);
     m.updateMatrixWorld(true);
     var box = new THREE.Box3().setFromObject(m);
-    colliders.push(box);
+    addCollider(box);
     solidMeshes.push(m);
     balconyParts.push({ mesh: m, box: box });
     return m;
@@ -427,6 +458,168 @@ PB.createWorld = function (ctx) {
       z: zMid, parts: balconyParts, keepClear: keepClear,
     };
   })();
+
+  /* ------------------------------------------------------- secret rooms */
+  /* A crate that is not a crate: five solid faces and one you can walk
+   * straight through, with something worth having inside.
+   *
+   * The face that opens is an ordinary wall in every way that can be seen. It
+   * is the same mesh, the same material and the same size as the others, it
+   * casts the same shadow, and a round stops on it exactly as it would on any
+   * of them — so there is no angle, and no shot, that gives it away. The only
+   * thing it does not do is stop a player.
+   *
+   * It does stop NPCs, which is not physics but is the point: a wanderer
+   * strolling out of a solid crate would tell everybody where the secret was,
+   * and one strolling in would get stuck inside it. They are resolved against
+   * their own list — see npcColliders — which is the collider list plus these.
+   */
+  var secrets = [];
+
+  function addSecret(x, z, size, height) {
+    var mat = pickMat();
+    var t = 0.4;
+    var parts = [];
+    var half2 = size / 2;
+    // which face opens; the rest are ordinary walls
+    var door = Math.floor(rand() * 4);
+
+    for (var side = 0; side < 4; side++) {
+      var alongX = side % 2 === 0;
+      var sign = side < 2 ? -1 : 1;
+      var cx = alongX ? 0 : sign * half2;
+      var cz = alongX ? sign * half2 : 0;
+      var w = alongX ? size : t;
+      var d = alongX ? t : size;
+
+      if (side !== door) {
+        parts.push(addPart(mat, x + cx, height / 2, z + cz, w, height, d, 'secretWall'));
+        continue;
+      }
+      /* The way in. Built like any other face and put on every list a wall is
+       * on — drawn, shot at, and solid to anything that is not a player —
+       * except the one that decides where a player may walk. */
+      var m = new THREE.Mesh(new THREE.BoxGeometry(w, height, d), mat);
+      m.position.set(x + cx, height / 2, z + cz);
+      m.castShadow = m.receiveShadow = true;
+      m.name = 'secretWall';
+      scene.add(m);
+      m.updateMatrixWorld(true);
+      var box = new THREE.Box3().setFromObject(m);
+      solidMeshes.push(m);
+      obstacleMeshes.push(m);
+      obstacleBoxes.push(box);
+      npcColliders.push(box);
+      parts.push(m);
+    }
+
+    // a lid, so it reads as a solid block from the balcony as well as the floor
+    parts.push(addPart(mat, x, height + t / 2, z, size, t, size, 'secretLid'));
+
+    interiors.push(new THREE.Box3(
+      new THREE.Vector3(x - half2 + t, 0, z - half2 + t),
+      new THREE.Vector3(x + half2 - t, height, z + half2 - t)
+    ));
+
+    var s = structureOf('secret', parts);
+    s.x = x;
+    s.z = z;
+    s.size = size;
+    s.height = height;
+    s.door = door;
+    secrets.push(s);
+    return s;
+  }
+
+  /* --------------------------------------------------------- warp pads */
+  /* One in each corner, each throwing you to the one diagonally opposite.
+   *
+   * The corners are the dead ground of an arena this size — a long walk from
+   * everything, and nothing to go there for. A way straight across the map
+   * gives them a reason to exist and gives anybody being chased somewhere to
+   * run to. Diagonal rather than clockwise because the whole point is the
+   * distance: it is the one move that cannot be walked in the time it takes.
+   */
+  var warps = [];
+
+  (function buildWarps() {
+    if (!cfg.warps) return;
+    var at = half - 7;
+    var spots = [
+      { x: -at, z: -at }, { x: at, z: -at },
+      { x: at, z: at }, { x: -at, z: at },
+    ];
+    var ringGeo = cfg.headless ? null : new THREE.TorusGeometry(cfg.warpRadius, 0.16, 8, 24);
+    var padGeo = cfg.headless ? null : new THREE.CircleGeometry(cfg.warpRadius, 24);
+    var padMat = cfg.headless ? null : new THREE.MeshStandardMaterial({
+      color: 0x7ad7ff, emissive: 0x2aa8ff, emissiveIntensity: 0.7,
+      transparent: true, opacity: 0.35, roughness: 0.4,
+    });
+    var ringMat = cfg.headless ? null : new THREE.MeshStandardMaterial({
+      color: 0x9fe6ff, emissive: 0x38bdf8, emissiveIntensity: 1.1,
+      roughness: 0.3, flatShading: true,
+    });
+
+    spots.forEach(function (spot, i) {
+      var view = null;
+      if (!cfg.headless) {
+        view = new THREE.Group();
+        var pad = new THREE.Mesh(padGeo, padMat);
+        pad.rotation.x = -Math.PI / 2;
+        pad.position.y = 0.03;
+        var ring = new THREE.Mesh(ringGeo, ringMat);
+        ring.rotation.x = -Math.PI / 2;
+        ring.position.y = 0.2;
+        view.add(pad, ring);
+        view.position.set(spot.x, 0, spot.z);
+        view.name = 'warp';
+        scene.add(view);
+        view.updateMatrixWorld(true);
+      }
+      warps.push({
+        index: i, x: spot.x, z: spot.z,
+        // the far corner, which is the one no walk can reach quickly
+        to: (i + 2) % 4,
+        view: view, ring: view ? view.children[1] : null, phase: i * 1.4,
+      });
+    });
+
+    // nothing else may be dropped on a pad or in the ring around it
+    warps.forEach(function (w) {
+      keepClear.push(new THREE.Box3(
+        new THREE.Vector3(w.x - cfg.warpRadius - 2, 0, w.z - cfg.warpRadius - 2),
+        new THREE.Vector3(w.x + cfg.warpRadius + 2, 3, w.z + cfg.warpRadius + 2)
+      ));
+    });
+  })();
+
+  /* Which pad this spot is standing on, if any. Height matters: the pads are
+   * on the floor, and somebody on the balcony above one has not stepped on it. */
+  function warpAt(x, z, feetY) {
+    for (var i = 0; i < warps.length; i++) {
+      var w = warps[i];
+      if (Math.hypot(w.x - x, w.z - z) > cfg.warpRadius) continue;
+      if (typeof feetY === 'number' && Math.abs(feetY) > 1.5) continue;
+      return w;
+    }
+    return null;
+  }
+
+  function warpDestination(w) {
+    var to = warps[w.to] || w;
+    return { x: to.x, z: to.z, index: to.index };
+  }
+
+  function updateWarps(dt) {
+    for (var i = 0; i < warps.length; i++) {
+      var w = warps[i];
+      if (!w.view) continue;
+      w.phase += dt;
+      w.ring.rotation.z += dt * 0.8;
+      w.ring.position.y = 0.2 + Math.sin(w.phase * 1.5) * 0.08;
+      w.view.updateMatrixWorld(true);
+    }
+  }
 
   /* ---------------------------------------------------------- the house */
   /* One per arena, on a random edge: a room you can go inside, a fence you
@@ -595,6 +788,29 @@ PB.createWorld = function (ctx) {
   (function buildObstacles() {
     var placed = [];       // [x, z, extent] — how much room each one took
     var guard = 0;
+
+    /* The hidden ones go down first, while there is still room to be choosy.
+     *
+     * They want the quiet parts of the map — a secret you trip over on the way
+     * between two pieces of cover is not one. Anything out past two thirds of
+     * the way to a wall qualifies, which is most of the arena's area and none
+     * of the ground people actually cross. */
+    var wantSecrets = Math.min(cfg.secrets, 4);
+    while (secrets.length < wantSecrets && guard++ < 4000) {
+      var ss = 3.4 + rand() * 1.2;
+      var sh = 2.9 + rand() * 0.5;
+      var sx = (rand() - 0.5) * (cfg.arena - 10 - ss);
+      var sz = (rand() - 0.5) * (cfg.arena - 10 - ss);
+      if (Math.hypot(sx, sz) < cfg.arena * 0.3) continue;
+      if (!isClearOfKeepOuts(sx, sz, 3 + ss / 2)) continue;
+      var far = secrets.every(function (o) {
+        return Math.hypot(o.x - sx, o.z - sz) > cfg.arena * 0.35;
+      });
+      if (!far) continue;
+      placed.push([sx, sz, ss]);
+      addSecret(sx, sz, ss, sh);
+    }
+    guard = 0;
     while (placed.length < cfg.obstacles && guard++ < 6000) {
       /* Decide what is going here before deciding whether it fits. A crate and
        * a room are not the same size, and the clearances below — from the
@@ -605,7 +821,14 @@ PB.createWorld = function (ctx) {
       var kind = rand();
       var plan;
       if (kind < 0.28) {
-        plan = { what: 'box', w: 2 + rand() * 1.5, h: 2 + rand() * 1.4, d: 2 + rand() * 1.5 };
+        /* Deliberately as wide as a secret room and no narrower.
+         *
+         * A hidden room has to be big enough to stand inside, so it is around
+         * four across. If every honest crate were three at most, the secret
+         * would be the only large cube in the arena and you could find all of
+         * them from the spawn without moving. The sizes overlap so that the
+         * silhouette says nothing. */
+        plan = { what: 'box', w: 2 + rand() * 2.4, h: 2.4 + rand() * 1.2, d: 2 + rand() * 2.4 };
       } else if (kind < 0.46) {
         plan = { what: 'box', w: 1.4, h: 3.5 + rand() * 2.5, d: 1.4 };
       } else if (kind < 0.62) {
@@ -670,7 +893,7 @@ PB.createWorld = function (ctx) {
     scene.add(m);
     m.updateMatrixWorld(true);
     var box = new THREE.Box3().setFromObject(m);
-    colliders.push(box);
+    addCollider(box);
     solidMeshes.push(m);
     var mover = {
       mesh: m, box: box,
@@ -908,12 +1131,20 @@ PB.createWorld = function (ctx) {
     updateMedkits: updateMedkits,
     medkitAt: medkitAt,
     colliders: colliders,
+    npcColliders: npcColliders,
+    secrets: secrets,
+    warps: warps,
+    warpAt: warpAt,
+    warpDestination: warpDestination,
+    updateWarps: updateWarps,
     solidMeshes: solidMeshes,
     obstacleBoxes: obstacleBoxes,
     obstacleMeshes: obstacleMeshes,
     wallMeshes: wallMeshes,
     floor: floor,
     addObstacle: addObstacle,
+    addWedge: addWedge,
+    addSecret: addSecret,
   };
 };
 

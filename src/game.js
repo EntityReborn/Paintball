@@ -116,6 +116,22 @@ var DEFAULTS = {
   perkLife: 26,               // how long one waits to be collected
   perkDuration: 15,           // how long its effect lasts
   perkRadius: 1.3,
+  /* What falls out of something you have just shot. Weak perks only: a body
+   * dropping a shield would make the arena's own spawns pointless, and the
+   * good ones are behind the secret walls for a reason. */
+  dropChance: 0.14,           // chance a downed NPC or a broken target leaves one
+  dropLife: 12,               // and how long it waits, which is not long
+  /* The hidden rooms, and what waits in them. The restock is what makes one
+   * worth remembering rather than worth finding once. */
+  secrets: 3,
+  secretRestock: 40,          // seconds before another good one appears inside
+  /* The corner pads. Radius is generous on purpose — being thrown across the
+   * map should never be something you did by accident and cannot undo, so the
+   * pad is easy to stand on and the cooldown is long enough to walk off. */
+  warps: true,
+  warpRadius: 1.6,
+  warpCooldown: 3,
+  mode: 'pvp',                // pvp | pve | peaceful — see PB.MODES
 };
 
 var VIEW_LAYER = 1;         // the gun renders here, in a second depth-cleared pass
@@ -200,8 +216,20 @@ function createGame(options) {
 
   var sun = new THREE.DirectionalLight(0xffeedd, 1.5);
   sun.position.set(24, 38, 16);
+  /* The map has to cover the whole arena, so its resolution is a distance:
+   * 1024 texels over a sixty-unit arena was about seven centimetres each, and
+   * the same map over eighty units is nine and a half. That is what put the
+   * grey smears across every large flat face and along every join — a surface
+   * shadowing itself because the depth it is compared against is a texel's
+   * worth of somewhere else. It scales with the arena now. */
   sun.castShadow = cfg.shadows;
-  sun.shadow.mapSize.set(1024, 1024);
+  var shadowTexels = cfg.arena > 70 ? 2048 : 1024;
+  sun.shadow.mapSize.set(shadowTexels, shadowTexels);
+  /* And the bias that actually suits this: normalBias moves the comparison
+   * along the surface normal, which is the one that fixes acne on faces lit at
+   * a glancing angle without lifting shadows off the feet of what casts them.
+   * A flat depth bias alone cannot do both. */
+  sun.shadow.normalBias = 0.035;
   sun.shadow.camera.left = -half * 1.2;
   sun.shadow.camera.right = half * 1.2;
   sun.shadow.camera.top = half * 1.2;
@@ -223,6 +251,10 @@ function createGame(options) {
     lookSpikes: 0, maxLookDelta: 0, zoom: 0, networked: false,
     worldTime: 0, airJumps: 0, standingOn: null,
     health: 0, maxHealth: 0, dead: false, shield: 0, deathT: 0, respawnAt: 0,
+    /* How much of the fight we are in — see PB.MODES in options.js. Online the
+     * server keeps its own copy and that one decides; this is what the hunters
+     * in our own world read, and what the menu is showing. */
+    mode: PB.modeOf(cfg.mode).mode,
 
     /* Everything worth bragging about. Distance is kept in world units and
      * converted on the way out — the arena is metric, a unit is a metre. */
@@ -266,6 +298,10 @@ function createGame(options) {
   function ownHunterTargets() {
     if (cfg.headless || state.networked) return null;
     if (!state.active || state.dead) return null;
+    /* Peaceful is not on anybody's list. Same rule the server applies in
+     * huntable(), for the same reason: a hunter that walks over and shoots at
+     * you has not left you alone, whatever its rounds do when they land. */
+    if (!PB.openToEnemies(state.mode)) return null;
     return [{
       id: null, x: state.pos.x, y: state.pos.y, z: state.pos.z,
       health: state.health, maxHealth: state.maxHealth,
@@ -276,6 +312,7 @@ function createGame(options) {
 
   var world = PB.createWorld(ctx);
   var colliders = ctx.colliders = world.colliders;
+  ctx.npcColliders = world.npcColliders;
   var solidMeshes = ctx.solidMeshes = world.solidMeshes;
   var obstacleBoxes = ctx.obstacleBoxes = world.obstacleBoxes;
   var obstacleMeshes = world.obstacleMeshes;
@@ -770,9 +807,20 @@ function createGame(options) {
     bullets.length = 0;
   }
 
+  /* What is waiting in each secret room, and when the next one is due there.
+   * Declared up here rather than beside stockSecrets because startLevel clears
+   * it, and startLevel can run while the game is still being built. */
+  var secretStock = [];
+  // longer than any match, and still a number the wire can carry
+  var SECRET_FOREVER = 1e6;
+
   function startLevel(level) {
     state.level = level;
     clearLevel();
+    /* A new level is a new set of rooms to find. Whatever was hidden in the
+     * old ones is gone with them, and holding on to the timers would leave a
+     * room empty for its restock interval on a map it never stood in. */
+    secretStock.length = 0;
     spawnTargets();
     // the wanderers, and however many hunters this level is due
     var count = cfg.npcsPerLevel + (level - 1) + huntersFor(level);
@@ -1167,6 +1215,7 @@ function createGame(options) {
         state.stats.targetsBroken++;
         addScore(cfg.scoreTarget, where);
         emit('hit', { target: h.target, score: state.score, left: aliveCount() });
+        dropFrom(where.x, where.z);
         sfx.hit();
         checkLevel();                 // the last target can finish the level too
       } else if (h.npc && h.npc.alive) {
@@ -1297,6 +1346,8 @@ function createGame(options) {
     perkSystem.tickHolder(state, dt);
     perkSystem.update(dt, state.pos);
     updateMedkits(dt);
+    updateWarps(dt);
+    stockSecrets(state.elapsed);
     if (state.shield > 0) {
       state.shield = Math.max(0, state.shield - dt);
       if (state.shield === 0) emit('shieldEnd', {});
@@ -1464,6 +1515,8 @@ function createGame(options) {
     showRemoteShot({ origin: shot.origin, point: shot.point });
 
     if (!state.active || state.dead) return null;
+    // a round already in the air when the mode changed still must not land
+    if (!PB.openToEnemies(state.mode)) return null;
     _npcDir.set(shot.dir.x, shot.dir.y, shot.dir.z);
     _npcRay.set(_npcFrom, _npcDir);
     hitVolume(state.pos, _npcBox);
@@ -1539,6 +1592,95 @@ function createGame(options) {
     if (!state.active || state.health >= state.maxHealth) return;
     var got = world.medkitAt(state.pos.x, state.pos.z, state.pos.y - cfg.eye);
     if (got) takeMedkit(got);
+  }
+
+  /* --------------------------------------------------------- warp pads */
+  /* Standing on a pad throws you to the far corner.
+   *
+   * Offline this happens here and that is the whole of it. Online the server
+   * has to agree — it owns everybody's position for the purposes of being shot
+   * at, and a client that moved forty metres in a frame is exactly what the
+   * plausibility check exists to catch — so the client asks and the move
+   * arrives back as an instruction. Either way the same function does the
+   * moving, so it looks and sounds identical on both paths.
+   */
+  var warpCooling = 0;
+
+  function updateWarps(dt) {
+    world.updateWarps(dt);
+    if (warpCooling > 0) warpCooling -= dt;
+    if (!state.active || state.dead || warpCooling > 0) return;
+    var pad = world.warpAt(state.pos.x, state.pos.z, state.pos.y - cfg.eye);
+    if (!pad) return;
+    if (state.networked) {
+      warpCooling = cfg.warpCooldown;
+      emit('warpRequest', { from: pad.index });
+      return;
+    }
+    warpTo(world.warpDestination(pad));
+  }
+
+  /* Put the player down on a pad. Slightly off its centre and facing the middle
+   * of the arena: landing dead on the far pad means standing on it, which the
+   * cooldown covers but which reads as being stuck, and landing looking at the
+   * wall you have just arrived at is disorienting for no reason. */
+  function warpTo(dest) {
+    if (!dest) return null;
+    warpCooling = cfg.warpCooldown;
+    var inward = Math.hypot(dest.x, dest.z) || 1;
+    var px = dest.x - (dest.x / inward) * (cfg.warpRadius + 0.9);
+    var pz = dest.z - (dest.z / inward) * (cfg.warpRadius + 0.9);
+    teleport(px, cfg.eye, pz);
+    // looking back up the map, not at the wall you have just arrived beside
+    yawObj.rotation.y = Math.atan2(px, pz);
+    yawObj.updateMatrixWorld(true);
+    emit('warp', { x: px, z: pz, index: dest.index });
+    sfx.wave();
+    return dest;
+  }
+
+  /* ------------------------------------------------------ secret rooms */
+  /* What is inside one, and putting another there once it has been taken.
+   *
+   * The perk is spawned at the room's centre rather than being one of the
+   * arena's own: the ordinary spawner keeps clear of anything solid, which is
+   * every one of these from the outside, so it would never choose to put one
+   * in here. Restocking is on a timer per room, so clearing all of them at
+   * once does not mean waiting for one queue. */
+
+  function stockSecrets(now) {
+    // a game with the pickups turned off has nothing to hide in the rooms
+    if (state.networked || !cfg.perks) return;
+    var list = world.secrets;
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i];
+      var slot = secretStock[i];
+      if (slot && slot.id && perkSystem.byId(slot.id)) continue;
+      /* The clock starts when it is taken, not when it was put there. Starting
+       * it at spawn means one that sat untouched for an hour comes back the
+       * instant it is collected, which is not a restock. */
+      if (slot && slot.id) { slot.id = 0; slot.backAt = now + cfg.secretRestock; }
+      if (slot && now < slot.backAt) continue;
+      var perk = perkSystem.spawn({
+        tier: 'good', x: s.x, z: s.z, y: 1.1, hidden: true,
+        /* It does not rot. Everything else on the floor is on a timer because
+         * it is in the open and somebody will be along; this one is behind a
+         * wall that looks like a wall, and the whole point of it is that it is
+         * still there when you finally work out how to get in. */
+        life: SECRET_FOREVER,
+      });
+      secretStock[i] = perk
+        ? { id: perk.id, backAt: now + cfg.secretRestock }
+        : { id: 0, backAt: now + 4 };
+    }
+  }
+
+  /* What a body leaves behind. Weak tiers only, and short-lived: it is a reason
+   * to walk over what you have just shot, not a reason to farm. */
+  function dropFrom(x, z) {
+    if (state.networked || !cfg.perks) return null;
+    if (rand() >= cfg.dropChance) return null;
+    return perkSystem.spawn({ tier: 'weak', x: x, z: z, y: 0.9, life: cfg.dropLife });
   }
 
   function takeMedkit(kit) {
@@ -1781,6 +1923,21 @@ function createGame(options) {
      * air inside anything that has an inside. */
     structures: world.structures, house: world.house,
     interiors: world.interiors, insideAnything: world.insideAnything,
+    /* The corner pads and the rooms that are not on the map. warpTo is the
+     * move itself, which the network layer calls when the server says so. */
+    setMode: function (v) {
+      state.mode = PB.modeOf(v).mode;
+      emit('mode', { mode: state.mode });
+      return state.mode;
+    },
+    addWedge: world.addWedge, addSecret: world.addSecret,
+    // what stops a figure, which is the collider list plus the secret doors
+    npcColliders: world.npcColliders,
+    // who the hunters may come after, so a test can ask the same question
+    hunterTargets: function () { return hunterTargets(); },
+    warps: world.warps, warpAt: world.warpAt,
+    warpDestination: world.warpDestination, warpTo: warpTo,
+    secrets: world.secrets, dropFrom: dropFrom,
     applyLook: applyLook, setPitch: setPitch,
     setLookDebug: function (on) { lookDebug = !!on; if (!on) lookLog.length = 0; },
     lookLog: function () { return lookLog.slice(); },
@@ -1855,6 +2012,10 @@ function createGame(options) {
 
   // a hunter's round, settled against the only player we know about
   on('npcShot', takeNpcRound);
+  // what a body leaves behind, on the one event that means one has just fallen
+  on('npcDown', function (d) {
+    if (d && d.npc) dropFrom(d.npc.x, d.npc.z);
+  });
 
   startLevel(1);
   yawObj.position.copy(state.pos);

@@ -133,11 +133,18 @@
     </label>
 
     <label class="row">
-      <span>FIGHT OTHER PLAYERS</span>
-      <input type="checkbox" id="opt-pvp">
+      <span>WHO CAN HURT YOU</span>
+      <select id="opt-mode">
+        <option value="pvp">PVP — EVERYONE</option>
+        <option value="pve">PVE — ENEMIES ONLY</option>
+        <option value="peaceful">PEACEFUL — NOBODY</option>
+      </select>
     </label>
-    <div class="row note">Turn this off and you cannot hurt other players or be
-      hurt by them. You will look see-through to everyone else. Takes effect
+    <div class="row note" id="mode-note"></div>
+    <div class="row note">It is symmetric: anyone who cannot hurt you cannot be
+      hurt by you either, and you look see-through to them. Hunters leave a
+      peaceful player alone entirely rather than shooting at them and missing.
+      You can still shoot targets and score in any of the three. Takes effect
       straight away for the whole room.</div>
 
     <div class="row note">Saved in this browser.</div>
