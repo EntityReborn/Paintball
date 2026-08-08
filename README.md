@@ -771,6 +771,29 @@ re-entering the window rather than a real flick.
   not like the others". The outside is a single box now — literally the same
   geometry a crate is — with an inside-out box inside it for the walls you see
   from within, and the secret lives entirely in the collider lists.
+- **A strip of floor along two walls was dark for no reason.** The shadow
+  camera was the arena's half-width and a fifth on every side, which sounds
+  generous and is not: the sun looks in diagonally, so what the map has to
+  cover is not the arena's width but its box *seen from the light* — the
+  diagonal, foreshortened, plus the height of the walls. At eighty units that
+  wants 55.5 and it had 48. Everything past the edge of a shadow map samples
+  the edge of it, clamped, so the ground that fell outside took whatever the
+  border texel said. Thirty of sixteen hundred floor samples were outside it
+  and sixteen of those had a clear line to the sun.
+
+  It is fitted now, and fitted to the solids that are actually in the arena
+  rather than worked out from the config — the second kind of answer is a guess
+  about how tall the tallest thing is, and it only has to be wrong once. The
+  near and far planes are fitted too, for a different payoff: 0.5 to 120 for a
+  scene that lives between 5 and 86 spends most of the depth buffer on empty
+  space, and what is left is what decides how much bias the acne needs.
+
+  Worth knowing for the next one of these: **squinting at screenshots could not
+  settle it.** Three of the four walls have a legitimate reason to be dark —
+  two are shaded by their own shadow and one by the balcony deck running along
+  it — so the eye cannot tell a bug from correct shading. Projecting a grid of
+  floor points into the shadow camera's clip space and counting the ones
+  outside took a minute and gave a number.
 - **Shadows floated off what cast them.** The other half of the acne fix, and
   overcorrected: a depth bias big enough to stop a lit face shadowing itself
   also pushes every shadow away from its caster, so a crate stood a hand's

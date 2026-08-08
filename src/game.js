@@ -237,13 +237,94 @@ function createGame(options) {
    * bias is small enough that contact is contact. The map being twice the
    * resolution is what makes both numbers affordable. */
   sun.shadow.normalBias = 0.012;
-  sun.shadow.camera.left = -half * 1.2;
-  sun.shadow.camera.right = half * 1.2;
-  sun.shadow.camera.top = half * 1.2;
-  sun.shadow.camera.bottom = -half * 1.2;
-  sun.shadow.camera.far = 120;
   sun.shadow.bias = -0.00012;
-  sun.shadow.camera.updateProjectionMatrix();
+
+  /* Fit the shadow camera to the arena instead of guessing at it.
+   *
+   * It used to be the arena's half-width and a fifth on every side, which
+   * sounds generous and is not. The sun looks in diagonally, so what the map
+   * has to cover is not the arena's width — it is the arena's box seen from the
+   * light, which is the diagonal, foreshortened, plus the height of the walls.
+   * At eighty units across that wants 55.5 and it had 48.
+   *
+   * Everything past the edge of a shadow map samples the edge of it, clamped.
+   * So the two corners furthest along the light's axis fell outside it entirely
+   * and took whatever the border texel happened to say — which is how long
+   * stretches of floor along two of the four walls came out fully shadowed with
+   * nothing standing there to cast anything.
+   *
+   * The near and far planes are fitted for the same reason and a different
+   * payoff. 0.5 to 120 for a scene that lives between 9 and 82 spends most of
+   * the depth buffer on empty space, and how much of it is left is what decides
+   * how much bias the acne needs. Tightening them is what pays for the frustum
+   * being wider, so the trade is close to free.
+   */
+  var _lightUp = new THREE.Vector3(0, 1, 0);
+  var _lightBasis = new THREE.Matrix4();
+  var _intoLight = new THREE.Matrix4();
+  var _corner = new THREE.Vector3();
+  var _castBox = new THREE.Box3();
+  var shadowFit = null;
+
+  /* Fit the shadow camera to what is actually in the arena.
+   *
+   * Measured from the solids themselves rather than worked out from the config,
+   * because the second kind of answer is a guess about how tall the tallest
+   * thing is and it only has to be wrong once. Called after the world is built,
+   * and again whenever something is added to it.
+   */
+  function fitShadowCamera() {
+    if (!cfg.shadows) return null;
+
+    _castBox.makeEmpty();
+    for (var i = 0; i < solidMeshes.length; i++) {
+      if (solidMeshes[i] === floor) continue;      // it receives, it does not cast
+      _castBox.expandByObject(solidMeshes[i]);
+    }
+    if (_castBox.isEmpty()) return null;
+    // the floor is what everything is cast onto, so it has to be covered too
+    _castBox.expandByPoint(new THREE.Vector3(-half, 0, -half));
+    _castBox.expandByPoint(new THREE.Vector3(half, 0, half));
+    // and room above for a figure standing on the highest thing there is
+    _castBox.max.y += 2.2;
+
+    _lightBasis.lookAt(sun.position, sun.target.position, _lightUp);
+    _intoLight.copy(_lightBasis).invert();
+
+    var ex = 0, ey = 0, near = Infinity, far = -Infinity;
+    for (var sx = 0; sx < 2; sx++) {
+      for (var sy = 0; sy < 2; sy++) {
+        for (var sz = 0; sz < 2; sz++) {
+          _corner.set(
+            sx ? _castBox.max.x : _castBox.min.x,
+            sy ? _castBox.max.y : _castBox.min.y,
+            sz ? _castBox.max.z : _castBox.min.z
+          ).sub(sun.position).applyMatrix4(_intoLight);
+          ex = Math.max(ex, Math.abs(_corner.x));
+          ey = Math.max(ey, Math.abs(_corner.y));
+          // a camera looks down its own -Z, so depth runs the other way
+          near = Math.min(near, -_corner.z);
+          far = Math.max(far, -_corner.z);
+        }
+      }
+    }
+
+    var c = sun.shadow.camera;
+    // a little past the corners, so nothing sits exactly on the boundary
+    c.left = -(ex + 1); c.right = ex + 1;
+    c.bottom = -(ey + 1); c.top = ey + 1;
+    c.near = Math.max(0.1, near - 1);
+    c.far = far + 1;
+    c.updateProjectionMatrix();
+    shadowFit = {
+      halfX: ex + 1, halfY: ey + 1, near: c.near, far: c.far,
+      // how much ground one texel of the map covers, which is the number that
+      // decides how much bias the acne needs
+      texels: sun.shadow.mapSize.width,
+      metresPerTexel: (2 * (ex + 1)) / sun.shadow.mapSize.width,
+    };
+    return shadowFit;
+  }
   scene.add(sun);
 
   var ambient = new THREE.AmbientLight(0x4c5a70, 0.65);
@@ -329,6 +410,10 @@ function createGame(options) {
   var movers = ctx.movers = world.movers;
   var balcony = ctx.balcony = world.balcony;
   var medkits = ctx.medkits = world.medkits;
+  /* Now that there is something to cast shadows, fit the map to it. Before the
+   * world exists there is nothing to measure, and measuring is the whole point
+   * — see fitShadowCamera. */
+  fitShadowCamera();
   /* The air inside the rooms and the house. Not solid, and not somewhere
    * anything may be spawned: see world.js. */
   ctx.interiors = world.interiors;
@@ -1909,6 +1994,9 @@ function createGame(options) {
     poseDowned: N.poseDowned,
     huntersFor: huntersFor, placeNPC: placeNPC, poseGun: poseGun,
     arenaFingerprint: arenaFingerprint,
+    // what the shadow camera was fitted to, so a test can check it covers
+    shadowFit: function () { return shadowFit; },
+    fitShadowCamera: fitShadowCamera, sun: sun,
     stats: stats, resetStats: resetStats, recordHit: recordHit, FEET_PER_UNIT: FEET_PER_UNIT,
     applyServerHit: applyServerHit, showRemoteShot: showRemoteShot,
     setScore: setScore, setHealth: setHealth, breakTarget: breakTarget,

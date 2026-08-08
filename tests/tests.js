@@ -4365,6 +4365,114 @@ describe('Who can hurt you', function () {
   });
 });
 
+describe('Shadows', function () {
+  function sunOf() {
+    return g.scene.children.filter(function (c) { return c.isDirectionalLight; })[0];
+  }
+
+  it('covers every part of the floor with the shadow map', function () {
+    /* The bug this exists for: the shadow camera was the arena's half-width
+     * and a fifth on each side, which sounds generous and is not. The sun
+     * looks in diagonally, so what the map has to cover is the arena's box
+     * *seen from the light* — the diagonal, foreshortened, plus the walls.
+     * At eighty units across that wants 55.5 and it had 48.
+     *
+     * Everything past the edge of a shadow map samples the edge of it,
+     * clamped, so the strip of floor along two of the walls came out fully
+     * shadowed with nothing standing there to cast anything. Thirty of these
+     * sixteen hundred samples were outside it, and sixteen of those had a
+     * clear line to the sun — floor that was dark for no reason.
+     */
+    var sun = sunOf();
+    assert.ok(sun, 'no sun to cast anything');
+    var cam = sun.shadow.camera;
+    sun.updateMatrixWorld(true);
+    cam.updateMatrixWorld(true);
+    cam.updateProjectionMatrix();
+
+    var vp = new THREE.Matrix4().multiplyMatrices(
+      cam.projectionMatrix, cam.matrixWorldInverse);
+
+    var half = g.cfg.arena / 2;
+    var p = new THREE.Vector3();
+    var outside = [];
+    for (var x = -half + 0.5; x <= half - 0.5; x += 2) {
+      for (var z = -half + 0.5; z <= half - 0.5; z += 2) {
+        p.set(x, 0.01, z).applyMatrix4(vp);
+        if (Math.abs(p.x) > 1 || Math.abs(p.y) > 1 || p.z < -1 || p.z > 1) {
+          if (outside.length < 5) {
+            outside.push(x.toFixed(1) + ',' + z.toFixed(1) +
+                         ' (clip ' + p.x.toFixed(2) + ',' + p.y.toFixed(2) + ')');
+          }
+        }
+      }
+    }
+    assert.equal(outside.length, 0,
+                 'floor outside the shadow map: ' + outside.join(' | '));
+  });
+
+  it('covers everything that casts one, not only the floor', function () {
+    // a crate whose top is outside the map is a crate with no shadow at all
+    var sun = sunOf();
+    var cam = sun.shadow.camera;
+    var vp = new THREE.Matrix4().multiplyMatrices(
+      cam.projectionMatrix, cam.matrixWorldInverse);
+
+    var corner = new THREE.Vector3();
+    var box = new THREE.Box3();
+    var missed = [];
+    g.solidMeshes.forEach(function (m) {
+      if (m === g.floor || missed.length > 4) return;
+      box.setFromObject(m);
+      for (var i = 0; i < 8; i++) {
+        corner.set(
+          (i & 1) ? box.max.x : box.min.x,
+          (i & 2) ? box.max.y : box.min.y,
+          (i & 4) ? box.max.z : box.min.z
+        ).applyMatrix4(vp);
+        if (Math.abs(corner.x) > 1 || Math.abs(corner.y) > 1 ||
+            corner.z < -1 || corner.z > 1) {
+          missed.push(m.name + ' at ' + box.min.x.toFixed(0) + ',' +
+                      box.min.z.toFixed(0));
+          return;
+        }
+      }
+    });
+    assert.equal(missed.length, 0, 'casters outside the shadow map: ' +
+                 missed.join(' | '));
+  });
+
+  it('does not spend the depth buffer on empty space', function () {
+    /* near 0.5 and far 120 for a scene that lives between 5 and 86 throws away
+     * most of the precision, and how much is left is what decides how much
+     * bias the acne needs. Fitted, so the two numbers stay honest if the
+     * arena or the sun ever moves. */
+    var fit = g.shadowFit();
+    assert.ok(fit, 'the shadow camera was never fitted');
+    assert.less(fit.far - fit.near, g.cfg.arena * 1.6,
+                'the depth range is ' + (fit.far - fit.near).toFixed(0) +
+                ' for an arena of ' + g.cfg.arena);
+    // and a texel still has to be small enough to sit an object on
+    assert.less(fit.metresPerTexel, 0.08,
+                'a shadow texel covers ' + fit.metresPerTexel.toFixed(3) + 'u');
+  });
+
+  it('keeps a shadow attached to the thing casting it', function () {
+    /* Peter-panning, the other half of the acne fix and easy to overcorrect
+     * into: a flat depth bias big enough to stop a lit face shadowing itself
+     * also pushes every shadow away from its caster, and a crate ends up
+     * standing a hand's width above its own. normalBias is the one that does
+     * the acne job without doing that one. */
+    var sun = sunOf();
+    assert.less(Math.abs(sun.shadow.bias), 0.0005,
+                'the flat depth bias is ' + sun.shadow.bias);
+    assert.greater(sun.shadow.normalBias, 0, 'nothing is carrying the acne');
+    // under a texel, or it starts eating the contact it is protecting
+    assert.less(sun.shadow.normalBias, g.shadowFit().metresPerTexel,
+                'normalBias is wider than a texel');
+  });
+});
+
 describe('Going down', function () {
   function shootDown(npc, angle) {
     npc.alive = true;
