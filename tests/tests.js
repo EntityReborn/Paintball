@@ -4365,6 +4365,148 @@ describe('Who can hurt you', function () {
   });
 });
 
+describe('Sound with a direction to it', function () {
+  it('places another gun where it was fired from', function () {
+    /* It used to be a distance and nothing else, so a hunter behind you and
+     * one in front of you sounded identical and a shot told you only that
+     * somebody had fired. The panner is what makes turning towards it a thing
+     * you can do. */
+    var calls = [];
+    var real = g.sfx.shootAt;
+    g.sfx.shootAt = function (at, dist) { calls.push({ at: at, dist: dist }); };
+    try {
+      g.teleport(0, g.cfg.eye, 0);
+      g.showRemoteShot({
+        origin: { x: 12, y: 1.5, z: -4 },
+        point: { x: 0, y: 1.5, z: 0 },
+      });
+    } finally { g.sfx.shootAt = real; }
+
+    assert.equal(calls.length, 1, 'the shot made no sound');
+    assert.ok(calls[0].at, 'the sound was not given a place');
+    assert.close(calls[0].at.x, 12, 0.01, 'x');
+    assert.close(calls[0].at.z, -4, 0.01, 'z');
+    assert.close(calls[0].dist, Math.hypot(12, 1.5 - g.cfg.eye, 4), 0.1, 'distance');
+  });
+
+  it('gives a hunter the same treatment as a player', function () {
+    // a hunter's round goes through the same path, so it is placed too
+    var calls = [];
+    var real = g.sfx.shootAt;
+    g.sfx.shootAt = function (at) { calls.push(at); };
+    try {
+      g.takeNpcRound({
+        origin: { x: -9, y: 1.55, z: 6 },
+        dir: { x: 1, y: 0, z: 0 },
+        point: { x: 9, y: 1.55, z: 6 },
+        distance: 18, index: 0,
+      });
+    } finally { g.sfx.shootAt = real; }
+    assert.equal(calls.length, 1, 'the hunter fired silently');
+    assert.close(calls[0].x, -9, 0.01, 'a hunter is heard from its own muzzle');
+  });
+
+  it('points the ears where the camera is looking', function () {
+    // without this every placed sound is judged against a listener at the
+    // origin facing -Z, which is right exactly once
+    g.teleport(7, g.cfg.eye, -3);
+    g.aimAt(new THREE.Vector3(7, g.cfg.eye, -20));
+    assert.ok(g.updateEars(), 'the listener was never told anything');
+    var st = g.sfx.spatial();
+    assert.ok(st.ready || st.pendingPose,
+              'neither placed nor remembered for when it can be');
+  });
+
+  it('counts a step in metres, not seconds', function () {
+    /* So a sprint puts feet down faster than a walk without anything here
+     * having to know which is happening. */
+    var own = 0;
+    var real = g.sfx.step;
+    g.sfx.step = function (at) { if (!at) own++; };
+    try {
+      g.setActive(true);
+      Object.keys(g.keys).forEach(function (k) { g.keys[k] = false; });
+      g.teleport(0, g.cfg.eye, 0);
+      var from = g.state.pos.clone();
+      g.setKey('KeyW', true);
+      for (var t = 0; t < 3; t += 1 / 60) g.update(1 / 60);
+      g.setKey('KeyW', false);
+      var went = Math.hypot(g.state.pos.x - from.x, g.state.pos.z - from.z);
+      assert.greater(own, 0, 'walking made no sound at all');
+      // one per stride, give or take the step that was part way through
+      var wanted = went / g.cfg.stride;
+      assert.less(Math.abs(own - wanted), 2,
+        own + ' steps for ' + went.toFixed(1) + 'u at a stride of ' + g.cfg.stride);
+    } finally { g.sfx.step = real; }
+  });
+
+  it('does not make a sound standing still', function () {
+    // ours only: the NPCs are walking about and theirs are placed, not centred
+    var own = 0;
+    var real = g.sfx.step;
+    g.sfx.step = function (at) { if (!at) own++; };
+    try {
+      Object.keys(g.keys).forEach(function (k) { g.keys[k] = false; });
+      g.teleport(0, g.cfg.eye, 0);
+      for (var t = 0; t < 2; t += 1 / 60) g.update(1 / 60);
+    } finally { g.sfx.step = real; }
+    assert.equal(own, 0, 'it made ' + own + ' footsteps going nowhere');
+  });
+
+  it('places everybody elses footsteps and centres your own', function () {
+    var placed = [], mine = 0;
+    var real = g.sfx.step;
+    g.sfx.step = function (at) { if (at) placed.push(at); else mine++; };
+    try {
+      g.setActive(true);
+      Object.keys(g.keys).forEach(function (k) { g.keys[k] = false; });
+      // stand in the middle of the NPCs so they are inside hearing
+      var npc = g.npcs.filter(function (n) { return n.alive; })[0];
+      assert.ok(npc, 'no NPC to listen to');
+      g.teleport(npc.root.position.x + 2, g.cfg.eye, npc.root.position.z + 2);
+      for (var t = 0; t < 4; t += 1 / 60) g.update(1 / 60);
+    } finally { g.sfx.step = real; }
+
+    assert.greater(placed.length, 0, 'nobody elses footsteps were heard');
+    placed.forEach(function (at) {
+      assert.ok(typeof at.x === 'number' && typeof at.z === 'number',
+                'a placed step with no place');
+    });
+    assert.equal(mine, 0, 'standing still still made our own footsteps');
+  });
+
+  it('drops footsteps from too far off before building anything', function () {
+    /* In a level with a crowd in it the ones out of earshot are most of them,
+     * and the cheapest sound is the one that is never made. */
+    var placed = 0;
+    var real = g.sfx.step;
+    g.sfx.step = function (at) { if (at) placed++; };
+    try {
+      var far = { x: 0, y: 0, z: 0 };
+      var walker = { stride: 0 };
+      g.teleport(0, g.cfg.eye, 0);
+      // a walker well past stepRange, moving a whole stride at a time
+      far.x = g.cfg.stepRange + 12;
+      for (var i = 0; i < 20; i++) g.footstepAt(walker, far, g.cfg.stride);
+      assert.equal(placed, 0, 'heard ' + placed + ' steps from out of range');
+
+      // and one within it, to prove the test can tell the difference
+      far.x = 3;
+      walker.stride = 0;
+      for (var j = 0; j < 20; j++) g.footstepAt(walker, far, g.cfg.stride);
+      assert.greater(placed, 0, 'heard nothing from right beside us either');
+    } finally { g.sfx.step = real; }
+  });
+
+  it('keeps a lid on how many sounds are placed at once', function () {
+    // a crowd all firing is not worth hearing every one of
+    var st = g.sfx.spatial();
+    assert.greater(st.maxVoices, 0, 'no cap at all');
+    assert.less(st.maxVoices, 64, 'a cap that is not one');
+    assert.less(st.voices, st.maxVoices + 1, 'more voices than the cap allows');
+  });
+});
+
 describe('Shadows', function () {
   function sunOf() {
     return g.scene.children.filter(function (c) { return c.isDirectionalLight; })[0];

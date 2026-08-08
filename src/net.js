@@ -37,9 +37,12 @@ var MAX_BUFFERED = 90;
  * matching that here keeps a figure's stride identical whether it is being
  * simulated locally or followed over the wire. */
 var PHASE_PER_UNIT = 2.4;
+// scratch, so placing a footstep does not allocate once per walker per frame
+var _stepAt = null;
 
 PB.createNet = function (opts) {
   var THREE = global.THREE;
+  if (!_stepAt) _stepAt = new THREE.Vector3();
   var url = opts.url;
   var name = opts.name || 'player';
 
@@ -647,6 +650,14 @@ PB.createNet = function (opts) {
       if (r.last) {
         var moved = Math.hypot(x - r.last.x, z - r.last.z);
         r.phase += moved * PHASE_PER_UNIT;   // legs keep step with the ground
+        /* And a footfall, placed where they are. Driven from here rather than
+         * from the engine's own loop because a remote is not simulated — it is
+         * two snapshots and a fraction, and this is the only place the ground
+         * it covered is known. Only while they are on it. */
+        if (!!pb[6] && game.footstepAt) {
+          _stepAt.set(x, y - game.cfg.eye, z);
+          game.footstepAt(r, _stepAt, moved, false);
+        }
       }
       r.last = { x: x, y: y, z: z };
 
@@ -715,14 +726,17 @@ PB.createNet = function (opts) {
         n.maxHealth = nb[10];
         if (n.bar) n.bar.set(n.alive ? n.health : 0, n.maxHealth);
       }
+      /* How far it actually got this frame. Worked out here rather than inside
+       * the block below because the legs and the footfall both want it, and
+       * the legs are only posed for the ones drawn in full. Using the gap
+       * between the two snapshots instead advanced a whole snapshot's worth of
+       * stride every frame, which ran the legs at about three times speed. */
+      var stepped = n.netLast
+        ? Math.hypot(nx - n.netLast.x, nz - n.netLast.z)
+        : 0;
+      n.netLast = { x: nx, z: nz };
+
       if (n.fig) {
-        // Step the run cycle by what actually moved this frame. Using the gap
-        // between the two snapshots instead advanced a whole snapshot's worth
-        // of stride every frame, which ran the legs at about three times speed.
-        var stepped = n.netLast
-          ? Math.hypot(nx - n.netLast.x, nz - n.netLast.z)
-          : 0;
-        n.netLast = { x: nx, z: nz };
         n.netPhase = (n.netPhase || 0) + stepped * PHASE_PER_UNIT;
         // and only for the ones drawn in full: posing writes to the torso,
         // which is the whole of the distant single-box form
@@ -732,6 +746,13 @@ PB.createNet = function (opts) {
           });
         }
       }
+      /* And a footfall for the ones the server is walking. The engine's own
+       * loop does not run for NPCs in a networked game, so the only place the
+       * ground one covered is known is right here, between two snapshots. */
+      if (n.alive && n.grounded && game.footstepAt) {
+        game.footstepAt(n, n.root.position, stepped, !!n.hunter);
+      }
+
       /* How far over it has fallen, and which way. The server owns both; a
        * body that arrived already down still has to lie the way it fell, so
        * the direction rides in the snapshot rather than being worked out from

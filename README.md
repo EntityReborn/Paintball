@@ -165,6 +165,48 @@ readout with the time left. The shield is deliberately the short one — there i
 no partial version of not being hurt, and fifteen seconds of it is most of a
 firefight.
 
+## Sound
+
+Everything is synthesised — oscillators and filtered noise, no assets — and
+everything that happens somewhere is played from there.
+
+**Gunfire is placed.** Another player's round, or a hunter's, comes from the
+muzzle it left. It used to be a distance and nothing else, which meant a hunter
+behind you and one in front of you sounded identical and a shot told you only
+that somebody had fired. Shots use HRTF panning, because knowing which way to
+turn is the entire point of hearing one; the old distance shaping stays on top
+of the falloff, since what makes a far shot sound far is that the crack has
+gone dull as well as quiet.
+
+**Footsteps.** Yours are centred — you are where the ears are, so there is
+nothing to place. Everybody else's is placed, and a hunter's is heavier and
+duller than a wanderer's, which is the one difference worth being able to hear
+without looking round. A step is a *distance*, not a time: counting metres
+means a sprint puts feet down faster than a walk without anything having to
+know which is happening, and someone edging along does not sound like someone
+marching.
+
+Two budgets keep a crowd affordable, both of them measured rather than guessed:
+
+| | |
+| --- | --- |
+| `stepRange` 16 | past this a step is dropped before any node is built |
+| 12 steps/second | a token bucket, shared by everyone you can hear |
+| 24 placed voices | the ceiling for all positional sound at once |
+
+Three hundred figures with a hundred and twenty inside earshot put down two
+hundred and thirty feet a second, which is not a crowd you can hear — it is a
+hiss — and it pegged the voice cap, so a gunshot arriving mid-crowd had nothing
+left to be placed with. Shortening the range and rationing the steps took the
+cost from 0.42ms a frame to 0.10ms and left the cap free for the sounds that
+matter. Footsteps use equalpower rather than HRTF for the same reason: it is a
+pan and a falloff and costs nearly nothing.
+
+Past the voice cap a placed sound is **dropped, not centred**. Falling back to
+the bus was worse than silence — a footstep from forty metres away arrived
+inside your own head at full volume, so saturating the cap turned a distant
+crowd into a close one.
+
 **Two health packs** stand in the arena, in the same two spots for everyone.
 Walk over one while hurt and it puts you straight back to full; it is gone for
 twenty-five seconds after that, and then it is back.
@@ -594,7 +636,7 @@ src/debug.js    the hitbox and collider overlays
 src/ui.js       the pause-screen panels
 src/weapon.js   the viewmodel and its reload animation
 src/effects.js  pooled score labels, debris shards, break flashes
-src/audio.js    synthesised sound effects
+src/audio.js    synthesised sound effects, and where in the world they came from
 vendor/         three.js r160 (UMD build, loaded as a classic script)
 tests/          browser test suite and the end-to-end drivers
 tests/chrome.js how every driver launches Chrome, in one place
@@ -771,6 +813,15 @@ re-entering the window rather than a real flick.
   not like the others". The outside is a single box now — literally the same
   geometry a crate is — with an inside-out box inside it for the walls you see
   from within, and the secret lives entirely in the collider lists.
+- **A crowd's footsteps drowned out the gunfire, then stopped being a crowd.**
+  Two faults in one. The audio graph capped how many sounds could be placed at
+  once, and past the cap it fell back to the plain bus — so a footstep from
+  forty metres away played centred, in your head, at full volume, and
+  saturating the cap turned a distant crowd into a close one. Dropped now: a
+  sound that cannot be put where it belongs does not belong. And the volume
+  itself was the other half — 230 footfalls a second is a hiss, not a crowd, so
+  they have their own token bucket well below the voice cap and cannot crowd
+  out a shot.
 - **A strip of floor along two walls was dark for no reason.** The shadow
   camera was the arena's half-width and a fifth on every side, which sounds
   generous and is not: the sun looks in diagonally, so what the map has to

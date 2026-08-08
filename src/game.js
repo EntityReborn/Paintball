@@ -132,6 +132,15 @@ var DEFAULTS = {
   warpRadius: 1.6,
   warpCooldown: 3,
   mode: 'pvp',                // pvp | pve | peaceful — see PB.MODES
+  /* How far a sound carries, and how often a walking figure puts a foot down.
+   * The stride is a distance rather than a time, so a sprinting player's steps
+   * come faster without anything having to know they are sprinting. */
+  hearing: 55,
+  stride: 1.9,                // world units between footfalls
+  /* Past this nobody's footsteps are placed at all. Deliberately short: a
+   * footstep is a proximity cue, and one you can hear from across the arena is
+   * not one. It is also most of what keeps a crowd affordable. */
+  stepRange: 16,
 };
 
 var VIEW_LAYER = 1;         // the gun renders here, in a second depth-cleared pass
@@ -397,6 +406,12 @@ function createGame(options) {
   }
   var hunterTargets = ownHunterTargets;
   ctx.hunterTargets = function () { return hunterTargets(); };
+  /* Footfalls, for the figures the engine walks itself. Reached through the
+   * context rather than imported, because the sound is the game's — it needs
+   * the camera to know how far off the walker is — and the NPCs are not. */
+  ctx.footstepAt = function (walker, at, moved, heavy) {
+    return footstepAt(walker, at, moved, heavy);
+  };
 
   var world = PB.createWorld(ctx);
   var colliders = ctx.colliders = world.colliders;
@@ -1211,6 +1226,7 @@ function createGame(options) {
 
     var speed = Math.hypot(v.x, v.z);
     state.stats.distance += speed * dt;
+    ownFootsteps(speed * dt);
     state.bob += dt * speed * 1.35;
     var amp = dead ? 0 : Math.min(1, speed / walkSpeed());
     var bobY = state.grounded ? Math.sin(state.bob * 2) * 0.035 * amp : 0;
@@ -1220,6 +1236,56 @@ function createGame(options) {
     state.bobX = bobX;
     state.bobY = bobY;
     state.standingOn = state.grounded ? supportingMover(p) : null;
+  }
+
+  /* ------------------------------------------------------------ footsteps */
+  /* A step is a distance, not a time.
+   *
+   * Counting metres rather than seconds means a sprint puts feet down faster
+   * than a walk without anything here having to know which one is happening,
+   * and it means a player edging along at a crawl does not sound like one
+   * marching. Only while on the ground: falling is silent, and the landing is
+   * the next step whenever it comes.
+   *
+   * Your own is centred rather than placed. You are where the ears are, so a
+   * panner would either do nothing or, at exactly zero distance, do something
+   * undefined.
+   */
+  var ownStride = 0;
+
+  function ownFootsteps(moved) {
+    if (cfg.headless || !state.active || state.dead) return;
+    if (!state.grounded || moved < 1e-5) { return; }
+    ownStride += moved;
+    if (ownStride < cfg.stride) return;
+    ownStride = 0;
+    sfx.step();
+  }
+
+  /* Somebody else's, placed where they are.
+   *
+   * Anything past stepRange is dropped before a node is made rather than being
+   * left to the falloff to silence: in a level with a crowd in it, the ones far
+   * enough away to be inaudible are most of them, and the cheapest sound is the
+   * one that is never built.
+   */
+  /* `walker` is only ever the thing that carries the running total between
+   * frames — an NPC, a remote's record — and `at` is where the sound goes. The
+   * two are separate because a remote player has no object in the world of its
+   * own: it is two snapshots and a fraction, and the position is worked out
+   * fresh each frame while the total has to survive. */
+  var _earAt = new THREE.Vector3();
+
+  function footstepAt(walker, at, moved, heavy) {
+    if (cfg.headless || !walker || !at || moved < 1e-5) return false;
+    walker.stride = (walker.stride || 0) + moved;
+    if (walker.stride < cfg.stride) return false;
+    walker.stride = 0;
+    camera.getWorldPosition(_earAt);
+    var dx = _earAt.x - at.x, dy = _earAt.y - at.y, dz = _earAt.z - at.z;
+    if (dx * dx + dy * dy + dz * dz > cfg.stepRange * cfg.stepRange) return false;
+    sfx.step({ x: at.x, y: at.y, z: at.z }, heavy);
+    return true;
   }
 
   /* --------------------------------------------------------- being dead */
@@ -1440,6 +1506,7 @@ function createGame(options) {
     perkSystem.update(dt, state.pos);
     updateMedkits(dt);
     updateWarps(dt);
+    updateEars();
     stockSecrets(state.elapsed);
     if (state.shield > 0) {
       state.shield = Math.max(0, state.shield - dt);
@@ -1451,6 +1518,25 @@ function createGame(options) {
     poseGun();
     emit('frame', dt);
   }
+
+  /* Point the ears where the camera is looking, once a frame.
+   *
+   * Without this every placed sound is judged against a listener sitting at
+   * the origin facing -Z, which is right exactly once — at the spawn, before
+   * anybody has turned. */
+  var _earPos = new THREE.Vector3();
+  var _earFwd = new THREE.Vector3();
+  var _earUp = new THREE.Vector3();
+
+  function updateEars() {
+    if (cfg.headless || !sfx.listen) return false;
+    camera.updateMatrixWorld(true);
+    camera.getWorldPosition(_earPos);
+    camera.getWorldDirection(_earFwd);
+    _earUp.set(0, 1, 0).applyQuaternion(camera.getWorldQuaternion(_earQuat));
+    return sfx.listen(_earPos, _earFwd, _earUp);
+  }
+  var _earQuat = new THREE.Quaternion();
 
   function render() {
     if (!renderer) return;
@@ -1571,7 +1657,7 @@ function createGame(options) {
     var to = new THREE.Vector3(msg.point.x, msg.point.y, msg.point.z);
     var mesh = fireBullet(from, { point: to }, true);
     camera.getWorldPosition(_shotFrom);
-    sfx.shootAt(_shotFrom.distanceTo(from));
+    sfx.shootAt(from, _shotFrom.distanceTo(from));
     return mesh;
   }
 
@@ -1992,6 +2078,9 @@ function createGame(options) {
     traceShot: traceShot, aliveCount: aliveCount, movePlayer: movePlayer,
     updateNPCs: updateNPCs, knockDownNPC: knockDownNPC, hitNPC: hitNPC,
     poseDowned: N.poseDowned,
+    // footsteps: the network layer drives them for remotes and for the NPCs
+    // the server owns, since neither is stepped by the engine's own loop
+    footstepAt: footstepAt, updateEars: updateEars,
     huntersFor: huntersFor, placeNPC: placeNPC, poseGun: poseGun,
     arenaFingerprint: arenaFingerprint,
     // what the shadow camera was fitted to, so a test can check it covers

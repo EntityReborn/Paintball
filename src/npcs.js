@@ -664,6 +664,8 @@ PB.createNPCs = function (ctx) {
     n.root.updateMatrixWorld(true);
   }
 
+  var _wasAt = new THREE.Vector3();
+
   function updateNPCs(dt) {
     for (var i = 0; i < npcs.length; i++) {
       var n = npcs[i];
@@ -689,6 +691,9 @@ PB.createNPCs = function (ctx) {
         if (n.y <= 0 && n.topple >= Math.PI / 2 - 0.001) n.settled = true;
         continue;
       }
+
+      // how far it actually got this frame, for the footfall below
+      _wasAt.copy(n.root.position);
 
       if (n.hunter) huntThink(n, dt);
       else wanderThink(n, dt);
@@ -740,6 +745,15 @@ PB.createNPCs = function (ctx) {
       // three.js would otherwise only refresh it at render time, so shots would
       // register against where the figure was on the previous frame
       n.root.updateMatrixWorld(true);
+
+      /* A footfall, if it has covered a stride's worth since the last one and
+       * it is on the ground to have put a foot down at all. A hunter's is
+       * heavier, which is the one thing worth being able to hear the
+       * difference in without looking round. */
+      if (n.grounded && ctx.footstepAt) {
+        ctx.footstepAt(n, n.root.position,
+                       _wasAt.distanceTo(n.root.position), !!n.hunter);
+      }
 
       /* animation, for the ones being drawn in full. A run cycle writes to
        * the torso's own position and rotation, which is exactly what the
