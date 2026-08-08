@@ -657,18 +657,35 @@ async function advance(page, seconds, timeout = 60000) {
             `score ${npcShot.scoreBefore} -> ${npcShot.scoreAfter}`);
       check('the NPC is down on the shooting client', npcShot.aliveHere === false);
 
+      /* Not rotation.x. A body falls in the direction the round was going now,
+       * so it is a rotation about a horizontal axis that is different every
+       * time, and the one Euler angle that used to be the whole of it is only
+       * one component of it. What travels is how far over it has fallen and
+       * which way; where its head ends up is what says it worked. */
       const boSaw = await bo.evaluate(async (i) => {
-        // the body falls over the course of a second, so give it that
-        for (let k = 0; k < 30; k++) {
-          if (game.npcs[i].root.rotation.x > 0.5) break;
+        // wait for it to finish falling, not merely to start: a right angle is
+        // where it comes to rest, and half way there is still leaning
+        for (let k = 0; k < 40; k++) {
+          if ((game.npcs[i].topple || 0) >= Math.PI / 2 - 0.02) break;
           await new Promise(r => setTimeout(r, 100));
         }
-        return { alive: game.npcs[i].alive, toppled: game.npcs[i].root.rotation.x };
+        const n = game.npcs[i];
+        const head = new THREE.Vector3(0, 1.6, 0).applyQuaternion(n.root.quaternion);
+        return {
+          alive: n.alive, topple: n.topple || 0, fallDir: n.fallDir,
+          headY: head.y, headFlat: Math.hypot(head.x, head.z),
+        };
       }, npcShot.index);
       check('the NPC is down on the other client too', boSaw.alive === false,
             `bo sees alive=${boSaw.alive}`);
-      check('the body toppled over rather than walking on', boSaw.toppled > 0.5,
-            `rotation.x ${boSaw.toppled.toFixed(2)}`);
+      check('the body toppled over rather than walking on', boSaw.topple > 1.5,
+            `fell ${boSaw.topple.toFixed(2)} of a right angle`);
+      check('and it is lying down, not leaning',
+            boSaw.headY < 0.3 && boSaw.headFlat > 1.3,
+            `head is ${boSaw.headY.toFixed(2)} up and ${boSaw.headFlat.toFixed(2)} out`);
+      check('with the direction it fell carried across the wire',
+            typeof boSaw.fallDir === 'number' && isFinite(boSaw.fallDir),
+            `fallDir ${boSaw.fallDir}`);
 
       // and it must not come back when the next snapshots land
       await sleep(1500);

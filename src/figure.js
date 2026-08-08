@@ -85,8 +85,13 @@ PB.setFigureDetail = function (fig, full) {
  *
  * Players are not turned through here: a yaw of 0 already looks down -Z, the
  * same way the camera does, so their figures take their yaw unchanged. */
+/* The half turn on its own, for the callers that want the angle rather than the
+ * side effect — a downed figure's orientation is built as a quaternion, and it
+ * still has to agree with everything that sets rotation.y directly. */
+PB.headingAngle = function (heading) { return heading + Math.PI; };
+
 PB.faceHeading = function (obj, heading) {
-  obj.rotation.y = heading + Math.PI;
+  obj.rotation.y = PB.headingAngle(heading);
   return obj.rotation.y;
 };
 

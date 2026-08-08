@@ -820,7 +820,7 @@ class Room {
        * and counts, and the room is told which kind this was so every screen
        * can show a hit that landed differently from one that ended it. */
       const npc = hit.npc;
-      const down = g.hitNPC(npc, 1);
+      const down = g.hitNPC(npc, 1, dir);
       event.kind = 'npc';
       event.index = g.npcs.indexOf(npc);
       event.hunter = !!npc.hunter;
@@ -972,7 +972,11 @@ class Room {
       npcs: g.npcs.map(n => ([
         round(n.root.position.x), round(n.root.position.y), round(n.root.position.z),
         round(n.heading), n.alive ? 1 : 0, n.grounded ? 1 : 0, round(n.vy),
-        round(n.root.rotation.x),        // toppling over when downed
+        /* How far through falling over it is, and which way it is going —
+         * both only mean anything once it is down. The direction never changes
+         * after the round that caused it, but it has to ride along: a client
+         * that joined afterwards was never told about the shot. */
+        round(n.topple || 0), round(n.fallDir || 0),
         // what is left of it, so a hurt hunter wears it where everyone sees
         n.health, n.maxHealth,
       ])),

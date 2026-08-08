@@ -566,12 +566,45 @@ PB.createNPCs = function (ctx) {
     return npc && npc.hunter ? cfg.scoreHunter : cfg.scoreNpc;
   }
 
-  function knockDownNPC(npc) {
+  /* Which way a body goes down.
+   *
+   * `dir` is the direction the round was travelling, so a figure falls away
+   * from whoever shot it. Every one of them used to topple forward — a rotation
+   * about its own X axis — which made a cleared level a field of the same pose
+   * repeated, and made a death tell you nothing about where it came from.
+   *
+   * Stored as one angle rather than a vector because it rides in the snapshot
+   * next to every other NPC in the level, and because it never changes once it
+   * is set. A round with no direction to it — the level tidying up, or a client
+   * replaying a death it was not told the details of — still falls forward,
+   * which is what it did before.
+   */
+  function fallAngleFrom(npc, dir) {
+    if (dir) {
+      var fx = dir.x, fz = dir.z;
+      if (fx * fx + fz * fz > 1e-6) return Math.atan2(fx, fz);
+    }
+    return npc.heading + Math.PI;         // face first, the way it was facing
+  }
+
+  function knockDownNPC(npc, dir) {
     if (!npc.alive) return 0;
     npc.alive = false;
     npc.health = 0;
     npc.downFor = 0;
     npc.vy = 3.0;
+    npc.fallDir = fallAngleFrom(npc, dir);
+    npc.topple = 0;
+    /* Not all at the same speed either. Two bodies falling in the same
+     * direction in lockstep read as one animation played twice.
+     *
+     * Deliberately NOT the world RNG — the same trap the floor speckles fell
+     * into. That stream generates the arena, and drawing from it every time
+     * something dies advances it on whichever side did the killing and not on
+     * the other, so the two worlds come apart. Nothing depends on this number
+     * agreeing: online the server sends how far over a body has fallen, frame
+     * by frame, and offline there is nobody to agree with. */
+    npc.fallRate = 3.4 + Math.random() * 2.4;
 
     // a body is no longer a bullet stop
     var idx = solidMeshes.indexOf(npc.hitbox);
@@ -596,7 +629,7 @@ PB.createNPCs = function (ctx) {
    * decides what the server tells the room, and offline it decides whether the
    * score and the count move.
    */
-  function hitNPC(npc, damage) {
+  function hitNPC(npc, damage, dir) {
     if (!npc || !npc.alive) return { hit: false, killed: false, health: 0 };
     npc.health -= (damage || 1);
     if (npc.health > 0) {
@@ -604,8 +637,31 @@ PB.createNPCs = function (ctx) {
       emit('npcHurt', { npc: npc, health: npc.health, max: npc.maxHealth });
       return { hit: true, killed: false, health: npc.health };
     }
-    knockDownNPC(npc);
+    knockDownNPC(npc, dir);
     return { hit: true, killed: true, health: 0 };
+  }
+
+  /* Lay a body down along n.fallDir, however far through the fall it is.
+   *
+   * A world-space tip about the horizontal axis at right angles to the fall,
+   * applied on top of the way the figure was facing. Two Euler angles would be
+   * the obvious way and the wrong one: x and z both at their limit is a tip of
+   * more than a right angle, so a body shot on the diagonal drives its head
+   * through the floor.
+   */
+  var _fallAxis = new THREE.Vector3();
+  var _fallQuat = new THREE.Quaternion();
+  var _headQuat = new THREE.Quaternion();
+  var _UP = new THREE.Vector3(0, 1, 0);
+
+  function poseDowned(n) {
+    var a = n.fallDir || 0;
+    // up x fall, for fall = (sin a, 0, cos a)
+    _fallAxis.set(Math.cos(a), 0, -Math.sin(a));
+    _fallQuat.setFromAxisAngle(_fallAxis, n.topple || 0);
+    _headQuat.setFromAxisAngle(_UP, PB.headingAngle(n.heading));
+    n.root.quaternion.copy(_fallQuat).multiply(_headQuat);
+    n.root.updateMatrixWorld(true);
   }
 
   function updateNPCs(dt) {
@@ -627,10 +683,10 @@ PB.createNPCs = function (ctx) {
         n.vy -= cfg.gravity * dt;
         n.y = Math.max(0, n.y + n.vy * dt);
         p.y = n.y;
-        n.root.rotation.x = Math.min(Math.PI / 2, n.root.rotation.x + dt * 4.5);
+        n.topple = Math.min(Math.PI / 2, (n.topple || 0) + dt * (n.fallRate || 4.5));
         n.torso.rotation.x = 0;
-        n.root.updateMatrixWorld(true);
-        if (n.y <= 0 && n.root.rotation.x >= Math.PI / 2 - 0.001) n.settled = true;
+        poseDowned(n);
+        if (n.y <= 0 && n.topple >= Math.PI / 2 - 0.001) n.settled = true;
         continue;
       }
 
@@ -698,6 +754,7 @@ PB.createNPCs = function (ctx) {
   return {
     npcs: npcs, makeNPC: makeNPC, placeNPC: placeNPC,
     npcsAlive: npcsAlive, knockDownNPC: knockDownNPC, hitNPC: hitNPC,
+    poseDowned: poseDowned,
     huntersFor: huntersFor, updateNPCs: updateNPCs,
     updateShadowBudget: updateShadowBudget,
   };

@@ -225,17 +225,24 @@ function createGame(options) {
   sun.castShadow = cfg.shadows;
   var shadowTexels = cfg.arena > 70 ? 2048 : 1024;
   sun.shadow.mapSize.set(shadowTexels, shadowTexels);
-  /* And the bias that actually suits this: normalBias moves the comparison
-   * along the surface normal, which is the one that fixes acne on faces lit at
-   * a glancing angle without lifting shadows off the feet of what casts them.
-   * A flat depth bias alone cannot do both. */
-  sun.shadow.normalBias = 0.035;
+  /* The two biases do different jobs and are tuned against each other.
+   *
+   * normalBias offsets the lookup along the receiving surface's normal, which
+   * is what stops a lit face shadowing itself. A flat depth bias cannot do that
+   * job without also pushing every shadow away from whatever casts it — which
+   * is what left a lit gap between a crate and its own shadow, the crate
+   * apparently floating a hand's width off the ground.
+   *
+   * So: normalBias carries the acne, kept to well under a texel, and the depth
+   * bias is small enough that contact is contact. The map being twice the
+   * resolution is what makes both numbers affordable. */
+  sun.shadow.normalBias = 0.012;
   sun.shadow.camera.left = -half * 1.2;
   sun.shadow.camera.right = half * 1.2;
   sun.shadow.camera.top = half * 1.2;
   sun.shadow.camera.bottom = -half * 1.2;
   sun.shadow.camera.far = 120;
-  sun.shadow.bias = -0.0009;
+  sun.shadow.bias = -0.00012;
   sun.shadow.camera.updateProjectionMatrix();
   scene.add(sun);
 
@@ -1222,7 +1229,8 @@ function createGame(options) {
         recordHit(h.point);
         // a hunter takes several rounds, so only the one that finishes it
         // counts as one put down
-        var down = hitNPC(h.npc, 1);
+        // the way the round was going, so the body goes down away from us
+        var down = hitNPC(h.npc, 1, b.dir);
         if (down.killed) state.stats.npcsDown++;
         emit('hit', {
           npc: h.npc, killed: down.killed, health: down.health,
@@ -1898,6 +1906,7 @@ function createGame(options) {
     moveTarget: moveTarget, makeNPC: makeNPC,
     traceShot: traceShot, aliveCount: aliveCount, movePlayer: movePlayer,
     updateNPCs: updateNPCs, knockDownNPC: knockDownNPC, hitNPC: hitNPC,
+    poseDowned: N.poseDowned,
     huntersFor: huntersFor, placeNPC: placeNPC, poseGun: poseGun,
     arenaFingerprint: arenaFingerprint,
     stats: stats, resetStats: resetStats, recordHit: recordHit, FEET_PER_UNIT: FEET_PER_UNIT,

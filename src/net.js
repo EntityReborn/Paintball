@@ -710,9 +710,9 @@ PB.createNet = function (opts) {
       /* What is left of it, so a hurt hunter wears a bar like a hurt player.
        * Set here as well as in the engine's own loop: that loop is skipped
        * entirely in a networked game, because the NPCs belong to the server. */
-      if (nb.length > 9) {
-        n.health = nb[8];
-        n.maxHealth = nb[9];
+      if (nb.length > 10) {
+        n.health = nb[9];
+        n.maxHealth = nb[10];
         if (n.bar) n.bar.set(n.alive ? n.health : 0, n.maxHealth);
       }
       if (n.fig) {
@@ -732,7 +732,15 @@ PB.createNet = function (opts) {
           });
         }
       }
-      if (nb.length > 7) n.root.rotation.x = nb[7];      // toppled when downed
+      /* How far over it has fallen, and which way. The server owns both; a
+       * body that arrived already down still has to lie the way it fell, so
+       * the direction rides in the snapshot rather than being worked out from
+       * a shot this client may never have been told about. */
+      if (nb.length > 8) {
+        n.topple = nb[7];
+        n.fallDir = nb[8];
+        if (!n.alive) game.poseDowned(n);
+      }
       n.root.updateMatrixWorld(true);
     }
 

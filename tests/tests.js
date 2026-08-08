@@ -445,15 +445,19 @@ describe('World', function () {
       rampSteps += r.steps.length;
     });
     var ramps = g.obstacleMeshes.filter(function (m) { return m.name === 'wedge'; }).length;
-    /* Minus the ways into the secret rooms. Those are obstacle meshes like any
-     * other — drawn, shot at, and stopping an NPC — and are deliberately the
-     * one kind of solid that is not on the player's list. */
-    var ways = g.secrets.length;
-    var expected = 4 + (g.obstacleMeshes.length - ramps) + rampSteps +
-                   g.movers.length + g.balcony.parts.length;
-    assert.equal(g.colliders.length, expected - ways, 'collider count');
-    // and the NPCs' list is the same thing with those ways back in it
-    assert.equal(g.npcColliders.length, expected, 'npc collider count');
+    /* A secret room is one mesh and several boxes, the same way a ramp is —
+     * four walls and a lid, of which the way in is on the NPCs' list alone.
+     * Counted from what the room actually registered rather than from the
+     * arithmetic that made it. */
+    var secretBoxes = 0;
+    g.secrets.forEach(function (s) { secretBoxes += s.blocks.length; });
+    var plain = g.obstacleMeshes.length - ramps - g.secrets.length;
+
+    var forNPCs = 4 + plain + rampSteps + secretBoxes +
+                  g.movers.length + g.balcony.parts.length;
+    assert.equal(g.npcColliders.length, forNPCs, 'npc collider count');
+    // the player's list is the same thing less one way in per room
+    assert.equal(g.colliders.length, forNPCs - g.secrets.length, 'collider count');
   });
 
   it('adds every solid to the scene graph', function () {
@@ -4054,34 +4058,90 @@ describe('Secret rooms', function () {
     }
   });
 
-  it('lets a player through one wall and nothing else through any of them', function () {
-    /* The whole feature in one test. Every face of the room is drawn, is shot
-     * at and stops an NPC; exactly one of them lets a player past. If the way
-     * in ever appeared on the player's collider list the room would be sealed,
-     * and if it ever came off the NPC list a wanderer would walk out of one
-     * and give the room away. */
+  it('is one box from outside, exactly like an ordinary crate', function () {
+    /* The giveaway this replaced: four wall boxes and a lid. The walls
+     * overlapped in a thickness-square column at each corner, which z-fights,
+     * and the lid was inset from the outer faces by half a thickness, which
+     * left a step along the top edge. Both were visible from across the arena.
+     * There is nothing to come apart on a single box. */
     var s = g.secrets[0];
     assert.ok(s, 'no secret room to test');
 
-    var walls = s.parts.filter(function (p) { return p.name === 'secretWall'; });
-    assert.equal(walls.length, 4, 'a secret room should have four faces');
+    var shown = s.parts.filter(function (p) { return p.name === 'secret'; });
+    assert.equal(shown.length, 1, 'the outside should be exactly one mesh');
 
-    var inColliders = 0, inNpc = 0, inSolid = 0;
-    walls.forEach(function (wall) {
-      var box = new THREE.Box3().setFromObject(wall);
-      var near = function (list) {
-        return list.some(function (b) {
-          return b.min.distanceTo(box.min) < 0.01 && b.max.distanceTo(box.max) < 0.01;
-        });
-      };
-      if (near(g.colliders)) inColliders++;
-      if (near(g.npcColliders)) inNpc++;
-      if (g.solidMeshes.indexOf(wall) !== -1) inSolid++;
+    var geo = shown[0].geometry;
+    assert.equal(geo.type, 'BoxGeometry', 'not the geometry a crate is made of');
+    assert.close(geo.parameters.width, s.size, 0.001, 'width');
+    assert.close(geo.parameters.depth, s.size, 0.001, 'depth');
+    assert.close(geo.parameters.height, s.height, 0.001, 'height');
+
+    // and its silhouette is a plain box: nothing sticks out anywhere
+    var box = new THREE.Box3().setFromObject(shown[0]);
+    assert.close(box.max.x - box.min.x, s.size, 0.001, 'wider than it is');
+    assert.close(box.max.z - box.min.z, s.size, 0.001, 'deeper than it is');
+    assert.close(box.min.y, 0, 0.001, 'it does not sit on the floor');
+  });
+
+  it('uses the same materials the ordinary crates use', function () {
+    // a secret with a colour of its own would be found from the spawn
+    var s = g.secrets[0];
+    var shell = s.parts.filter(function (p) { return p.name === 'secret'; })[0];
+    var crate = g.obstacleMeshes.filter(function (m) { return m.name === 'obstacle'; });
+    assert.greater(crate.length, 0, 'no ordinary crates to compare against');
+    var shared = crate.some(function (m) { return m.material === shell.material; });
+    assert.ok(shared, 'the secret room has a material no crate uses');
+  });
+
+  it('stops a player at three walls and an NPC at all four', function () {
+    /* The secret is in the collider lists now, not in the geometry. If the way
+     * in ever appeared on the player's list the room would be sealed, and if it
+     * ever came off the NPC list a wanderer would walk out of one and give the
+     * room away. */
+    var s = g.secrets[0];
+    var near = function (list, box) {
+      return list.some(function (b) {
+        return b.min.distanceTo(box.min) < 0.01 && b.max.distanceTo(box.max) < 0.01;
+      });
+    };
+    var onPlayerList = 0, onNpcList = 0;
+    s.walls.forEach(function (w) {
+      if (near(g.colliders, w)) onPlayerList++;
+      if (near(g.npcColliders, w)) onNpcList++;
     });
+    assert.equal(onPlayerList, 3, 'a player should be stopped by three of the four');
+    assert.equal(onNpcList, 4, 'an NPC should be stopped by all four');
+    assert.ok(near(g.npcColliders, s.doorBox), 'the way in does not stop an NPC');
+    assert.ok(!near(g.colliders, s.doorBox), 'the way in stops a player');
+  });
 
-    assert.equal(inColliders, 3, 'a player should be stopped by three of the four');
-    assert.equal(inNpc, 4, 'an NPC should be stopped by all four');
-    assert.equal(inSolid, 4, 'every face should stop a round, the way in included');
+  it('tiles its walls rather than overlapping them at the corners', function () {
+    // colliders do not z-fight, but a player stopped twice by one corner is a
+    // player who gets stuck in it
+    var s = g.secrets[0];
+    for (var i = 0; i < s.walls.length; i++) {
+      for (var j = i + 1; j < s.walls.length; j++) {
+        var a = s.walls[i], b = s.walls[j];
+        var overlapX = Math.min(a.max.x, b.max.x) - Math.max(a.min.x, b.min.x);
+        var overlapZ = Math.min(a.max.z, b.max.z) - Math.max(a.min.z, b.min.z);
+        assert.ok(overlapX < 0.001 || overlapZ < 0.001,
+          'walls ' + i + ' and ' + j + ' overlap by ' +
+          overlapX.toFixed(2) + ' x ' + overlapZ.toFixed(2));
+      }
+    }
+  });
+
+  it('can be stood on rather than fallen into', function () {
+    var s = g.secrets[0];
+    g.setActive(true);
+    Object.keys(g.keys).forEach(function (k) { g.keys[k] = false; });
+    // dropped onto the middle of the roof, which is where a lid-less room lets
+    // you straight through
+    g.teleport(s.x, s.height + g.cfg.eye + 1.5, s.z);
+    for (var t = 0; t < 2; t += 1 / 60) g.update(1 / 60);
+    var feet = g.state.pos.y - g.cfg.eye;
+    assert.close(feet, s.height, 0.25, 'landed at ' + feet.toFixed(2) +
+                 ' with the roof at ' + s.height.toFixed(2));
   });
 
   it('walks a player in through the wall that is not one', function () {
@@ -4302,6 +4362,76 @@ describe('Who can hurt you', function () {
     assert.equal(g.state.health, 3, 'a peaceful player lost health');
 
     g.setMode('pvp');
+  });
+});
+
+describe('Going down', function () {
+  function shootDown(npc, angle) {
+    npc.alive = true;
+    npc.health = npc.maxHealth;
+    npc.settled = false;
+    npc.y = 0;
+    g.hitNPC(npc, 99, new THREE.Vector3(Math.sin(angle), 0, Math.cos(angle)));
+    for (var t = 0; t < 3; t += 1 / 60) g.update(1 / 60);
+    return npc;
+  }
+
+  it('falls away from the round that put it down', function () {
+    /* Every body used to topple forward about its own X axis, so a cleared
+     * level was the same pose repeated at different angles and a death told
+     * you nothing about where the shot came from. */
+    var npc = g.npcs.filter(function (n) { return !n.hunter; })[0];
+    assert.ok(npc, 'no wanderer to shoot');
+
+    var head = new THREE.Vector3();
+    for (var a = 0; a < 6.28; a += Math.PI / 4) {
+      npc.heading = a * 0.7;                   // and facing all sorts of ways
+      shootDown(npc, a);
+      head.set(0, 1.6, 0).applyQuaternion(npc.root.quaternion);
+      var went = Math.atan2(head.x, head.z);
+      var off = Math.abs(Math.atan2(Math.sin(went - a), Math.cos(went - a)));
+      assert.less(off, 0.05,
+        'shot from ' + (a * 57.3).toFixed(0) + ' degrees, fell towards ' +
+        (went * 57.3).toFixed(0));
+    }
+  });
+
+  it('lies flat rather than driving its head through the floor', function () {
+    /* The trap in doing this with two Euler angles: x and z both at a right
+     * angle is a tip of more than one, so a body shot on the diagonal ends up
+     * past horizontal. The diagonals are the cases that catch it. */
+    var npc = g.npcs.filter(function (n) { return !n.hunter; })[0];
+    var head = new THREE.Vector3();
+    var worst = 0;
+    for (var a = Math.PI / 4; a < 6.28; a += Math.PI / 2) {
+      shootDown(npc, a);
+      head.set(0, 1.6, 0).applyQuaternion(npc.root.quaternion);
+      worst = Math.max(worst, Math.abs(head.y));
+    }
+    assert.less(worst, 0.05, 'a body came to rest with its head ' +
+                worst.toFixed(2) + ' off the ground');
+  });
+
+  it('does not draw on the world RNG to do it', function () {
+    /* The floor-speckle trap, in a new place. The seeded stream generates the
+     * arena; spending from it every time something dies advances it on
+     * whichever side did the killing and not on the other, and the two worlds
+     * come apart. Nothing about how fast a body falls has to agree. */
+    var before = g.arenaFingerprint();
+    var npc = g.npcs.filter(function (n) { return !n.hunter; })[0];
+    for (var i = 0; i < 25; i++) shootDown(npc, i);
+    assert.equal(g.arenaFingerprint(), before,
+                 'putting things down changed the arena');
+  });
+
+  it('still falls forward when nothing said which way', function () {
+    // a client replaying a death it was told no details of
+    var npc = g.npcs.filter(function (n) { return !n.hunter; })[0];
+    npc.alive = true; npc.health = npc.maxHealth; npc.settled = false;
+    npc.heading = 0.9;
+    g.knockDownNPC(npc);
+    assert.close(npc.fallDir, PB.headingAngle(npc.heading), 0.001,
+                 'a directionless death should fall the way it was facing');
   });
 });
 

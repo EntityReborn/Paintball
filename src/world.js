@@ -460,65 +460,128 @@ PB.createWorld = function (ctx) {
   })();
 
   /* ------------------------------------------------------- secret rooms */
-  /* A crate that is not a crate: five solid faces and one you can walk
-   * straight through, with something worth having inside.
+  /* A crate that is not a crate: solid from every side, with one face you can
+   * walk straight through and something worth having inside.
    *
-   * The face that opens is an ordinary wall in every way that can be seen. It
-   * is the same mesh, the same material and the same size as the others, it
-   * casts the same shadow, and a round stops on it exactly as it would on any
-   * of them — so there is no angle, and no shot, that gives it away. The only
-   * thing it does not do is stop a player.
+   * The outside is ONE box. Not four walls and a lid arranged into a box — one
+   * mesh, the same BoxGeometry an ordinary crate is made of, the same material,
+   * the same shadow. That is the whole trick, and the first version got it
+   * wrong: four wall boxes overlap in a thickness-square column at each corner,
+   * which z-fights, and a lid sized to the inner walls is inset from the outer
+   * ones by half a thickness, which leaves a step along the top edge. Every one
+   * of those seams was a sign saying "this crate is different from the others".
+   * There is nothing to see on a single box because there is nothing there to
+   * come apart.
+   *
+   * What makes it a room is a second, smaller box turned inside out — a
+   * BackSide material, so it draws its inner surfaces and nothing else. From
+   * outside it is completely hidden behind the opaque shell; from inside it is
+   * the walls. Both stop rounds, so a shot from outside stops on the shell and
+   * a shot from inside stops on the lining, which is what any other room does.
+   *
+   * Only the collider lists know the difference. Three of the four walls are on
+   * both lists; the fourth is on the NPCs' list alone. That is where the secret
+   * lives now — not in the geometry, where it could be seen.
    *
    * It does stop NPCs, which is not physics but is the point: a wanderer
    * strolling out of a solid crate would tell everybody where the secret was,
-   * and one strolling in would get stuck inside it. They are resolved against
-   * their own list — see npcColliders — which is the collider list plus these.
+   * and one strolling in would get stuck inside it.
    */
   var secrets = [];
+  var SECRET_WALL = 0.4;      // how thick the walls read from inside
+
+  /* One inside-out material per crate material, made once. A clone per room
+   * would compile a shader per room, and they are built during world
+   * generation where that is a stall rather than a cost. */
+  var linings = obstacleMats.map(function (m) {
+    var lining = m.clone();
+    lining.side = THREE.BackSide;
+    return lining;
+  });
 
   function addSecret(x, z, size, height) {
-    var mat = pickMat();
-    var t = 0.4;
-    var parts = [];
+    var pick = Math.floor(rand() * obstacleMats.length);
+    var mat = obstacleMats[pick];
+    var t = SECRET_WALL;
     var half2 = size / 2;
-    // which face opens; the rest are ordinary walls
+    var parts = [];
+    // which face opens; nothing about the shape says which, or that any does
     var door = Math.floor(rand() * 4);
 
-    for (var side = 0; side < 4; side++) {
-      var alongX = side % 2 === 0;
-      var sign = side < 2 ? -1 : 1;
-      var cx = alongX ? 0 : sign * half2;
-      var cz = alongX ? sign * half2 : 0;
-      var w = alongX ? size : t;
-      var d = alongX ? t : size;
+    /* The shell. Built exactly the way addObstacle builds a crate, because
+     * being exactly a crate is the entire point. */
+    var shell = new THREE.Mesh(new THREE.BoxGeometry(size, height, size), mat);
+    shell.position.set(x, height / 2, z);
+    shell.castShadow = shell.receiveShadow = true;
+    shell.name = 'secret';
+    scene.add(shell);
+    shell.updateMatrixWorld(true);
+    solidMeshes.push(shell);
+    obstacleMeshes.push(shell);
+    obstacleBoxes.push(new THREE.Box3().setFromObject(shell));
+    parts.push(shell);
 
-      if (side !== door) {
-        parts.push(addPart(mat, x + cx, height / 2, z + cz, w, height, d, 'secretWall'));
-        continue;
+    /* The lining, which is only ever seen from inside. It reaches below the
+     * floor so its own underside is never the thing you are looking at, and it
+     * casts nothing: it is inside an opaque box, so a shadow from it could only
+     * ever leak out through a corner. */
+    var lining = new THREE.Mesh(
+      new THREE.BoxGeometry(size - t * 2, height * 2, size - t * 2), linings[pick]);
+    lining.position.set(x, (height - t) - height, z);
+    lining.castShadow = false;
+    lining.receiveShadow = true;
+    lining.name = 'secretLining';
+    scene.add(lining);
+    lining.updateMatrixWorld(true);
+    solidMeshes.push(lining);
+    parts.push(lining);
+
+    /* Four walls and a lid, as colliders only — nothing draws these.
+     *
+     * They tile the shell exactly rather than overlapping: the two that run
+     * along x span the full width, and the two that run along z stop short of
+     * them. Colliders do not z-fight, but a player stopped twice by the same
+     * corner is a player who gets stuck in it.
+     */
+    var blocks = [];
+    var walls = [];
+    var inner = half2 - t;
+    for (var side = 0; side < 4; side++) {
+      var box;
+      if (side === 0) {                   // -z
+        box = new THREE.Box3(
+          new THREE.Vector3(x - half2, 0, z - half2),
+          new THREE.Vector3(x + half2, height - t, z - inner));
+      } else if (side === 2) {            // +z
+        box = new THREE.Box3(
+          new THREE.Vector3(x - half2, 0, z + inner),
+          new THREE.Vector3(x + half2, height - t, z + half2));
+      } else if (side === 1) {            // -x
+        box = new THREE.Box3(
+          new THREE.Vector3(x - half2, 0, z - inner),
+          new THREE.Vector3(x - inner, height - t, z + inner));
+      } else {                            // +x
+        box = new THREE.Box3(
+          new THREE.Vector3(x + inner, 0, z - inner),
+          new THREE.Vector3(x + half2, height - t, z + inner));
       }
-      /* The way in. Built like any other face and put on every list a wall is
-       * on — drawn, shot at, and solid to anything that is not a player —
-       * except the one that decides where a player may walk. */
-      var m = new THREE.Mesh(new THREE.BoxGeometry(w, height, d), mat);
-      m.position.set(x + cx, height / 2, z + cz);
-      m.castShadow = m.receiveShadow = true;
-      m.name = 'secretWall';
-      scene.add(m);
-      m.updateMatrixWorld(true);
-      var box = new THREE.Box3().setFromObject(m);
-      solidMeshes.push(m);
-      obstacleMeshes.push(m);
-      obstacleBoxes.push(box);
-      npcColliders.push(box);
-      parts.push(m);
+      walls.push(box);
+      blocks.push(box);
+      // the way in is solid to everything in the world except a player
+      if (side === door) npcColliders.push(box);
+      else addCollider(box);
     }
 
-    // a lid, so it reads as a solid block from the balcony as well as the floor
-    parts.push(addPart(mat, x, height + t / 2, z, size, t, size, 'secretLid'));
+    // and a lid, so the roof can be stood on rather than fallen through
+    var lid = new THREE.Box3(
+      new THREE.Vector3(x - half2, height - t, z - half2),
+      new THREE.Vector3(x + half2, height, z + half2));
+    addCollider(lid);
+    blocks.push(lid);
 
     interiors.push(new THREE.Box3(
-      new THREE.Vector3(x - half2 + t, 0, z - half2 + t),
-      new THREE.Vector3(x + half2 - t, height, z + half2 - t)
+      new THREE.Vector3(x - inner, 0, z - inner),
+      new THREE.Vector3(x + inner, height - t, z + inner)
     ));
 
     var s = structureOf('secret', parts);
@@ -527,6 +590,9 @@ PB.createWorld = function (ctx) {
     s.size = size;
     s.height = height;
     s.door = door;
+    s.walls = walls;            // the four, in side order
+    s.blocks = blocks;          // everything it puts on a collider list
+    s.doorBox = walls[door];
     secrets.push(s);
     return s;
   }

@@ -416,7 +416,12 @@ function ranOnFrom(room, player) {
   const stepMs = 1000 / 30;
   const gapWanted = globalThis.PB.HIT.half * 4;    // two clear box widths
 
-  for (const npc of g.npcs.filter(n => n.alive && n.grounded)) {
+  /* Wanderers only. A hunter takes three rounds, so picking one turns "did
+   * the rewind credit the hit" into "did one round kill a hunter", which is a
+   * different question with the answer no. It used to pick whatever the arena
+   * offered first and got away with it because the hunter happened not to
+   * qualify on the seeds in use — a piece of luck, not a rule. */
+  for (const npc of g.npcs.filter(n => n.alive && n.grounded && !n.hunter)) {
     const seen = npc.root.position.clone().setY(1.0);
     if (!standClear(room, player, seen)) continue;
 
@@ -1405,8 +1410,8 @@ test('the snapshot carries what is left of every NPC', () => {
   g.hitNPC(enemy, 1);
 
   const entry = room.snapshot().npcs[g.npcs.indexOf(enemy)];
-  assert.equal(entry[8], g.cfg.hunterHealth - 1, 'the health did not travel');
-  assert.equal(entry[9], g.cfg.hunterHealth, 'nor did what it started with');
+  assert.equal(entry[9], g.cfg.hunterHealth - 1, 'the health did not travel');
+  assert.equal(entry[10], g.cfg.hunterHealth, 'nor did what it started with');
 });
 
 test('the levels bring more hunters, the same way on both sides', () => {
